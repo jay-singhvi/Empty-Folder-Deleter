@@ -5,6 +5,78 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.5: `media_resize` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.5. User page: `docs/tools/media_resize.md`.
+
+#### Added
+- `tools/media_resize/`: options (`MediaResizeOptions`, `extra="forbid"`) and the `MediaResize` tool.
+  `scan()` works out the new size of each image and video, encodes images in memory to report their
+  exact output size, and writes nothing. Each resize is a planned `convert` action. `apply()` writes
+  the outputs through the generic engine, so each one is journaled.
+- `tools/media_resize/geometry.py`: the size rules, as pure functions. `fit_box` is `app.py`'s rule
+  (both sides must exceed the box). `shorter_side` and `longer_side` are metadata-8's formula.
+  `percent` is `app.py`'s. Video sizes are made even, as `app.py` does.
+- `tools/media_resize/images.py`: decode (through `core/media/imaging.open_image`), EXIF orientation,
+  resize, and encode with the metadata kept. Writes go through a temporary file, with the size checked
+  before the rename, and the source's modified time is kept.
+- `tools/media_resize/videos.py`: the ffmpeg arguments from `app.py` (scale, H.264 at the chosen CRF,
+  audio copied) and the dry-run size estimate from `app.py`.
+- `core/deps.py`: `ExternalTools.ffmpeg()`, a named accessor, as `exiftool()` and `ffprobe()` already
+  are, so tool code never spells out a program name.
+- `pyproject.toml`: the `media_resize` entry point.
+- Tests (`tests/tools/media_resize/`, 41 tests). **Parity with `legacy/app.py`:** the legacy Streamlit
+  script runs as it is, with only the Streamlit and pandas modules stubbed. It gets the same answers
+  as the tool's options, and the two output folders must match file by file (name and size). Three
+  configurations are checked for images (preset 1080p, custom 1280×720, percentage 50), and one for
+  videos (720p). Also: the size rules, the defaults, the 🔒 never-upscale rule, scan changing nothing,
+  originals untouched, the modified time kept, existing outputs never overwritten, batch name claims,
+  cloud-only files never read, suffix output not rescanned, recursion skipping the output folder,
+  protected roots, motion photos left alone, metadata kept and orientation applied once, missing
+  ffmpeg, RAW conversion needing ExifTool, bad options, a saved plan applied later, a 90° rotated
+  video resized to the size the viewer shows, and undo reporting outputs as manual.
+- `docs/tools/media_resize.md`: user page.
+
+#### Changed
+- Nothing outside the new tool, apart from `core/deps.py` (the accessor), the entry point, and this
+  changelog.
+
+#### Decisions (not covered by the plan)
+- **🔒 `never_upscale` is locked on.** The field exists so the rule is visible, but it only accepts
+  `True`. Every mode also checks again that the target is not larger than the file.
+- **Overwriting the original is not offered** (the plan lists `overwrite`). Undo cannot restore a
+  replaced file, so the safer option is to keep the originals. Only `new_folder` and `suffix` remain.
+- **CR3 originals are kept.** The plan says to remove them after the JPEG is verified (metadata-8
+  removed them). Removing them needs the same undo decision as the Duplicate Finder's trash action, so
+  I left it for the owner. The RAW path (rawpy decode, ExifTool metadata copy, size check, rename) is
+  written, but **not run end-to-end**: there is no sample CR3 in the repository, and I did not add one.
+- **Undo cannot reverse a resize.** `core/journal.py` treats a `convert` as not reversible, so undo
+  lists each output as "restore manually" and deletes nothing. This is the same engine limit that
+  Phase 3.4 notes for trash.
+- **Shorter-side and longer-side use metadata-8's formula** (rounded sides). `fit_box` and percentage
+  use `app.py`'s (truncated sides). The metadata-8 script cannot be imported without pandas, so
+  its formula is tested by value, not by running the script.
+- **JPEG quality defaults to 85** (`app.py`, and the plan), not 95 (metadata-8).
+- **Percentage 100 is a no-op,** so it is not listed. `app.py` would re-encode the file.
+- **Animated images, motion photos and HDR JPEGs are left alone.** `app.py` resized them anyway,
+  dropping frames or embedded data. metadata-8 already skipped them, so I followed metadata-8.
+- **HEIC and HEIF are not resized** here; they are not in `app.py`'s format list. Phase 7 can add them.
+- **Rotated videos:** ffmpeg applies the stored rotation, and the target is given in the orientation
+  the viewer sees. `app.py` swaps the target for rotated videos. I did not run `app.py` on a rotated
+  video, so I cannot say what its output is. The tool's output is checked with ffprobe.
+- **Output folder is excluded from the scan** by its position (`<root>/<output folder>/`), not by name
+  anywhere in the tree. In suffix mode, files named `*_resized` are not scanned.
+- **Image sizes are exact** (encoded in memory during scan). **Video sizes are estimates** (`app.py`'s
+  dry-run formula), and the plan says so.
+- **Each apply re-reads the image** to render it again, so the output reflects the file as it is at
+  apply time. A file that changed since the scan is handled the same way as a new file.
+- **Metadata:** the EXIF block is kept, with the orientation reset to 1 because the pixels are already
+  turned. The source's modified time is copied to the output.
+- **`_root_refusal` is a fourth local copy** (rename, project_export and duplicates each have one). It
+  should move into `core/fs.py` in a later cleanup, together with the others.
+- **Local environment note:** `uv` is not on this machine, so the entry point was added to the venv's
+  installed metadata by hand. `uv sync` regenerates the same entry.
+
 ### Phase 3.4: `duplicates` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.4. User page: `docs/tools/duplicates.md`.

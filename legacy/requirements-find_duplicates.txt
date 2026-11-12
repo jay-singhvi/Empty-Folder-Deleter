@@ -1,0 +1,4 @@
+ImageHash
+numpy
+pillow
+pillow-heif

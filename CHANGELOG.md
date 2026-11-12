@@ -5,6 +5,61 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.3: `rename` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.3. User page: `docs/tools/rename.md`.
+
+#### Added
+- `tools/rename/`: options (`RenameOptions`, `extra="forbid"`) and the `Rename` tool. `scan()` dates
+  each matching file, numbers it and works out the new names, and writes nothing. The plan lists
+  every old → new name. `apply()` renames the selected files through the generic engine, so each
+  rename is journaled and can be undone from History.
+- `tools/rename/presets.py`: three presets. `snapchat` reproduces `legacy/rename_snapchat.py`. `whatsapp`
+  and `screenshot` are built-in examples named in the plan.
+- `tools/rename/naming.py`: pure helpers for dates in file names, name templates, letter case and
+  Windows file-name rules.
+- `pyproject.toml`: the `rename` entry point.
+- Tests (`tests/tools/rename/`, 34 tests). Parity with `legacy/rename_snapchat.py`: the same tree is
+  renamed by the legacy script and by the tool, and every file ends with the same name. Also: scan
+  writes nothing, apply then undo restores every name, a saved plan applied later, existing files
+  never overwritten, names claimed twice in one batch, a re-check at apply time, a plan edited to
+  select a blocked row, case-only changes, each date source, cloud-only files never read, bad
+  options, invalid Windows names, counters per minute, per day and global, recursion, overlapping
+  roots, protected roots, and junctions that are not followed.
+- `docs/tools/rename.md`: user page.
+
+#### Changed
+- `core/deps.py`: `ExternalTools.exiftool()` and `ffprobe()`, named accessors. Tool code uses them
+  instead of spelling out a program name, which AGENTS.md keeps inside `core/deps.py`.
+
+#### Decisions (not covered by the plan)
+- **The `whatsapp` and `screenshot` presets are my reading** of the plan's "WhatsApp IMG-…" and
+  "Screenshot_…" examples. Their templates and matches are data in `presets.py` and easy to change.
+- **A taken name is never renamed to `_dupN`.** The engine adds a `_dupN` suffix when a move's target
+  exists. For a rename that would change a name the user previewed, so the tool lists the row
+  unselected instead. Apply checks the names again, so a plan that is old, or edited, cannot rename
+  onto a file that has appeared since.
+- **Renames that change only letter case are listed, not performed.** The engine treats the file as
+  taken, which would give a `_dupN` name. Fixing this needs an engine change, so it is deferred.
+- **The extension is the only part of the name whose case the `case` option changes.** The name
+  itself is kept.
+- **`{ext}` is required in every template,** so a file keeps its type.
+- **Counters are kept per folder** for `per-minute` and `per-day`, and across the whole batch for
+  `global`. Files are numbered in date order. Files with the same date are numbered by name, not by
+  the directory order the legacy script happened to get.
+- **Only files are renamed.** The legacy script also renamed folders whose names matched.
+- **Recursion is off by default,** as in the legacy script.
+- **Matching ignores letter case,** as Windows does. Regular expressions use `IGNORECASE` too.
+- **`capture` date source:** EXIF, then ExifTool, then ffprobe for videos. A cloud-only file is never
+  read for its capture date. Renaming it by modified or created time changes only the name, so that
+  is allowed.
+- **`created` uses the file's creation time** (`st_birthtime` where Python provides it, otherwise
+  `st_ctime`, which on Windows is the creation time).
+- **Filename dates must fall in or after `min_plausible_year`** from the settings, and a file name
+  that holds no valid date is skipped with a note.
+- **Each root is checked by a local copy of the root refusal from `project_export`.** It is not
+  shared yet, and moving it into `core/fs.py` is a candidate for a later cleanup.
+
 ### Phase 3.2: `project_export` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.2. User page: `docs/tools/project_export.md`.

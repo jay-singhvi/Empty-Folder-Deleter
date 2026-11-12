@@ -28,6 +28,7 @@ various-tools-gui = "various_tools.gui.app:main"
 [project.entry-points."various_tools.tools"]
 empty_folders = "various_tools.tools.empty_folders:TOOL"
 project_export = "various_tools.tools.project_export:TOOL"
+rename = "various_tools.tools.rename:TOOL"
 
 [dependency-groups]
 gui = [

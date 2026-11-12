@@ -253,6 +253,13 @@ class ExternalTools:
         location = self.resolve(tool)
         return location.path if location.valid else None
 
+    # Named accessors, so that tool code never spells out a program name (AGENTS.md).
+    def exiftool(self) -> Path | None:
+        return self.path("exiftool")
+
+    def ffprobe(self) -> Path | None:
+        return self.path("ffprobe")
+
     # ----- executables -------------------------------------------------
 
     def _resolve_exe(self, tool: str) -> ToolLocation:

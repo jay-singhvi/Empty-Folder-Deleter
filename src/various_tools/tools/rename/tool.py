@@ -1,0 +1,451 @@
+"""Rename (plan §3.3): give a batch of files one name pattern, e.g. Snapchat or WhatsApp exports.
+
+Each matching file is dated (capture time, modified or created time, or a date in its name),
+numbered per minute, per day or over the whole batch, and renamed to the template. ``scan()``
+changes nothing; the plan lists every old → new name. ``apply()`` renames through the generic
+engine, so every rename is journaled and can be undone from History.
+
+Rules:
+* a name that is taken, either by a file on disk or by another file in the batch, is never
+  overwritten. The row is listed but not selected, with the reason. Apply checks again, so a
+  plan that was edited or left for a while cannot rename onto a file that appeared since;
+* cloud-only OneDrive files are never read (AGENTS.md rule 3). Their capture date is skipped;
+  renaming them by modified or created time changes only the name;
+* junctions and symlinks are not followed (rule 4), and a root folder is never renamed;
+* protected folders are refused (rule 6), and the engine guards every action again at apply time.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import os
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+
+from various_tools.core.context import RunContext
+from various_tools.core.fs import (
+    FILE_ATTRIBUTE_REPARSE_POINT,
+    FileInfo,
+    is_inside,
+    long_path,
+    protected_reason,
+    walk,
+)
+from various_tools.core.media import ffmpeg
+from various_tools.core.media.exif import capture_time, is_plausible_date
+from various_tools.core.onedrive import CloudOnlyFileError, is_on_device, status_from_attributes
+from various_tools.core.plan import (
+    ActionKind,
+    ActionOutcome,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+)
+from various_tools.tools.base import ToolOptions
+from various_tools.tools.rename.naming import (
+    CaseMode,
+    apply_case,
+    date_from_filename,
+    name_problem,
+    render_name,
+    template_fields,
+    template_problem,
+)
+from various_tools.tools.rename.presets import (
+    PRESETS,
+    CounterScope,
+    DateSource,
+    MatchMode,
+    RenameSpec,
+)
+
+TOOL_ID = "rename"
+PresetName = Literal["custom", "snapchat", "whatsapp", "screenshot"]
+
+
+class RenameOptions(ToolOptions):
+    roots: list[Path] = Field(
+        default_factory=list,
+        json_schema_extra={"widget": "folders", "group": "Files"},
+    )
+    recursive: bool = Field(
+        default=False,
+        json_schema_extra={"group": "Files", "advanced": True},
+    )
+    preset: PresetName = Field(
+        default="custom",
+        json_schema_extra={"group": "Match"},
+    )
+    match: str | None = Field(
+        default=None,
+        json_schema_extra={"group": "Match"},
+    )
+    match_mode: MatchMode | None = Field(
+        default=None,
+        json_schema_extra={"group": "Match", "advanced": True},
+    )
+    template: str | None = Field(
+        default=None,
+        json_schema_extra={"widget": "template", "group": "Name"},
+    )
+    date_source: DateSource | None = Field(
+        default=None,
+        json_schema_extra={"group": "Name"},
+    )
+    counter_scope: CounterScope | None = Field(
+        default=None,
+        json_schema_extra={"group": "Name"},
+    )
+    case: CaseMode | None = Field(
+        default=None,
+        json_schema_extra={"group": "Name", "advanced": True},
+    )
+
+
+def resolve_spec(opts: RenameOptions) -> tuple[RenameSpec | None, str | None]:
+    """The effective rename settings: the preset, with any explicit option overriding it.
+
+    Returns ``(spec, None)``, or ``(None, problem)`` when the options cannot be used. A custom
+    match pattern is a glob unless ``match_mode`` says regex, even when a preset is chosen.
+    """
+    base = PRESETS.get(opts.preset)
+    if opts.match is not None:
+        match, default_mode = opts.match, "glob"
+    elif base is not None:
+        match, default_mode = base.match, base.match_mode
+    else:
+        return None, "Choose a preset, or give a match pattern and a name template."
+    if not match:
+        return None, "The match pattern is empty."
+
+    template = opts.template if opts.template is not None else (base.template if base else None)
+    if template is None:
+        return None, "Choose a preset, or give a name template."
+
+    spec = RenameSpec(
+        label=base.label if base is not None else "Custom rename",
+        match=match,
+        match_mode=opts.match_mode or default_mode,
+        template=template,
+        date_source=opts.date_source or (base.date_source if base else "modified"),
+        counter_scope=opts.counter_scope or (base.counter_scope if base else "per-minute"),
+        case=opts.case or (base.case if base else "keep"),
+    )
+    if spec.match_mode == "regex":
+        try:
+            re.compile(spec.match, re.IGNORECASE)
+        except re.error as exc:
+            return None, f"The match pattern is not a valid regular expression: {exc}"
+    problem = template_problem(spec.template)
+    if problem is not None:
+        return None, problem
+    try:
+        render_name(
+            spec.template,
+            when=datetime(2000, 1, 1, 12, 0),
+            has_time=True,
+            counter=1,
+            ext=".jpg",
+            stem="name",
+        )
+    except (KeyError, ValueError, TypeError, IndexError, AttributeError) as exc:
+        return None, f"The name template cannot be used: {exc}"
+    return spec, None
+
+
+@dataclass(frozen=True)
+class _Dated:
+    info: FileInfo
+    when: datetime
+    has_time: bool
+
+
+def _folder_key(path: Path) -> str:
+    return os.path.normcase(str(path.parent))
+
+
+def _claim_key(path: Path) -> tuple[str, str]:
+    """Two names clash when they sit in the same folder and differ only by letter case."""
+    return _folder_key(path), path.name.casefold()
+
+
+def _root_refusal(root: Path, ctx: RunContext) -> str | None:
+    """Why ``root`` cannot be used, or None. Opens no file; lists nothing."""
+    if not root.is_dir():
+        return f"Not a folder: {root}"
+    try:
+        attributes = getattr(
+            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
+        )
+    except OSError as exc:
+        return f"Could not read the folder: {exc.strerror or exc}"
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        return f"Junction or symlink, not followed: {root}"
+    reason = protected_reason(root)
+    if reason and not ctx.settings.allow_protected_paths:
+        return f"Protected folder refused ({reason}): {root}"
+    return None
+
+
+def _name_matches(name: str, spec: RenameSpec) -> bool:
+    if spec.match_mode == "regex":
+        return re.fullmatch(spec.match, name, re.IGNORECASE) is not None
+    return fnmatch.fnmatch(name, spec.match)
+
+
+def _matching(roots: Iterable[Path], spec: RenameSpec, recursive: bool) -> list[FileInfo]:
+    """Files whose name matches, once each even when roots overlap."""
+    seen: set[str] = set()
+    found: list[FileInfo] = []
+    for root in roots:
+        for info in walk(root, recursive=recursive):
+            key = os.path.normcase(os.path.abspath(info.path))
+            if key in seen:
+                continue
+            seen.add(key)
+            if _name_matches(info.path.name, spec):
+                found.append(info)
+    return found
+
+
+def _cloud_only(info: FileInfo) -> bool:
+    return not is_on_device(status_from_attributes(info.attributes))
+
+
+def _capture(info: FileInfo, ctx: RunContext) -> datetime | None:
+    """EXIF, then ExifTool, then ffprobe for videos. Only called for files on the device."""
+    min_year = ctx.settings.min_plausible_year
+    try:
+        when = capture_time(info.path, exiftool=ctx.deps.exiftool(), min_year=min_year)
+    except OSError, CloudOnlyFileError:
+        when = None
+    if when is None:
+        ffprobe = ctx.deps.ffprobe()
+        if ffprobe is not None:
+            video_time = ffmpeg.creation_time(ffprobe, info.path)
+            if is_plausible_date(video_time, min_year=min_year):
+                when = video_time
+    return when
+
+
+def _when(info: FileInfo, spec: RenameSpec, ctx: RunContext) -> tuple[datetime, bool] | str:
+    """The date for a file as ``(when, has_time)``, or the reason it has none."""
+    if spec.date_source == "filename":
+        found = date_from_filename(info.path.name, ctx.settings.min_plausible_year)
+        return found if found is not None else "no date in the file name"
+    if spec.date_source == "modified":
+        return datetime.fromtimestamp(info.mtime), True
+    if spec.date_source == "created":
+        try:
+            stat = os.stat(long_path(info.path))
+        except OSError as exc:
+            return f"could not read the date ({exc.strerror or exc})"
+        return datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime)), True
+    # capture: the file's contents are read, so cloud-only files are never touched.
+    if _cloud_only(info):
+        return "cloud-only, not read"
+    when = _capture(info, ctx)
+    return (when, True) if when is not None else "no capture date"
+
+
+def _dated(
+    infos: list[FileInfo], spec: RenameSpec, ctx: RunContext, notes: list[str]
+) -> list[_Dated]:
+    """Date every file. Files without a usable date are listed in ``notes`` and left out."""
+    uses_time = "time" in template_fields(spec.template)
+    dated: list[_Dated] = []
+    total = len(infos)
+    for index, info in enumerate(infos, start=1):
+        ctx.check_cancelled()
+        ctx.report(index - 1, total, f"Dating {info.path.name}")
+        result = _when(info, spec, ctx)
+        if isinstance(result, str):
+            notes.append(f"skipped: {result}: {info.path}")
+            continue
+        when, has_time = result
+        if uses_time and not has_time:
+            notes.append(f"skipped: the template needs a time, and this file has none: {info.path}")
+            continue
+        dated.append(_Dated(info, when, has_time))
+    ctx.report(total, total, "Dated")
+    return dated
+
+
+def _scope_key(when: datetime, scope: CounterScope, folder: str) -> tuple[str, str]:
+    """The group that a counter counts within. ``global`` counts across the whole batch."""
+    if scope == "global":
+        return ("", "")
+    if scope == "per-day":
+        return (folder, when.strftime("%Y%m%d"))
+    return (folder, when.strftime("%Y%m%d-%H_%M"))
+
+
+def _conflict(src: Path, dst: Path) -> str | None:
+    """Why ``src`` cannot be renamed to ``dst``, or None. Checks the disk, never changes it."""
+    if dst.name == src.name:
+        return "it already has this name"
+    if dst.name.casefold() == src.name.casefold():
+        return "only the letter case changes"
+    if os.path.lexists(long_path(dst)):
+        return "a file with this name already exists"
+    return None
+
+
+def _actions(dated: list[_Dated], spec: RenameSpec, notes: list[str]) -> list[PlannedAction]:
+    """Number and name every dated file, in date order, and mark the names that cannot be used."""
+    ordered = sorted(
+        dated,
+        key=lambda d: (d.when, _folder_key(d.info.path), d.info.path.name.casefold()),
+    )
+    counts: dict[tuple[str, str], int] = {}
+    claimed: set[tuple[str, str]] = set()
+    actions: list[PlannedAction] = []
+    for item in ordered:
+        src = item.info.path
+        scope_key = _scope_key(item.when, spec.counter_scope, _folder_key(src))
+        counts[scope_key] = counts.get(scope_key, 0) + 1
+        new_name = render_name(
+            spec.template,
+            when=item.when,
+            has_time=item.has_time,
+            counter=counts[scope_key],
+            ext=apply_case(src.suffix, spec.case),
+            stem=src.stem,
+        )
+        if new_name == src.name:
+            notes.append(f"unchanged, already has this name: {src}")
+            continue
+        problem = name_problem(new_name)
+        if problem is not None:
+            notes.append(f"skipped: the new name {new_name!r} {problem}: {src}")
+            continue
+        dst = src.parent / new_name
+        conflict = _conflict(src, dst)
+        if conflict is None and _claim_key(dst) in claimed:
+            conflict = "another file in this batch takes this name"
+        if conflict is None:
+            claimed.add(_claim_key(dst))
+            actions.append(
+                PlannedAction(
+                    kind=ActionKind.RENAME, src=src, dst=dst, reason=f"rename to {new_name}"
+                )
+            )
+        else:
+            actions.append(
+                PlannedAction(
+                    kind=ActionKind.RENAME,
+                    src=src,
+                    dst=dst,
+                    reason=f"not renamed: {conflict} ({new_name})",
+                    selected=False,
+                )
+            )
+    return actions
+
+
+def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
+    """Clear the selection of any rename whose name is now taken, so nothing is renamed onto a
+    file. Returns the plan to run and the outcomes of the rows that were dropped."""
+    refused = [root for root in plan.roots if _root_refusal(root, ctx) is not None]
+    claimed: set[tuple[str, str]] = set()
+    kept: list[PlannedAction] = []
+    dropped: list[ActionOutcome] = []
+    for seq, action in enumerate(plan.actions, start=1):
+        if (
+            not action.selected
+            or action.kind is not ActionKind.RENAME
+            or action.src is None
+            or action.dst is None
+        ):
+            kept.append(action)
+            continue
+        reason: str | None
+        if any(is_inside(action.src, root) for root in refused):
+            reason = "its root folder is refused"
+        else:
+            reason = _conflict(action.src, action.dst)
+            if reason is None and _claim_key(action.dst) in claimed:
+                reason = "another file in this batch takes this name"
+        if reason is not None:
+            kept.append(replace(action, selected=False))
+            dropped.append(
+                ActionOutcome(
+                    seq,
+                    str(action.kind),
+                    "skipped",
+                    str(action.src),
+                    str(action.dst),
+                    f"not renamed: {reason}",
+                )
+            )
+            continue
+        claimed.add(_claim_key(action.dst))
+        kept.append(action)
+    return replace(plan, actions=kept), dropped
+
+
+class Rename:
+    id = TOOL_ID
+    name = "Rename"
+    description = (
+        "Give a batch of files one name pattern, dated from their capture, modified or created "
+        "time, or from a date in the name. Built-in presets cover Snapchat, WhatsApp and "
+        "screenshot files."
+    )
+    category = "Organize"
+    Options = RenameOptions
+
+    def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:
+        if not isinstance(opts, RenameOptions):
+            raise TypeError("Rename.scan needs RenameOptions")
+        plan = Plan(tool=self.id, roots=[], options_json=opts.model_dump_json())
+        spec, problem = resolve_spec(opts)
+        if spec is None:
+            plan.notes.append(problem or "The options cannot be used.")
+            return plan
+        if not opts.roots:
+            plan.notes.append("Choose at least one folder.")
+            return plan
+
+        roots: list[Path] = []
+        for raw in opts.roots:
+            root = Path(os.path.abspath(raw))
+            refusal = _root_refusal(root, ctx)
+            if refusal is None:
+                roots.append(root)
+            else:
+                plan.notes.append(refusal)
+        if not roots:
+            plan.notes.append("Nothing to rename.")
+            return plan
+        plan.roots = roots
+
+        infos = _matching(roots, spec, opts.recursive)
+        dated = _dated(infos, spec, ctx, plan.notes)
+        actions = _actions(dated, spec, plan.notes)
+        plan.actions = actions
+        renamed = sum(1 for a in actions if a.selected)
+        blocked = len(actions) - renamed
+        plan.notes.insert(
+            0,
+            f"{spec.label}: {len(infos)} file(s) match. {renamed} will be renamed; "
+            f"{blocked} cannot be renamed because the name is taken.",
+        )
+        ctx.log.info("rename scan: %d match, %d to rename", len(infos), renamed)
+        return plan
+
+    def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
+        checked, dropped = _recheck(plan, ctx)
+        result = apply_plan(checked, ctx)
+        result.outcomes.extend(dropped)
+        return result
+
+
+TOOL = Rename()

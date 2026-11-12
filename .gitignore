@@ -163,3 +163,5 @@ cython_debug/
 
 # Various Tools: binaries are built by CI and published to GitHub Releases, never committed
 *.exe
+
+.claude/

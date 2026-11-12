@@ -41,6 +41,7 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1.390",
     "pre-commit>=4.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.uv]

@@ -5,6 +5,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 1: Skeleton & tooling (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 1.
+
+#### Added
+- `pyproject.toml`: uv project with a hatchling build and `src/` layout. Dependency groups `gui`,
+  `media` and `dev`; `uv sync` installs all three. Version `0.1.0` is the only version field.
+- `uv.lock`, and `.python-version` pinned to **3.14**.
+- `src/various_tools/` skeleton: `core/`, `tools/`, `cli/`, `gui/`. `__version__` is read from
+  package metadata.
+- `various-tools` CLI (Typer) with a `version` command, and `various-tools-gui`, which opens a
+  placeholder window. Qt is imported only inside the GUI package.
+- Tests: version, CLI and GUI smoke tests. Qt runs offscreen, so no display is needed.
+- Quality tooling: ruff (lint and format), pyright (basic, strict on `core/`), pytest, and
+  pre-commit (ruff and pyright hooks).
+- `.github/workflows/ci.yml`: lint, format check, type check and tests on `windows-latest`.
+
+#### Changed
+- `.gitignore`: ignores `.claude/`, `.ruff_cache/` and `.pyright/`.
+
+#### Decisions (not covered by the plan)
+- **Python 3.14, not 3.13.** Python 3.15 fails: `pyyaml` (a pre-commit dependency) has no 3.15
+  wheel. Python 3.14 installs every dependency from wheels.
+- ruff skips `legacy/` and the root `empty_folder_deleter.py` until Phase 3 ports them, and it
+  formats only Python files. The pre-commit ruff hooks are limited to Python for the same reason.
+- CI does not install ffmpeg yet, because Phase 1 has no media tests. Phase 2 adds it.
+
 ### Phase 0: Prep (2026-11-11)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 0.

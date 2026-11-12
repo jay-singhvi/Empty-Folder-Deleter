@@ -1,8 +1,14 @@
-# Empty Folder Deleter
+# Various Tools
 
-Empty Folder Deleter is a simple, user-friendly application designed to help you clean up your file system by identifying and removing empty folders. This tool is perfect for those who want to maintain a tidy directory structure and reclaim disk space.
+Various Tools is a collection of Windows utilities for tidying up files and media. It is being built as one installable app with a desktop GUI and a command-line interface. The plan is in [docs/MODERNIZATION_PLAN.md](docs/MODERNIZATION_PLAN.md).
 
-## Features
+This repository currently ships the original **Empty Folder Deleter** app. It is the first tool, and it is being rewritten as part of Various Tools. The description below covers that current app.
+
+## Empty Folder Deleter (current app)
+
+Empty Folder Deleter helps you clean up your file system by identifying and removing empty folders. It is useful for keeping a tidy directory structure and reclaiming disk space.
+
+### Features
 
 - **User-friendly GUI**: Easy-to-use interface for selecting the root directory to scan.
 - **Recursive Scanning**: Scans subdirectories to find all empty folders within a given directory.
@@ -19,7 +25,7 @@ Empty Folder Deleter is a simple, user-friendly application designed to help you
 
 ### Option 1: Install from Executable
 
-1. Download the latest `EmptyFolderDeleterSetup.exe` from the [Releases](https://github.com/your-username/empty-folder-deleter/releases) page.
+1. Download the latest `EmptyFolderDeleterSetup.exe` from the [Releases](https://github.com/jay-singhvi/Empty-Folder-Deleter/releases) page.
 2. Run the installer and follow the on-screen instructions.
 3. Once installed, you can run Empty Folder Deleter from the Start menu.
 
@@ -27,16 +33,13 @@ Empty Folder Deleter is a simple, user-friendly application designed to help you
 
 1. Clone this repository:
    ```
-   git clone https://github.com/your-username/empty-folder-deleter.git
+   git clone https://github.com/jay-singhvi/Empty-Folder-Deleter.git
    ```
 2. Navigate to the project directory:
    ```
-   cd empty-folder-deleter
+   cd Empty-Folder-Deleter
    ```
-3. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+3. No third-party packages are needed. The app uses only the Python standard library (Tkinter ships with Python).
 4. Run the application:
    ```
    python empty_folder_deleter.py
@@ -67,7 +70,7 @@ To build the executable from source:
 
 ## Contributing
 
-Contributions to Empty Folder Deleter are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please feel free to submit a Pull Request. Developer guidance (stack, layout, commands and safety rules) is in [AGENTS.md](AGENTS.md).
 
 ## License
 
@@ -80,7 +83,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-If you encounter any problems or have any suggestions, please [open an issue](https://github.com/your-username/empty-folder-deleter/issues) on GitHub.
+If you encounter any problems or have any suggestions, please [open an issue](https://github.com/jay-singhvi/Empty-Folder-Deleter/issues) on GitHub.
 
 ---
 

@@ -5,6 +5,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.1: `empty_folders` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.1. User page: `docs/tools/empty_folders.md`.
+
+#### Added
+- `tools/base.py`: the tool contract (`ToolOptions` with `extra="forbid"`, the `Tool` protocol) and
+  `discover()`, which reads the `various_tools.tools` entry-point group.
+- `tools/empty_folders/`: one bottom-up scan that plans every folder that will be empty, including
+  nested ones. Removals are ordered deepest first. Junk files (`desktop.ini`, `Thumbs.db`,
+  `.DS_Store`) go first, each as its own action. Plan groups point at the top of each empty tree.
+  `set_folder_selected()` unchecks a folder and every folder above it.
+- `pyproject.toml`: the `empty_folders` entry point.
+- Tests (`tests/tools/empty_folders/`, 22 tests): parity with the original app on a generated tree,
+  each §2.1 bug fix, the safety rules, and discovery. The parity test runs the original app's
+  `find_empty_folders` loop, read from `empty_folder_deleter.py` with `ast`, so tkinter is never
+  imported.
+- `docs/tools/empty_folders.md`: user page.
+
+#### Changed
+- `core/plan.py`: trash and delete now refuse a folder that still has contents. Before, a trash
+  of a parent would have sent its whole subtree to the Recycle Bin.
+- `tests/core/test_plan.py`: a refused non-empty delete is now reported as "skipped" with a clear
+  reason, not "failed". The run status is "done", as it is for other refusals.
+
+#### Fixed (from the original app, plan §2.1)
+- No `os.errno`. A failed removal is reported and the rest of the run goes on.
+- The selected root is never a target, even when it is empty.
+- Junctions and symlinks are never followed, and they count as content.
+- `desktop.ini`, `Thumbs.db` and `.DS_Store` count as empty.
+- One bottom-up pass instead of a rescan loop.
+- Removal goes to the Recycle Bin by default, and the apply engine journals it.
+- Bugs 3 (Tk threads), 8 (unused imports) and 9–11 (installer and version) are either GUI work
+  for Phase 5 or belong to the packaging phase. This module has none of them.
+
+#### Decisions (not covered by the plan)
+- **Parity reference is the root `empty_folder_deleter.py`**, not a file in `legacy/`. The legacy
+  README says the root app is ported here. Its source is read with `ast`, so the test runs the
+  original code without importing tkinter.
+- **Non-empty folders are refused by the core engine, not only by this tool.** Trash on a folder
+  takes everything inside it, so the check belongs with the generic guard. A hand-edited plan
+  cannot bypass it.
+- **`skip_hidden_system` defaults to on.** Hidden and system folders such as `$RECYCLE.BIN` or
+  `System Volume Information` are kept. The plan does not give a default.
+- **Excluded entries, junctions, symlinks, unreadable entries and hidden or too-recent folders all
+  count as content.** Their parents stay. This matches the original app, where `os.walk` lists a
+  symlinked folder under its parent's subfolders.
+- **Junk files are separate actions**, shown in the preview and journaled, so nothing is removed
+  without appearing in the plan.
+- **Options fields are typed with `json_schema_extra` widget hints** (`folders`, `glob_list`), as
+  §3.3 describes. The `treat_as_empty` names use the `glob_list` widget. Names match exactly,
+  without regard to case.
+- **Protected roots** (drive roots, the profile folder, Windows and Program Files) are refused
+  before anything is listed.
+- **Overlapping roots are scanned once**: a root inside another selected root is dropped.
+- **Delete mode is set on the tool and checked again by Settings.** `permanent` in the options
+  is not enough on its own: Settings must also allow permanent delete.
+
 ### Phase 2: Core library (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 2.

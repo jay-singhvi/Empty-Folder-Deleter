@@ -21,6 +21,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      # ffmpeg and ffprobe for the media tests. Those tests skip themselves when the programs are
+      # missing, so a failed install shows up as skipped tests rather than a red build.
+      - name: Install ffmpeg
+        run: choco install ffmpeg --no-progress -y
+
       - name: Lint
         run: uv run ruff check
 

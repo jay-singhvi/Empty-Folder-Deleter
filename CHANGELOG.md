@@ -5,6 +5,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 2: Core library (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 2.
+
+#### Added
+- `core/fs.py`: `walk()` (include/exclude globs, extensions, `.gitignore` via pathspec, never follows
+  junctions or symlinks), `FileInfo`, `unique_destination()`, `protected_reason()` and `long_path()`
+  (the `\\?\` prefix for paths past MAX_PATH).
+- `core/onedrive.py`: sync status from file attributes (`get_sync_status`, `is_on_device`,
+  `ensure_on_device`, `is_regular_file_no_hydrate`), `unpin_file()` and `force_download()`.
+  🔒 Cloud-only files are refused before any read. `force_download()` is for explicit user requests only.
+- `core/hashing.py`: streaming `sha256()`, `group_exact()` (size bucket, then hash; cloud-only files are
+  reported as skipped), `phash()`/`dhash()` (256-bit), `hamming()` and `band_keys()`. No thresholds here.
+- `core/media/imaging.py`: `open_image()` (HEIF registered, CR3 via rawpy under a lock) and an atomic
+  `save_jpeg()`.
+- `core/media/exif.py`: `read_exif()`, `capture_time()` (EXIF, then ExifTool for RAW), plausibility
+  check, GPS conversion.
+- `core/media/ffmpeg.py`: `ffprobe_json()`, `probe_duration()`, `display_size()` (rotation-aware),
+  `creation_time()`, `grab_frame()` (with the step-back rule) and `transcode()` (atomic output).
+- `core/deps.py`: finds ffmpeg, ffprobe, ExifTool and Ollama in the §3.5 order (override → env var →
+  PATH → known locations → disabled). Each candidate is checked by running its version command.
+  Results are cached, and `redetect()` clears them. Includes `winget` install hints and `run_tool()`.
+- `core/settings.py`: pydantic `Settings` with safe defaults (Recycle Bin, protected paths refused),
+  TOML load and save in `platformdirs.user_config_dir("Various Tools")`. A broken file is logged and
+  left in place.
+- `core/cache.py`: `FileCache`, a versioned SQLite cache keyed by path, size and mtime. A version or
+  name change drops it. Each write commits, so scans can resume.
+- `core/journal.py`: SQLite journal (`runs`, `actions`) and `undo_run()`. Moves and renames are moved
+  back. Trashed and deleted items cannot be restored by code, so they are listed for manual restore.
+- `core/plan.py`: `Plan`, `PlannedAction` (move, rename, trash, delete, write, convert), JSON
+  round-trip, and `apply_plan()`. Every action is journaled before it runs. Guard rules run again at
+  apply time, and a failed action does not stop the rest.
+- `core/context.py`: `RunContext` (settings, deps, journal, progress reporter, cancel event, logger)
+  and `Cancelled`.
+- `core/jsonutil.py`: `as_dict()` and `as_list()`, which narrow JSON data for strict type checking.
+- Tests (`tests/core/`, 164 in total) run on generated fixtures in `tmp_path` only. Image fixtures are
+  generated with Pillow. Video and ffprobe tests use ffmpeg when it is installed and skip otherwise.
+  External programs are fakes (`.bat` files), and the Recycle Bin is replaced by a recording fake.
+- `tests/conftest.py` shared fixtures: `make_image`, `fake_exe`, `make_video`, and session fixtures for
+  ffmpeg and ffprobe.
+- `pytest-cov` (dev group). Core coverage: 94%.
+- CI installs ffmpeg with Chocolatey before the tests run.
+
+#### Decisions (not covered by the plan)
+- **Duplicate name suffix is `_dupN`** (`photo_dup1.jpg`), as the duplicate finders use. The
+  metadata-8 style ` (n)` is not used, because `keeper.py` treats `(n)` as a copy marker.
+- **`attrib.exe` is called by absolute path** from `%SystemRoot%\System32`. Its name lives in
+  `core/deps.py` (`system_tool()`), so no other module names an executable.
+- **Plain pydantic instead of pydantic-settings.** Environment overrides are read in `deps.py`, and a
+  second `VARIOUS_TOOLS_` prefix would collide with them. TOML is written by a small serializer, so no
+  TOML writer dependency is needed.
+- **Outside Windows, an existing path reports `LOCAL`.** Placeholders only exist on Windows. This keeps
+  the code testable everywhere while the rule is enforced on Windows.
+- **Protected paths include everything inside Windows and Program Files**, not only the folders
+  themselves. The user profile folder and drive roots are protected as well.
+- **Permanent delete removes only an empty folder or a single file.** It is never recursive.
+- **`display_size()` reads rotation from ffprobe** and does not decode a frame, as `grab_size` did. The
+  result is the same and it is much cheaper.
+- **Trash and permanent delete are not undoable by code.** `send2trash` cannot restore an item, so the
+  undo report lists them for manual restore.
+- **Tests that need ffmpeg use the installed program** found through `ExternalTools`. They skip when it
+  is missing. Tests for lookup logic use fake programs and never run a real one.
+- **No real CR3 sample is in the repository.** The RAW path is covered only by a broken-file test.
+- **Long paths:** `long_path()` is used for the attribute call and directory listings. Move and copy
+  calls still depend on Windows' `LongPathsEnabled` setting.
+
 ### Phase 1: Skeleton & tooling (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 1.

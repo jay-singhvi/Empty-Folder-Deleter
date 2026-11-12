@@ -257,6 +257,9 @@ class ExternalTools:
     def exiftool(self) -> Path | None:
         return self.path("exiftool")
 
+    def ffmpeg(self) -> Path | None:
+        return self.path("ffmpeg")
+
     def ffprobe(self) -> Path | None:
         return self.path("ffprobe")
 

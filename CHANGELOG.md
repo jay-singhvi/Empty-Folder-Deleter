@@ -5,6 +5,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.4: `duplicates` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.4. User page: `docs/tools/duplicates.md`.
+
+#### Added
+- `tools/duplicates/`: options (`DuplicatesOptions`, `extra="forbid"`) and the `Duplicates` tool. `scan()`
+  finds exact, visual, burst and re-encode duplicates, writes nothing (apart from the scan cache), and
+  lists each copy that would move, with the copy that stays. `apply()` runs the plan through the generic
+  engine, so every move is journaled and can be undone from History.
+- `tools/duplicates/images.py`: a port of `legacy/python-find_duplicates.py`: the three passes, the band
+  index, the capture-time guard, the burst grouping, the pixel check, and the raw EXIF text as written.
+- `tools/duplicates/videos.py`: a port of `legacy/find_duplicate_videos.py`: exact copies, and the
+  duration, aspect and sampled-frame check.
+- `tools/duplicates/keeper.py`: the two keeper orderings, kept separate as in the legacy scripts, and the
+  `Match` record. `tools/duplicates/verify_ollama.py`: the optional model check, with errors counted as
+  "not confirmed". `tools/duplicates/explain.py`: every check for two images, as a pure function.
+- Thresholds are advanced options, prefilled with the tuned values (🔒). A test pins the defaults.
+- `pyproject.toml`: the `duplicates` entry point.
+- Tests (`tests/tools/duplicates/`, 30 tests). Parity with both legacy scripts: the same generated tree is
+  run through the legacy finder and the tool, and the plans must match file by file. The image fixture
+  covers exact, visual and burst matches, and the video fixture covers exact and re-encode matches. Also:
+  the tuned defaults, scan changes nothing, apply then undo, a saved plan applied later, managed folders
+  not rescanned, the trash action, exact-only, explicit folders, cloud-only files never read, unreadable
+  files never moved, the capture-time guard, a refused protected root, a missing ffprobe, the cache
+  (reused until a file changes, with a round trip that keeps every feature), keeper ordering, explain,
+  and the Ollama check (YES, NO, errors, a missing model, and an unreachable server).
+- `docs/tools/duplicates.md`: user page.
+
+#### Changed
+- Nothing outside the new tool, apart from the `pyproject.toml` entry point and the changelog.
+
+#### Decisions (not covered by the plan)
+- **Each root has its own `duplicate` and `review` folders** (the names come from the settings). These
+  replace the hardcoded `BASE`. Explicit folder options apply to every root.
+- **Burst and re-encode matches always go to the review folder.** The trash action applies only to exact
+  and visual copies. Review is for a person to confirm, so those matches are never trashed.
+- **The trash action cannot be undone by the engine.** The journal records it, and undo lists it as
+  "restore manually". Moves are undoable. Rule 5 asks for undo of every action, so this is a limit to
+  decide on. The default is move, not trash.
+- **Hashing uses threads, not processes.** The legacy script used a process pool. Threads avoid spawn
+  costs and PyInstaller issues, and Pillow releases the GIL while decoding.
+- **Videos are scanned recursively,** as photos are. The legacy video script looked only at the top level.
+- **The scan cache is for photos only,** as in the legacy script, and lives in the user cache folder
+  (`duplicates-images.sqlite`, version 1). Videos are probed on every scan.
+- **Photos with a capture time are compared as written.** The legacy script compared the EXIF strings.
+  The parsed, plausibility-checked time from `core/media/exif.py` is not used here, so the matches stay
+  the same.
+- **Missing ffprobe skips the video part with a note.** Missing ffmpeg skips only the re-encode check, and
+  exact video copies are still found. Nothing crashes.
+- **Ollama unreachable or model missing:** borderline matches are not moved, and the plan says why.
+- **A video that is also an exact copy but cannot be read is not moved,** as in the legacy script.
+- **Recursion and the managed folders are always on.** The duplicate and review folders are never scanned.
+- **`explain()` is a pure function.** The CLI command and the GUI "Explain match" button are wired in
+  Phases 4 and 5.
+- **The root check is a third copy** of the helper in `rename` and `project_export`. It should move into
+  `core/fs.py` in a later cleanup.
+- **Local environment note:** `uv` is not on this machine, so the entry point was added to the venv's
+  installed metadata by hand. `uv sync` regenerates the same entry.
+
 ### Phase 3.3: `rename` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.3. User page: `docs/tools/rename.md`.

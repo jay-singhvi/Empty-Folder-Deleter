@@ -5,6 +5,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.2: `project_export` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.2. User page: `docs/tools/project_export.md`.
+
+#### Added
+- `tools/project_export/`: options (`ProjectExportOptions`, `extra="forbid"`) and the `ProjectExport`
+  tool. `scan()` lists and reads the selected files, reports what is skipped and an estimated token
+  count, and writes nothing. The plan is one `write` action. `apply()` renders the export again from
+  the saved options, so a plan saved as JSON can be applied later.
+- `tools/project_export/source.py`: per-file text. Python comments are removed with `tokenize`, and
+  notebooks are read cell by cell.
+- `pyproject.toml`: the `project_export` entry point.
+- Tests (`tests/tools/project_export/`, 25 tests). Parity with the legacy scripts in `legacy/`: the
+  v1 file list (same files for the include, exclude and extension cases) and the v3 contents (exact
+  match without stripping, same lines with comments stripped, including a notebook and a binary file).
+  Plus the comment-stripping fix, the default folder exclusions, the output file never being part of
+  its own export, scan writing nothing, cloud-only files never read, the size limit, protected roots
+  and output locations, no overwriting, and a saved plan applied later.
+- `docs/tools/project_export.md`: user page.
+
+#### Decisions (not covered by the plan)
+- **Parity reference is `legacy/`.** The v1 walk runs when its module is imported, so the test
+  extracts only `generate_file_structure` from the file with `ast`. The v3 module is imported, since
+  its entry code sits behind `__main__`.
+- **Include notebook outputs is off by default.** The legacy script included them. Printed output
+  can hold secrets, so the safer default is off. The parity test turns it on.
+- **Python docstrings are kept.** The plan says to keep string literals, and the original regex
+  deleted ordinary triple-quoted strings. Only real comment tokens are removed.
+- **Trailing comments in notebook code cells are removed too.** The legacy script removed only whole
+  comment lines in notebooks. Removing trailing ones as well matches the Python behavior.
+- **Output order ignores case.** Folders and files are sorted with names compared without case. The
+  legacy script sorted case-sensitively, so `README.md` came before lowercase names.
+- **Tree output is indented, not a flat list.** The parity test compares the set of files.
+- **Empty folders are left out of the contents.** The legacy script printed a header for every
+  folder, including ones with no matching files.
+- **`root` is required.** There is no default folder, so a scan can never start on a folder that was
+  not chosen.
+- **The output folder must already exist.** It is also checked against protected paths.
+- **A write never overwrites.** When the name is taken, the export gets a free name (`_dupN`), and
+  the journal records the name it used.
+- **Undo does not remove the export file.** The journal lists it for manual removal, as it does for
+  other writes.
+- **Clipboard copy is deferred to Phase 5 (GUI).** The plan lists `copy_to_clipboard`. Core code
+  has no UI, so the clipboard belongs in the Qt layer. The option is not in this release.
+- **Size limit is off by default** (`max_file_kb` is not set). Larger files are listed as skipped
+  when it is set.
+
 ### Phase 3.1: `empty_folders` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.1. User page: `docs/tools/empty_folders.md`.

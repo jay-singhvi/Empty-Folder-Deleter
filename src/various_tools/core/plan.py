@@ -29,6 +29,7 @@ from various_tools.core.fs import (
     FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT,
     is_inside,
+    long_path,
     protected_reason,
     unique_destination,
 )
@@ -158,6 +159,12 @@ def _guard(action: PlannedAction, plan: Plan, ctx: RunContext) -> str | None:
         if reason and not settings.allow_protected_paths:
             return f"protected path ({reason})"
 
+    if kind in (ActionKind.TRASH, ActionKind.DELETE) and action.src is not None:
+        # Trashing a folder takes its whole contents with it, so only an empty folder may go.
+        refusal = _non_empty_folder_refusal(action.src)
+        if refusal is not None:
+            return refusal
+
     if kind in (ActionKind.MOVE, ActionKind.RENAME) and action.dst is not None:
         reason = protected_reason(action.dst)
         if reason and not settings.allow_protected_paths:
@@ -170,6 +177,24 @@ def _guard(action: PlannedAction, plan: Plan, ctx: RunContext) -> str | None:
 
 def _same(a: Path, b: Path) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _non_empty_folder_refusal(src: Path) -> str | None:
+    """Why a trash or delete must not run on ``src``, or None. Lists names only, opens no file."""
+    attributes = get_attributes(src) or 0
+    is_folder = bool(attributes & FILE_ATTRIBUTE_DIRECTORY) and not (
+        attributes & FILE_ATTRIBUTE_REPARSE_POINT
+    )
+    if not is_folder:
+        return None
+    try:
+        with os.scandir(long_path(src)) as entries:
+            has_entries = next(entries, None) is not None
+    except OSError as exc:
+        return f"could not check the folder before removing it: {exc.strerror or exc}"
+    if has_entries:
+        return "folder is not empty; only empty folders are removed"
+    return None
 
 
 def _execute(

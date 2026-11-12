@@ -159,8 +159,9 @@ def test_permanent_delete_removes_only_empty_folders_and_files(
     assert not (tree / "file.txt").exists()
     assert (tree / "keep").is_dir()  # never a recursive delete
     assert result.count("done") == 2
-    assert result.count("failed") == 1
-    assert result.status == "partial"
+    assert result.count("skipped") == 1  # refused up front: the folder is not empty
+    assert "not empty" in result.outcomes[-1].detail
+    assert result.status == "done"  # a refusal is a skip, not a failure
 
 
 def test_protected_paths_are_refused_by_default(
@@ -325,3 +326,18 @@ def test_plan_json_rejects_foreign_or_unsupported_files(text: str) -> None:
 
 def test_cancelled_exception_type_is_exported() -> None:
     assert issubclass(Cancelled, Exception)
+
+
+def test_trash_refuses_a_folder_that_still_has_contents(
+    tree: Path, journal: Journal, tmp_path: Path, sent_to_trash: list[str]
+) -> None:
+    # A trash of a non-empty folder would send its whole contents to the Recycle Bin.
+    plan = Plan(
+        tool="t", roots=[tree], actions=[PlannedAction(ActionKind.TRASH, src=tree / "keep")]
+    )
+    (tree / "keep" / "inside.txt").write_text("still here", encoding="utf-8")
+    result = apply_plan(plan, _ctx(tmp_path, journal))
+    assert result.count("skipped") == 1
+    assert "not empty" in result.outcomes[0].detail
+    assert sent_to_trash == []
+    assert (tree / "keep" / "inside.txt").exists()

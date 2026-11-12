@@ -1,0 +1,82 @@
+[project]
+name = "various-tools"
+version = "0.1.0"
+description = "Various Tools: a Windows toolkit for cleaning up, deduplicating and organizing files and media."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.14"
+authors = [{ name = "Jay Singhvi" }]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "platformdirs>=4.3",
+    "typer>=0.15",
+    "rich>=13.9",
+    "send2trash>=1.8",
+    "pathspec>=0.12",
+]
+
+[project.scripts]
+various-tools = "various_tools.cli.main:app"
+various-tools-gui = "various_tools.gui.app:main"
+
+[dependency-groups]
+gui = [
+    "pyside6>=6.8",
+]
+media = [
+    "pillow>=11.0",
+    "pillow-heif>=0.20",
+    "rawpy>=0.24",
+    "imagehash>=4.3",
+    "numpy>=2.1",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-qt>=4.4",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "pre-commit>=4.0",
+]
+
+[tool.uv]
+# `uv sync` installs everything, including the GUI, media and dev groups.
+default-groups = ["dev", "gui", "media"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/various_tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+# Python files only: the plan and other Markdown are not reformatted by ruff.
+include = ["**/*.py", "**/*.pyi"]
+# The legacy Tkinter app and the read-only legacy scripts are not linted; they are rewritten in Phase 3.
+exclude = ["legacy", "empty_folder_deleter.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+qt_api = "pyside6"
+filterwarnings = ["error"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+# Strict type checking for the core library, per AGENTS.md.
+strict = ["src/various_tools/core"]
+venvPath = "."
+venv = ".venv"

@@ -18,6 +18,9 @@ Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 1.
 - `various-tools` CLI (Typer) with a `version` command, and `various-tools-gui`, which opens a
   placeholder window. Qt is imported only inside the GUI package.
 - Tests: version, CLI and GUI smoke tests. Qt runs offscreen, so no display is needed.
+- pytest uses `--import-mode=importlib`, so test files with the same name in different folders
+  (for example `tests/core/test_x.py` and `tests/tools/y/test_x.py`) can coexist. Guarded by
+  `tests/core/test_layout.py` and `tests/gui/test_layout.py`.
 - Quality tooling: ruff (lint and format), pyright (basic, strict on `core/`), pytest, and
   pre-commit (ruff and pyright hooks).
 - `.github/workflows/ci.yml`: lint, format check, type check and tests on `windows-latest`.

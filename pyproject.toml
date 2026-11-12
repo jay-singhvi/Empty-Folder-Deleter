@@ -24,6 +24,10 @@ dependencies = [
 various-tools = "various_tools.cli.main:app"
 various-tools-gui = "various_tools.gui.app:main"
 
+# Every tool registers itself here (plan §3.3). A new tool is one more line.
+[project.entry-points."various_tools.tools"]
+empty_folders = "various_tools.tools.empty_folders:TOOL"
+
 [dependency-groups]
 gui = [
     "pyside6>=6.8",

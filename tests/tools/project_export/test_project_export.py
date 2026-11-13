@@ -318,6 +318,42 @@ def test_output_file_inside_the_root_is_left_out(tmp_path: Path, journal: Journa
     assert "Project-File-Content" not in second
 
 
+def test_earlier_dup_exports_are_left_out(tmp_path: Path, journal: Journal) -> None:
+    # Review fix: the third export must not contain the _dup1 export written by the second.
+    root = _make_tree(tmp_path / "proj", {"a.py": "x = 1\n"})
+    opts = ProjectExportOptions.model_validate({"root": root, "respect_gitignore": False})
+    _export(tmp_path, opts, journal)
+    _export(tmp_path, opts, journal)
+    assert (root / "Project-File-Content_dup1.txt").exists()
+    (root / "Project-File-Content.md.partial").write_text("stale", encoding="utf-8")
+    third = _export(tmp_path, opts, journal)
+    assert "Project-File-Content" not in third
+    assert "stale" not in third
+    assert "a.py" in third
+
+
+def test_a_file_created_at_the_target_during_apply_is_not_replaced(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_tree(tmp_path / "proj", {"a.py": "x = 1\n"})
+    out = tmp_path / "out" / "export.txt"
+    out.parent.mkdir()
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root, out), ctx)
+    real_rename = export_tool.rename_no_replace
+
+    def race_then_rename(source: Path, destination: Path) -> None:
+        # Another program creates the export file after the free name was picked.
+        destination.write_text("arrived meanwhile", encoding="utf-8")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(export_tool, "rename_no_replace", race_then_rename)
+    result = TOOL.apply(plan, ctx)
+    assert out.read_text(encoding="utf-8") == "arrived meanwhile"
+    assert result.outcomes[0].status == "failed"
+    assert not list(out.parent.glob("*.partial"))
+
+
 def test_scan_writes_nothing(tmp_path: Path, journal: Journal) -> None:
     root = _make_tree(tmp_path / "proj")
     before = sorted(

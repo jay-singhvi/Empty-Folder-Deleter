@@ -7,7 +7,8 @@ export again from the saved options, so a plan saved as JSON can be applied late
 
 Rules:
 * the output file is never written over an existing file: a free name is used instead;
-* the output file is left out of the export, even when it sits inside the selected folder;
+* the output file is left out of the export, even when it sits inside the selected folder, and
+  so are earlier exports next to it (``<name>_dupN.txt`` / ``.md`` and leftover ``.partial`` files);
 * cloud-only OneDrive files are never read (AGENTS.md rule 3); they are listed as skipped;
 * junctions and symlinks are never followed (rule 4), and the selected folder is never written.
 """
@@ -25,8 +26,10 @@ from pydantic import Field
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
     FileInfo,
+    destination_refusal,
     long_path,
     protected_reason,
+    rename_no_replace,
     root_refusal,
     unique_destination,
     walk,
@@ -133,7 +136,19 @@ def _output_refusal(output: Path, ctx: RunContext) -> str | None:
         return f"Output path is a folder: {output}"
     if not output.parent.is_dir():
         return f"Output folder does not exist: {output.parent}"
+    refusal = destination_refusal(output)
+    if refusal is not None:
+        return f"Output path refused: {refusal}"
     return None
+
+
+def _is_prior_export(path: Path, output: Path) -> bool:
+    """True for the output file and earlier exports beside it: ``stem``, ``stem_dupN`` with a
+    ``.txt`` or ``.md`` extension, plus their ``.partial`` leftovers."""
+    if _key(path.parent) != _key(output.parent):
+        return False
+    pattern = re.escape(output.stem.casefold()) + r"(_dup\d+)?\.(txt|md)(\.partial)?"
+    return re.fullmatch(pattern, path.name.casefold()) is not None
 
 
 def _extensions(opts: ProjectExportOptions) -> set[str] | None:
@@ -154,7 +169,7 @@ def _selected_files(root: Path, opts: ProjectExportOptions, output: Path) -> lis
             exts=_extensions(opts),
             respect_gitignore=opts.respect_gitignore,
         )
-        if _key(info.path) != _key(output)
+        if not _is_prior_export(info.path, output)
     ]
     found.sort(key=lambda info: tuple(p.casefold() for p in info.path.relative_to(root).parts))
     return found
@@ -331,10 +346,15 @@ class ProjectExport:
             text = _export_text(root, opts, action.dst, ctx)
             # Never overwrite: an existing file keeps its place and the export gets a free name.
             target = unique_destination(action.dst.parent, action.dst.name)
-            partial = target.with_name(target.name + ".partial")
-            with open(long_path(partial), "w", encoding="utf-8") as handle:
+            partial = unique_destination(target.parent, target.name + ".partial")
+            # "x" and a no-replace rename: nothing that appears meanwhile is ever overwritten.
+            with open(long_path(partial), "x", encoding="utf-8") as handle:
                 handle.write(text)
-            os.replace(long_path(partial), long_path(target))
+            try:
+                rename_no_replace(partial, target)
+            except OSError:
+                os.unlink(long_path(partial))
+                raise
             return target
 
         return apply_plan(plan, ctx, handlers={ActionKind.WRITE: write_export})

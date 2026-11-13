@@ -12,6 +12,7 @@ import random
 import shutil
 import subprocess
 import threading
+import zlib
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,18 +24,19 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from pydantic import ValidationError
 
 from various_tools.core import fs as fs_module
-from various_tools.core.context import RunContext
+from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal, undo_run
 from various_tools.core.plan import ActionKind, Plan
 from various_tools.core.settings import Settings
 from various_tools.tools.base import discover
-from various_tools.tools.duplicates import TOOL, DuplicatesOptions
+from various_tools.tools.duplicates import TOOL, DuplicatesOptions, images
 from various_tools.tools.duplicates import tool as dup_tool
 from various_tools.tools.duplicates.explain import explain
 from various_tools.tools.duplicates.images import ImageInfo, ImageRules, read_image
 from various_tools.tools.duplicates.keeper import image_keep_key, video_keep_key
 from various_tools.tools.duplicates.verify_ollama import OllamaVerifier
+from various_tools.tools.duplicates.videos import VideoInfo, VideoRules, same_video
 
 REPO = Path(__file__).resolve().parents[3]
 LEGACY_IMAGES = REPO / "legacy" / "python-find_duplicates.py"
@@ -507,9 +509,9 @@ def test_explain_refuses_animated_gifs(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def ollama(tmp_path: Path) -> Iterator[tuple[str, dict[str, str]]]:
+def ollama(tmp_path: Path) -> Iterator[tuple[str, dict[str, Any]]]:
     """A local stand-in for Ollama. ``answer["chat"]`` decides what the model says."""
-    answer = {"chat": "YES", "models": "lfm3-vl:latest"}
+    answer: dict[str, Any] = {"chat": "YES", "models": "lfm3-vl:latest", "asked": 0, "fail": False}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -517,6 +519,10 @@ def ollama(tmp_path: Path) -> Iterator[tuple[str, dict[str, str]]]:
 
         def do_POST(self) -> None:
             self.rfile.read(int(self.headers["Content-Length"]))
+            answer["asked"] += 1
+            if answer["fail"]:
+                self.send_error(500, "model crashed")
+                return
             self._send({"message": {"content": answer["chat"]}})
 
         def _send(self, body: dict[str, Any]) -> None:
@@ -540,7 +546,7 @@ def ollama(tmp_path: Path) -> Iterator[tuple[str, dict[str, str]]]:
         server.server_close()
 
 
-def test_model_confirms_only_on_yes(tmp_path: Path, ollama: tuple[str, dict[str, str]]) -> None:
+def test_model_confirms_only_on_yes(tmp_path: Path, ollama: tuple[str, dict[str, Any]]) -> None:
     url, answer = ollama
     a = _save(_scene(1), tmp_path / "a.png")
     b = _save(_scene(1).resize((200, 150)), tmp_path / "b.png")
@@ -560,50 +566,98 @@ def test_model_errors_count_as_not_confirmed(tmp_path: Path) -> None:
     assert verifier.stats.errors == 1
 
 
-def test_missing_model_is_reported_before_the_scan(ollama: tuple[str, dict[str, str]]) -> None:
+def test_missing_model_is_reported_before_the_scan(ollama: tuple[str, dict[str, Any]]) -> None:
     url, answer = ollama
     answer["models"] = "something-else:latest"
     problem = OllamaVerifier(url, "lfm3-vl:latest").check_model()
     assert problem is not None and "not installed" in problem
 
 
+def _borderline_opts(tree: Path, **extra: Any) -> DuplicatesOptions:
+    """``phash_max=0`` makes the resized copy borderline (its pHash gap equals the limit), so
+    the model is asked about it. Only the test sets this; the defaults are untouched."""
+    return DuplicatesOptions(
+        roots=[tree], media="images", use_cache=False, phash_max=0, verify_with_ollama=True, **extra
+    )
+
+
+def _visual(found: dup_tool.Findings) -> list[str]:
+    return [m.duplicate.name for m in found.matches if m.kind == "visual"]
+
+
 def test_unreachable_ollama_moves_no_borderline_match(tmp_path: Path) -> None:
     """The default test context has no Ollama, so no network call is made at all."""
     tree = tmp_path / "tree"
     _make_image_tree(tree)
-    opts = DuplicatesOptions(roots=[tree], media="images", use_cache=False, verify_with_ollama=True)
-    found = dup_tool.collect(opts, _ctx(tmp_path, None))
-    assert any("Ollama" in note for note in found.notes)
-    assert all("model" not in m.reason for m in found.matches)
-    assert all(m.kind != "visual" for m in found.matches) or all(
-        "confirmed" not in m.reason for m in found.matches
-    )
+    found = dup_tool.collect(_borderline_opts(tree), _ctx(tmp_path, None))
+    assert any("Ollama is not reachable" in note for note in found.notes)
+    assert _visual(found) == []  # the borderline match was refused, not moved
+    # Without the model check, the same tree does give that visual match.
+    plain = _borderline_opts(tree).model_copy(update={"verify_with_ollama": False})
+    assert _visual(dup_tool.collect(plain, _ctx(tmp_path, None))) == ["beach_small.png"]
 
 
-def test_only_visual_matches_go_to_the_model(tmp_path: Path) -> None:
+def test_the_model_verdict_decides_a_borderline_match(tmp_path: Path) -> None:
     tree = tmp_path / "tree"
     _make_image_tree(tree)
-    base = DuplicatesOptions(roots=[tree], media="images", use_cache=False)
-    without = dup_tool.collect(base, _ctx(tmp_path, None))
-    asked: list[Path] = []
+    asked: list[tuple[str, str]] = []
 
-    def always_no(a: Path, b: Path) -> bool:
-        asked.append(b)
-        return False
+    def verdict(answer: bool) -> Callable[[Path, Path], bool]:
+        def confirm(a: Path, b: Path) -> bool:
+            asked.append((a.name, b.name))
+            return answer
 
-    checked = dup_tool.collect(
-        base.model_copy(update={"verify_with_ollama": True}),
-        _ctx(tmp_path, None),
-        confirm=always_no,
+        return confirm
+
+    no = dup_tool.collect(_borderline_opts(tree), _ctx(tmp_path, None), confirm=verdict(False))
+    assert asked == [("beach_copy.png", "beach_small.png")]  # only the borderline pair is asked
+    assert _visual(no) == []
+    yes = dup_tool.collect(_borderline_opts(tree), _ctx(tmp_path, None), confirm=verdict(True))
+    assert _visual(yes) == ["beach_small.png"]
+    reason = next(m.reason for m in yes.matches if m.kind == "visual")
+    assert "confirmed" in reason
+    # Exact and burst matches never go to the model.
+    assert {m.kind for m in yes.matches} == {"exact", "visual", "burst"}
+    assert len(asked) == 2
+
+
+def test_configured_ollama_url_is_used(tmp_path: Path, ollama: tuple[str, dict[str, Any]]) -> None:
+    url, answer = ollama
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    settings = Settings.model_validate({"onedrive_root": tmp_path, "ollama_url": url})
+    probed: list[str] = []
+
+    def probe(candidate: str) -> str | None:
+        probed.append(candidate)
+        return "0.1" if candidate == url else None
+
+    ctx = RunContext(settings=settings, deps=ExternalTools(env={}, ollama_probe=probe))
+    found = dup_tool.collect(_borderline_opts(tree), ctx)
+    assert url in probed
+    assert not any("not reachable" in note for note in found.notes)
+    assert answer["asked"] == 1  # the server at the configured URL really was called
+    assert _visual(found) == ["beach_small.png"]
+
+
+def test_a_failing_pair_is_noted_and_not_moved(
+    tmp_path: Path, ollama: tuple[str, dict[str, Any]]
+) -> None:
+    url, answer = ollama
+    answer["fail"] = True
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    settings = Settings.model_validate({"onedrive_root": tmp_path, "ollama_url": url})
+    ctx = RunContext(
+        settings=settings,
+        deps=ExternalTools(env={}, ollama_probe=lambda u: "0.1" if u == url else None),
     )
-    exact = {(m.keeper, m.duplicate) for m in without.matches if m.kind == "exact"}
-    assert exact == {(m.keeper, m.duplicate) for m in checked.matches if m.kind == "exact"}
-    visual_before = {(m.keeper, m.duplicate) for m in without.matches if m.kind == "visual"}
-    visual_after = {(m.keeper, m.duplicate) for m in checked.matches if m.kind == "visual"}
-    assert visual_after <= visual_before  # a "no" from the model never adds a move
-    assert all(p in visual_before or p[1] not in asked for p in visual_after)
-    # Only the candidates that the rules consider borderline are sent to the model.
-    assert all(b.name for b in asked)
+    found = dup_tool.collect(_borderline_opts(tree), ctx)
+    failed = [n for n in found.notes if n.startswith("Ollama check failed for")]
+    assert len(failed) == 1
+    assert "beach_copy.png vs beach_small.png" in failed[0] and "500" in failed[0]
+    assert _visual(found) == []  # not confirmed, so not moved
+    assert {m.kind for m in found.matches} == {"exact", "burst"}  # the scan still finished
 
 
 # ---- helpers --------------------------------------------------------------------------------
@@ -613,3 +667,193 @@ def _ffmpeg(ffmpeg: Path, *args: str) -> None:
     subprocess.run(
         [str(ffmpeg), "-v", "error", "-y", *args], check=True, capture_output=True, timeout=120
     )
+
+
+# ---- review fixes: scan-time junction check, cancellation, progress ----------------------------
+
+
+def _junction(link: Path, target: Path) -> None:
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False
+    )
+    if made.returncode != 0:
+        pytest.skip("could not create a junction in this environment")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows feature")
+def test_scan_refuses_a_duplicate_folder_that_is_a_junction(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _junction(tree / "duplicate", outside)
+    opts = DuplicatesOptions(roots=[tree], media="images", use_cache=False)
+    plan = TOOL.scan(opts, _ctx(tmp_path, None))
+    assert any("junction or symlink" in note and "duplicate" in note for note in plan.notes)
+    # Nothing is planned into the junction; the review folder (a normal path) still works.
+    for action in plan.selected_actions():
+        assert action.dst is not None
+        assert action.dst.parent != tree / "duplicate"
+    assert any(a.reason.startswith("burst") for a in plan.selected_actions())
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows feature")
+def test_scan_refuses_an_explicit_folder_through_a_junction(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    _junction(link, outside)
+    plan = TOOL.scan(
+        DuplicatesOptions(
+            roots=[tree], media="images", use_cache=False, duplicate_folder=link / "dups"
+        ),
+        _ctx(tmp_path, None),
+    )
+    assert any("junction or symlink" in note for note in plan.notes)
+    assert not any(
+        a.dst is not None and fs_module.is_inside(a.dst, link) for a in plan.selected_actions()
+    )
+
+
+def test_a_later_pass_checks_for_cancellation(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    ctx = _ctx(tmp_path, None)
+    seen: list[str] = []
+
+    def progress(done: int, total: int, message: str) -> None:
+        seen.append(message)
+        if message.startswith("Comparing beach"):  # a pass 2 message
+            ctx.cancel()
+
+    ctx.progress = progress
+    with pytest.raises(Cancelled):
+        dup_tool.collect(DuplicatesOptions(roots=[tree], media="images", use_cache=False), ctx)
+    assert any(m.startswith("Comparing") for m in seen)
+    assert not any(m.startswith("Checking burst") for m in seen)  # stopped before pass 3
+
+
+def test_later_passes_report_progress(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    ctx = _ctx(tmp_path, None)
+    seen: list[str] = []
+    ctx.progress = lambda _d, _t, message: seen.append(message)
+    dup_tool.collect(DuplicatesOptions(roots=[tree], media="images", use_cache=False), ctx)
+    assert any(m.startswith("Comparing ") for m in seen)
+    assert any(m.startswith("Checking burst") for m in seen)
+
+
+# ---- thresholds: the tuned values, and each side of their boundary ---------------------------
+
+
+def _bits(n: int) -> int:
+    """A hash value that is ``n`` bits away from 0."""
+    return (1 << n) - 1
+
+
+def _flat(value: int) -> bytes:
+    return zlib.compress(bytes([value]) * (128 * 128), 1)
+
+
+def _crafted(
+    name: str,
+    *,
+    phash: int = 0,
+    dhash: int = 0,
+    w: int = 100,
+    h: int = 100,
+    grey: int = 100,
+) -> ImageInfo:
+    return ImageInfo(
+        path=Path(name),
+        size=1,
+        mtime=1.0,
+        w=w,
+        h=h,
+        sha=name,
+        phash=phash,
+        dhash=dhash,
+        sharp=1.0,
+        taken=None,
+        thumb_z=_flat(grey),
+    )
+
+
+def test_tuned_default_thresholds_are_unchanged() -> None:
+    rules = ImageRules()
+    assert (rules.phash_max, rules.dhash_max, rules.aspect_tol) == (2, 4, 0.02)
+    assert (rules.burst_phash_max, rules.pixel_block_max) == (40, 3.0)
+    video = VideoRules()
+    assert (video.dur_tol_s, video.dur_tol_pct, video.aspect_tol) == (0.6, 0.01, 0.02)
+    assert (video.frame_mean_max, video.frame_worst_max) == (10, 24)
+
+
+@pytest.mark.parametrize(("gap", "expected"), [(2, True), (3, False)])
+def test_phash_max_boundary(gap: int, expected: bool) -> None:
+    a, b = _crafted("a.png"), _crafted("b.png", phash=_bits(gap))
+    assert images.cheap_match(a, b, ImageRules()) is expected
+
+
+@pytest.mark.parametrize(("gap", "expected"), [(4, True), (5, False)])
+def test_dhash_max_boundary(gap: int, expected: bool) -> None:
+    a, b = _crafted("a.png"), _crafted("b.png", dhash=_bits(gap))
+    assert images.cheap_match(a, b, ImageRules()) is expected
+
+
+@pytest.mark.parametrize(("width", "expected"), [(1019, True), (1021, False)])
+def test_aspect_tolerance_boundary(width: int, expected: bool) -> None:
+    a = _crafted("a.png", w=1000, h=1000)
+    b = _crafted("b.png", w=width, h=1000)
+    assert images.cheap_match(a, b, ImageRules()) is expected
+
+
+@pytest.mark.parametrize(("grey", "expected"), [(103, True), (104, False)])
+def test_pixel_block_boundary(grey: int, expected: bool) -> None:
+    """A flat difference of 3 grey levels is a block difference of exactly 3.0 (kept)."""
+    a, b = _crafted("a.png", grey=100), _crafted("b.png", grey=grey)
+    matches = images.find_matches([a, b], ImageRules())
+    assert (len(matches) == 1 and matches[0].kind == "visual") is expected
+
+
+@pytest.mark.parametrize(("gap", "expected"), [(40, True), (41, False)])
+def test_burst_phash_boundary(gap: int, expected: bool) -> None:
+    a = _crafted("IMG_20240101_120000_1.png")
+    b = _crafted("IMG_20240101_120000_2.png", phash=_bits(gap))
+    matches = images.find_matches([a, b], ImageRules())
+    assert [m.kind for m in matches] == (["burst"] if expected else [])
+
+
+def _clip(name: str, dur: float, frames: tuple[int, ...] = (0,) * 5) -> VideoInfo:
+    return VideoInfo(Path(name), 1, 1.0, dur, 1920, 1080, frames)
+
+
+@pytest.mark.parametrize(
+    ("dur_a", "dur_b", "expected"),
+    [
+        (50.0, 50.5, True),  # 0.5 s apart: inside the 0.6 s floor
+        (50.0, 50.7, False),  # 0.7 s apart: outside both the floor and 1% of 50 s
+        (100.0, 101.0, True),  # 1.0 s apart: outside 0.6 s but inside 1% of 101 s
+        (100.0, 101.1, False),  # 1.1 s apart: outside 1% of 101.1 s (1.011 s)
+    ],
+)
+def test_video_duration_tolerance_boundary(dur_a: float, dur_b: float, expected: bool) -> None:
+    assert same_video(_clip("a.mp4", dur_a), _clip("b.mp4", dur_b), VideoRules()) is expected
+
+
+@pytest.mark.parametrize(
+    ("gaps", "expected"),
+    [
+        ((10, 10, 10, 10, 10), True),  # mean exactly 10
+        ((11, 10, 10, 10, 10), False),  # mean 10.2
+        ((24, 0, 0, 0, 0), True),  # worst frame exactly 24
+        ((25, 0, 0, 0, 0), False),  # worst frame 25
+    ],
+)
+def test_video_frame_boundaries(gaps: tuple[int, ...], expected: bool) -> None:
+    a = _clip("a.mp4", 60.0)
+    b = _clip("b.mp4", 60.0, tuple(_bits(g) for g in gaps))
+    assert same_video(a, b, VideoRules()) is expected

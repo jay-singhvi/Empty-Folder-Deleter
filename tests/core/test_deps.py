@@ -287,3 +287,38 @@ def test_unknown_tool_name_is_an_error(isolated_env: dict[str, str]) -> None:
 def test_resolve_all_covers_every_spec(isolated_env: dict[str, str]) -> None:
     result = ExternalTools(env=isolated_env, ollama_probe=lambda _u: None).resolve_all()
     assert set(result) == set(deps.TOOL_SPECS)
+
+
+def test_ollama_preferred_url_is_tried_before_the_default(isolated_env: dict[str, str]) -> None:
+    seen: list[str] = []
+
+    def probe(url: str) -> str | None:
+        seen.append(url)
+        return "0.7.0" if url == "http://gpu-box:11434" else None
+
+    tools = ExternalTools(env=isolated_env, ollama_probe=probe)
+    location = tools.resolve_ollama("http://gpu-box:11434")
+    assert location.valid and location.url == "http://gpu-box:11434"
+    assert location.source is ToolSource.OVERRIDE
+    assert seen == ["http://gpu-box:11434"]
+    assert tools.resolve_ollama("http://gpu-box:11434") is location  # cached
+
+
+def test_ollama_preferred_url_that_is_down_falls_back_and_says_so(
+    isolated_env: dict[str, str],
+) -> None:
+    tools = ExternalTools(
+        env=isolated_env,
+        ollama_probe=lambda url: "0.5.1" if url == DEFAULT_OLLAMA_URL else None,
+    )
+    location = tools.resolve_ollama("http://192.0.2.1:9999")
+    assert location.valid and location.url == DEFAULT_OLLAMA_URL
+    assert any("not responding" in p for p in location.problems)
+
+
+def test_ollama_preferred_url_equal_to_default_is_the_plain_result(
+    isolated_env: dict[str, str],
+) -> None:
+    tools = ExternalTools(env=isolated_env, ollama_probe=lambda _u: "1")
+    assert tools.resolve_ollama(DEFAULT_OLLAMA_URL) is tools.resolve("ollama")
+    assert tools.resolve_ollama(None) is tools.resolve("ollama")

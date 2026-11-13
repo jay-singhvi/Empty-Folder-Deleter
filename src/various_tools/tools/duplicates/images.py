@@ -28,6 +28,7 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 
 from various_tools.core import hashing
+from various_tools.core.context import RunContext
 from various_tools.core.media.exif import EXIF_IFD, TAG_DATETIME_ORIGINAL
 from various_tools.core.media.imaging import open_image
 from various_tools.tools.duplicates.keeper import Match, image_keep_key
@@ -262,14 +263,27 @@ def find_matches(
     *,
     exact_only: bool = False,
     confirmer: Confirmer | None = None,
+    ctx: RunContext | None = None,
 ) -> list[Match]:
-    """Every duplicate found among ``infos``, in the same order as the legacy script."""
+    """Every duplicate found among ``infos``, in the same order as the legacy script.
+
+    With ``ctx``, every pass checks for cancellation and reports progress.
+    """
     matches: list[Match] = []
+
+    def tick(done: int, total: int, message: str) -> None:
+        if ctx is not None:
+            ctx.check_cancelled()
+            ctx.report(done, total, message)
+
+    tick(0, len(infos), "Comparing identical files")
 
     # Pass 1: identical bytes.
     by_sha: dict[str, list[ImageInfo]] = defaultdict(list)
-    for info in infos:
+    for done, info in enumerate(infos, start=1):
         by_sha[info.sha].append(info)
+        if done % 256 == 0:
+            tick(done, len(infos), "Comparing identical files")
     reps: list[ImageInfo] = []
     for members in by_sha.values():
         members.sort(key=keep_key)
@@ -285,7 +299,8 @@ def find_matches(
     reps.sort(key=keep_key)
     leaders: list[ImageInfo] = []
     bands: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for r in reps:
+    for done, r in enumerate(reps, start=1):
+        tick(done, len(reps), f"Comparing {r.path.name}")
         hit = _find_visual(r, leaders, bands, rules, confirmer)
         if hit is not None:
             idx, reason = hit
@@ -302,7 +317,8 @@ def find_matches(
         key = burst_key(leader)
         if key and leader.phash is not None:
             bursts[key].append(leader)
-    for key, frames in bursts.items():
+    for done, (key, frames) in enumerate(bursts.items(), start=1):
+        tick(done, len(bursts), f"Checking burst {key}")
         frames.sort(key=lambda f: -(f.sharp or 0.0))
         best: list[ImageInfo] = []
         for f in frames:

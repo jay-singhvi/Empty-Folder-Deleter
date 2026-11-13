@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,8 @@ class OllamaVerifier:
     model: str
     timeout: float = CHAT_TIMEOUT_S
     stats: VerifyStats = field(default_factory=VerifyStats)
+    # Why the most recent ``confirms`` call failed, or None when it got an answer.
+    last_error: str | None = None
 
     def check_model(self) -> str | None:
         """Why the model cannot be used, or None when it is installed."""
@@ -53,10 +56,14 @@ class OllamaVerifier:
     def confirms(self, a: Path, b: Path) -> bool:
         """True only when the model answers YES for the pair."""
         self.stats.checked += 1
+        self.last_error = None
         try:
             same = self._ask(a, b)
-        except Exception:  # an unreadable file or a dropped connection: not confirmed
+        except Exception as exc:  # an unreadable file or a dropped connection: not confirmed
             self.stats.errors += 1
+            self.last_error = str(exc) or type(exc).__name__
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()  # an error response holds a temp file open
             return False
         if not same:
             self.stats.rejected += 1

@@ -31,6 +31,7 @@ from various_tools.core.cache import FileCache
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
     FileInfo,
+    destination_refusal,
     is_inside,
     root_refusal,
     walk,
@@ -300,11 +301,12 @@ def _confirmer(
         return None
 
     refuse = Confirmer(opts.ollama_model, lambda _a, _b: False)
-    location = ctx.deps.resolve("ollama")
+    # The saved ``ollama_url`` setting is tried first (after any explicit override in deps).
+    location = ctx.deps.resolve_ollama(ctx.settings.ollama_url)
     if not location.valid:
         out.notes.append(
             "Ollama is not reachable, so borderline matches were not moved. "
-            f"Start Ollama or check its address ({location.url or ctx.settings.ollama_url})."
+            f"Start Ollama or check its address ({ctx.settings.ollama_url})."
         )
         return refuse
     verifier = OllamaVerifier(location.url or ctx.settings.ollama_url, opts.ollama_model)
@@ -312,7 +314,16 @@ def _confirmer(
     if problem is not None:
         out.notes.append(f"{problem}. Borderline matches were not moved.")
         return refuse
-    return Confirmer(opts.ollama_model, verifier.confirms)
+
+    def confirms(a: Path, b: Path) -> bool:
+        same = verifier.confirms(a, b)
+        if verifier.last_error is not None:  # one bad pair is noted, and the scan goes on
+            out.notes.append(
+                f"Ollama check failed for {a.name} vs {b.name}: {verifier.last_error}. Not moved."
+            )
+        return same
+
+    return Confirmer(opts.ollama_model, confirms)
 
 
 def collect(
@@ -353,7 +364,11 @@ def collect(
         infos = _image_infos(image_files, opts, ctx, workers, out)
         confirmer = None if opts.exact_only else _confirmer(opts, ctx, confirm, out)
         out.matches += images.find_matches(
-            infos, opts.image_rules(), exact_only=opts.exact_only, confirmer=confirmer
+            infos,
+            opts.image_rules(),
+            exact_only=opts.exact_only,
+            confirmer=confirmer,
+            ctx=ctx,
         )
 
     if opts.media in ("videos", "both") and video_files:
@@ -410,6 +425,7 @@ def _destination(
 def _to_plan(opts: DuplicatesOptions, findings: Findings, ctx: RunContext, plan: Plan) -> None:
     kinds: dict[str, int] = {}
     moves = trashes = 0
+    refused: dict[str, str | None] = {}  # one answer per destination folder
     for match in findings.matches:
         kinds[match.kind] = kinds.get(match.kind, 0) + 1
         folder = _destination(match, opts, findings, ctx)
@@ -428,6 +444,17 @@ def _to_plan(opts: DuplicatesOptions, findings: Findings, ctx: RunContext, plan:
             )
             trashes += 1
         else:
+            # Rule 4 on the output side: never move files through a junction or symlink. The
+            # engine checks again at apply time.
+            key = os.path.normcase(str(folder))
+            if key not in refused:
+                containing = [r for r in findings.roots if is_inside(folder, r)]
+                stop = max(containing, key=lambda r: len(str(r))) if containing else None
+                refused[key] = destination_refusal(folder, stop)
+                if refused[key] is not None:
+                    plan.notes.append(f"skipped: {refused[key]} ({folder})")
+            if refused[key] is not None:
+                continue
             plan.actions.append(
                 PlannedAction(
                     kind=ActionKind.MOVE,

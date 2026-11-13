@@ -229,11 +229,22 @@ class ExternalTools:
         self._version_probe = version_probe
         self._ollama_probe = ollama_probe
         self._cache: dict[str, ToolLocation] = {}
+        self._ollama_preferred: dict[str, ToolLocation] = {}
         self._versions: dict[str, str] = {}
 
     def redetect(self) -> None:
         """Forget cached results so the next :meth:`resolve` searches again."""
         self._cache.clear()
+        self._ollama_preferred.clear()
+
+    def resolve_ollama(self, preferred_url: str | None = None) -> ToolLocation:
+        """Like ``resolve("ollama")``, but tries ``preferred_url`` (the saved ``ollama_url``
+        setting) right after any explicit override. The default URL gives the plain result."""
+        if not preferred_url or preferred_url == DEFAULT_OLLAMA_URL:
+            return self.resolve("ollama")
+        if preferred_url not in self._ollama_preferred:
+            self._ollama_preferred[preferred_url] = self._resolve_ollama(preferred_url)
+        return self._ollama_preferred[preferred_url]
 
     def resolve(self, tool: str) -> ToolLocation:
         """Location for ``tool`` (one of :data:`TOOL_SPECS`), cached after the first call."""
@@ -362,13 +373,15 @@ class ExternalTools:
 
     # ----- Ollama --------------------------------------------------------
 
-    def _resolve_ollama(self) -> ToolLocation:
+    def _resolve_ollama(self, preferred_url: str | None = None) -> ToolLocation:
         spec = TOOL_SPECS["ollama"]
         problems: list[str] = []
         candidates: list[tuple[str, ToolSource]] = []
         override = self._overrides.get("ollama")
         if override:
             candidates.append((override, ToolSource.OVERRIDE))
+        if preferred_url and preferred_url != override:
+            candidates.append((preferred_url, ToolSource.OVERRIDE))
         env_url = self._env.get(spec.env_var)
         if env_url:
             candidates.append((env_url, ToolSource.ENVIRONMENT))

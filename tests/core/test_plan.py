@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -341,3 +342,50 @@ def test_trash_refuses_a_folder_that_still_has_contents(
     assert "not empty" in result.outcomes[0].detail
     assert sent_to_trash == []
     assert (tree / "keep" / "inside.txt").exists()
+
+
+def _junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("junctions are a Windows feature")
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False
+    )
+    if made.returncode != 0 or not link.exists():
+        pytest.skip("could not create a junction in this environment")
+
+
+def test_move_without_a_destination_is_refused(
+    tree: Path, journal: Journal, tmp_path: Path
+) -> None:
+    plan = Plan(
+        tool="t", roots=[tree], actions=[PlannedAction(ActionKind.MOVE, src=tree / "file.txt")]
+    )
+    result = apply_plan(plan, _ctx(tmp_path, journal))
+    assert result.outcomes[0].status == "skipped"
+    assert "no destination" in result.outcomes[0].detail
+    assert (tree / "file.txt").exists()
+
+
+def test_rename_into_another_folder_is_refused(
+    tree: Path, journal: Journal, tmp_path: Path
+) -> None:
+    action = PlannedAction(ActionKind.RENAME, src=tree / "file.txt", dst=tree / "keep" / "x.txt")
+    result = apply_plan(Plan(tool="t", roots=[tree], actions=[action]), _ctx(tmp_path, journal))
+    assert result.outcomes[0].status == "skipped"
+    assert "same folder" in result.outcomes[0].detail
+    assert (tree / "file.txt").exists()
+
+
+def test_move_through_a_junction_is_refused(tree: Path, journal: Journal, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _junction(tree / "link", outside)
+    action = PlannedAction(
+        ActionKind.MOVE, src=tree / "file.txt", dst=tree / "link" / "sub" / "f.txt"
+    )
+    result = apply_plan(Plan(tool="t", roots=[tree], actions=[action]), _ctx(tmp_path, journal))
+    assert result.outcomes[0].status == "skipped"
+    assert "junction" in result.outcomes[0].detail
+    assert (tree / "file.txt").exists()
+    assert not any(outside.iterdir())
+    assert journal.actions(result.run_id)[0].status == "skipped"

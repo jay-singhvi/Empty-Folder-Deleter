@@ -28,6 +28,7 @@ from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import (
     FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT,
+    destination_refusal,
     is_inside,
     long_path,
     protected_reason,
@@ -165,10 +166,25 @@ def _guard(action: PlannedAction, plan: Plan, ctx: RunContext) -> str | None:
         if refusal is not None:
             return refusal
 
-    if kind in (ActionKind.MOVE, ActionKind.RENAME) and action.dst is not None:
+    if kind in (ActionKind.MOVE, ActionKind.RENAME):
+        if action.dst is None:
+            return "no destination path"
         reason = protected_reason(action.dst)
         if reason and not settings.allow_protected_paths:
             return f"destination is a protected path ({reason})"
+        if (
+            kind is ActionKind.RENAME
+            and action.src is not None
+            and not _same(action.dst.parent, action.src.parent)
+        ):
+            return "a rename must stay in the same folder"
+        # Rule 4 on the output side: never write through a junction or symlink. Stop at the
+        # selected root that holds the destination, or walk to the drive root.
+        containing = [r for r in plan.roots if is_inside(action.dst, r)]
+        stop = max(containing, key=lambda r: len(str(r))) if containing else None
+        refusal = destination_refusal(action.dst, stop)
+        if refusal is not None:
+            return refusal
 
     if kind is ActionKind.DELETE and settings.delete_mode != "permanent":
         return "permanent delete is off; the item would go to the Recycle Bin instead"

@@ -190,3 +190,75 @@ def test_root_refusal_rejects_missing_and_protected_folders(
     monkeypatch.setattr(fs, "protected_reason", lambda _p: "Windows folder")
     assert "Protected folder refused" in (fs.root_refusal(tmp_path) or "")
     assert fs.root_refusal(tmp_path, allow_protected=True) is None
+
+
+def test_walk_respects_gitignore_files(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    (root / "sub" / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    for name in ("a.txt", "b.log", "sub/c.txt", "sub/secret.txt", "sub/d.log"):
+        (root / name).write_text("x", encoding="utf-8")
+    found = _names(list(walk(root, respect_gitignore=True)), root)
+    assert found == [".gitignore", "a.txt", "sub/.gitignore", "sub/c.txt"]
+
+
+def test_a_cloud_only_gitignore_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    ignore = root / ".gitignore"
+    ignore.write_text("*.log\n", encoding="utf-8")
+    (root / "b.log").write_text("x", encoding="utf-8")
+    offline = 0x1000
+
+    def attributes(path: Path) -> int | None:
+        if Path(path).name == ".gitignore":
+            return offline
+        return 0 if os.path.lexists(path) else None
+
+    monkeypatch.setattr("various_tools.core.onedrive.get_attributes", attributes)
+    real_read_text = Path.read_text
+
+    def no_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == ".gitignore":
+            raise AssertionError("a cloud-only .gitignore was read")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", no_read)
+    found = _names(list(walk(root, respect_gitignore=True)), root)
+    # Its rules are not applied, so b.log is listed. That is the safe direction for a scan.
+    assert "b.log" in found
+
+
+def test_reparse_ancestor_finds_a_junction_on_the_way_up(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("junctions are a Windows feature")
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root / "link"), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("could not create a junction in this environment")
+    deep = root / "link" / "not" / "yet" / "file.txt"
+    assert fs.reparse_ancestor(deep, root) == root / "link"
+    assert fs.destination_refusal(deep, root) is not None
+    assert fs.reparse_ancestor(root / "plain" / "file.txt", root) is None
+    assert fs.destination_refusal(root / "plain" / "file.txt") is None
+
+
+def test_rename_no_replace_never_replaces(tmp_path: Path) -> None:
+    source = tmp_path / "a.txt"
+    target = tmp_path / "b.txt"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        fs.rename_no_replace(source, target)
+    assert target.read_text(encoding="utf-8") == "old"
+    assert source.exists()

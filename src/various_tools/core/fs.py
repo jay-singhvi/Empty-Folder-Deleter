@@ -58,6 +58,12 @@ def _matches_any(name: str, rel_posix: str, globs: Iterable[str]) -> bool:
 
 def _load_gitignore(folder: Path) -> pathspec.GitIgnoreSpec | None:
     ignore_file = folder / ".gitignore"
+    # AGENTS.md rule 3: a cloud-only .gitignore is never recalled just to read its rules.
+    from various_tools.core.onedrive import get_sync_status, is_on_device
+
+    if ignore_file.exists() and not is_on_device(get_sync_status(ignore_file)):
+        log.warning("Skipped cloud-only %s; its rules are not applied", ignore_file)
+        return None
     try:
         lines = ignore_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
@@ -187,6 +193,24 @@ def unique_destination(folder: Path, name: str) -> Path:
         counter += 1
 
 
+def rename_no_replace(source: Path, destination: Path) -> None:
+    """Move ``source`` to ``destination``, never replacing a file that is already there.
+
+    Raises :class:`FileExistsError` when ``destination`` exists. On Windows ``os.rename`` itself
+    refuses an existing target, so the check and the move are one atomic step. Elsewhere a hard
+    link is made first, which also fails when the target exists.
+    """
+    if os.path.lexists(destination):
+        raise FileExistsError(
+            f"the output file already exists, so it was not replaced: {destination}"
+        )
+    if sys.platform == "win32":
+        os.rename(long_path(source), long_path(destination))
+    else:
+        os.link(long_path(source), long_path(destination))
+        os.unlink(long_path(source))
+
+
 def _norm(path: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
 
@@ -227,6 +251,41 @@ def is_inside(path: Path, root: Path) -> bool:
     """True when ``path`` is ``root`` or below it, compared without resolving links."""
     target, base = _norm(path), _norm(root)
     return target == base or target.startswith(base + os.sep)
+
+
+def reparse_ancestor(path: Path, stop: Path | None = None) -> Path | None:
+    """The first existing junction or symlink at ``path`` or above it, or ``None``.
+
+    Walks up from ``path`` through every folder that exists, up to and including ``stop``
+    (or the drive root when ``stop`` is ``None`` or not above ``path``). Use it before
+    writing to a destination, so output never lands outside the chosen folder through a
+    junction (AGENTS.md rule 4). Reads attributes only and opens no file.
+    """
+    current = Path(os.path.abspath(path))
+    stop_norm = _norm(stop) if stop is not None and is_inside(current, stop) else None
+    while True:
+        try:
+            st = os.stat(long_path(current), follow_symlinks=False)
+        except OSError:
+            st = None
+        if st is not None:
+            attributes = getattr(st, "st_file_attributes", 0)
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT or os.path.islink(current):
+                return current
+        if stop_norm is not None and _norm(current) == stop_norm:
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def destination_refusal(dst: Path, stop: Path | None = None) -> str | None:
+    """Why ``dst`` must not be written to, or ``None``. See :func:`reparse_ancestor`."""
+    link = reparse_ancestor(dst, stop)
+    if link is not None:
+        return f"destination goes through a junction or symlink, not followed: {link}"
+    return None
 
 
 def root_refusal(root: Path, allow_protected: bool = False) -> str | None:

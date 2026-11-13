@@ -31,6 +31,7 @@ project_export = "various_tools.tools.project_export:TOOL"
 rename = "various_tools.tools.rename:TOOL"
 duplicates = "various_tools.tools.duplicates:TOOL"
 media_resize = "various_tools.tools.media_resize:TOOL"
+organize_by_date = "various_tools.tools.organize_by_date:TOOL"
 
 [dependency-groups]
 gui = [

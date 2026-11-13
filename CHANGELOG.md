@@ -5,6 +5,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Review fixes 2 (2026-11-13)
+
+#### Fixed (safety)
+- `media_resize`: apply checks `ensure_on_device` before `has_embedded_extras()` reads a file, so a
+  file that turned cloud-only after the scan is never read (rule 3).
+- `empty_folders`: unchecking a folder now also unchecks the junk files in every parent folder it
+  unchecks. At apply, a junk file is trashed only if its folder still holds nothing but junk and
+  folders that are also going; otherwise the row is journaled as skipped.
+- `core/fs.py`: a cloud-only `.gitignore` is never read; its rules are not applied and a warning
+  is logged.
+- Output-side junctions (rule 4): new `core/fs.py` `reparse_ancestor()` / `destination_refusal()`.
+  The apply engine refuses a MOVE or RENAME whose destination passes through a junction or symlink
+  (up to the selected root that holds it, else up to the drive root), a RENAME that leaves its
+  folder, and a MOVE or RENAME with no destination (was an `assert`). `duplicates` skips a managed
+  folder behind a junction at scan; `media_resize` refuses its output at apply; `organize_by_date`
+  refuses a `dest_root` that is a junction; `project_export` refuses such an output path.
+- No silent overwrites: new `core/fs.py` `rename_no_replace()` replaces `os.replace` for the final
+  step of `media_resize` images, `ffmpeg.transcode` and `project_export`, whose `.partial` file is
+  now created exclusively. `rename` journals rows dropped by its apply-time recheck as skipped.
+
+#### Fixed (correctness)
+- `organize_by_date`: cloud-only rows (MOVE with no destination) stay unselected and the engine
+  refuses them as a backstop. A failing EXIF, ffprobe or ExifTool reader falls through to the next
+  date source, as in the legacy script.
+- `project_export` no longer exports its own earlier outputs (`<name>_dupN.txt/.md`, `.partial`).
+- ffprobe and ExifTool timeouts and malformed output degrade: the file is skipped with a note
+  (`media_resize`) or the next date source is used (`organize_by_date`).
+- `media_resize`: `keep_metadata=True` keeps the ICC profile and dpi. Preview totals count only
+  selected rows and show the bytes saved.
+- `duplicates`: `settings.ollama_url` is used; a failed Ollama check on a pair is a plan note and
+  the pair is not moved; image passes 2 and 3 check for cancel and report progress.
+- Docs: `organize_by_date` CSV export is a library function (`Catalog.export_csv`) only for now.
+
+#### Tests
+- Threshold boundary tests for `duplicates` (PHASH 2/3, DHASH 4/5, pixel block, aspect, video
+  duration, frame mean and worst frame, burst 40/41); no value changed. The two Ollama tests that
+  asserted nothing now check that the model's verdict decides a borderline match.
+
+#### Decisions (not covered by the plan, safer option picked)
+- For a destination outside every selected root (for example `organize_by_date` `dest_root`), the
+  engine checks every existing ancestor up to the drive root for a junction.
+- Refusals found by a tool's apply-time recheck (`empty_folders`, `rename`) are journaled as
+  skipped after the engine's rows, so they get later sequence numbers.
+- `media_resize` reports cloud-only and junction refusals at apply as failed, not skipped.
+- Aspect tolerance is tested just inside and outside 2%, because exactly 2% is lost to float
+  rounding; the comparison is unchanged.
+
+#### Not done (left for later)
+- Settings still ignored by tools (`media_resize` `default_output_folder`, `organize_by_date`
+  `unknown_date_folder` / `min_plausible_year` / `workers`), and `tools/base.py` category Literal
+  and `discover()` error isolation.
+
 ### Review fixes (2026-11-12)
 
 #### Changed

@@ -2,7 +2,7 @@
 
 The tool commands are generated from each tool's options model (``toolcmds.py``), so adding a tool
 adds its commands. Everything else is a fixed command: ``list``, ``history``, ``undo``, ``doctor``,
-``config``, ``presets``, ``version`` and ``duplicates explain``.
+``config``, ``presets``, ``export``, ``version`` and ``duplicates explain``.
 
 Global options go before the command: ``various-tools --config FILE --exiftool PATH ... <command>``.
 They apply to that run only, and nothing given on the command line is saved to the settings.
@@ -22,6 +22,7 @@ import typer
 from various_tools.cli.commands import doctor, history, make_list_command, undo, version
 from various_tools.cli.config_cmd import config_app
 from various_tools.cli.explain_cmd import explain_command
+from various_tools.cli.export_cmd import make_export_command
 from various_tools.cli.presets_cmd import build_presets_app
 from various_tools.cli.state import CONFIG_ENV_VAR, CliState
 from various_tools.cli.toolcmds import build_tool_app
@@ -105,6 +106,7 @@ def build_app() -> typer.Typer:
     app.command("history")(history)
     app.command("undo")(undo)
     app.command("doctor")(doctor)
+    app.command("export")(make_export_command(tools))
     app.add_typer(config_app, name="config")
     app.add_typer(build_presets_app(tools), name="presets")
     app.command("version")(version)

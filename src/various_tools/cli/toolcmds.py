@@ -3,7 +3,8 @@
 For every discovered tool this builds ``<tool> scan``, ``<tool> apply`` and
 ``presets save <tool>``. The flags come from :func:`various_tools.core.schema.describe`, so a new
 tool or a new option field needs no CLI code. Hand-written flags exist only for the shared
-``--preset``, ``--json``, ``--save-plan``, ``--plan`` and ``--yes``.
+``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--export`` and
+``--export-format``.
 
 How values travel: every generated flag defaults to ``None`` meaning "not given". Only the flags
 the user typed are collected as overrides, and they are applied on top of the preset (if any) and
@@ -22,6 +23,11 @@ import typer
 from pydantic import ValidationError
 from rich.markup import escape
 
+from various_tools.cli.export_cmd import (
+    check_export_target,
+    export_plan_file,
+    export_result_file,
+)
 from various_tools.cli.render import permanent_delete_requested, print_plan, print_result
 from various_tools.cli.runner import run_job
 from various_tools.cli.state import (
@@ -47,6 +53,8 @@ RESERVED_FLAGS = frozenset(
         "save-plan",
         "plan",
         "yes",
+        "export",
+        "export-format",
         "config",
         "exiftool",
         "ffmpeg",
@@ -296,6 +304,7 @@ def _preset_param(extra: str) -> inspect.Parameter:
 def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> Callable[..., None]:
     def scan(**kw: Any) -> None:
         state = get_state(kw["ctx"])
+        check_export_target(kw["export"], kw["export_format"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
         plan = run_job(
@@ -303,6 +312,8 @@ def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> C
         ).unwrap()
         if kw["save_plan"]:
             _save_plan(plan, kw["save_plan"])
+        if kw["export"]:
+            export_plan_file(plan, kw["export"], kw["export_format"], tool.name)
         if kw["as_json"]:
             typer.echo(plan.to_json())
             return
@@ -336,9 +347,37 @@ def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> C
                 ),
             ],
         ),
+        *_export_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(scan, params)
+
+
+def _export_params() -> list[inspect.Parameter]:
+    return [
+        _param(
+            "export",
+            Annotated[
+                str | None,
+                typer.Option(
+                    "--export",
+                    metavar="FILE",
+                    help="Also write a report to FILE (.csv, .xlsx, .html or .txt).",
+                ),
+            ],
+        ),
+        _param(
+            "export_format",
+            Annotated[
+                str | None,
+                typer.Option(
+                    "--export-format",
+                    metavar="FMT",
+                    help="Report format: csv, xlsx, html, txt or log. Default: from the suffix.",
+                ),
+            ],
+        ),
+    ]
 
 
 def _save_plan(plan: Plan, target: str) -> None:
@@ -361,6 +400,7 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
     def apply(**kw: Any) -> None:
         state = get_state(kw["ctx"])
         yes: bool = kw["yes"]
+        check_export_target(kw["export"], kw["export_format"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         if kw["plan"]:
             if overrides or kw["preset"]:
@@ -380,6 +420,8 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         if not selected:
             print_plan(console, plan, show_table=False)
             console.print("Nothing to apply: no action is selected.")
+            if kw["export"]:
+                note("Nothing was exported: no action was applied.")
             return
         print_plan(console, plan, show_table=not yes)
         settings = state.settings()
@@ -406,6 +448,10 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         )
         if outcome.value is not None:
             print_result(console, outcome.value)
+            if kw["export"]:
+                export_result_file(
+                    plan, outcome.value, kw["export"], kw["export_format"], tool.name
+                )
         if outcome.cancelled:
             note("Cancelled.")
             raise typer.Exit(EXIT_CANCELLED)
@@ -436,6 +482,7 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             ],
             False,
         ),
+        *_export_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(apply, params)

@@ -6,31 +6,54 @@ orderings differ, as they did in the two legacy scripts, so each keeps its own k
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-COPY_MARK = re.compile(r"(\(\d+\)|\bcopy\b|-\s*copy)", re.I)
+# The default of the ``copy_mark`` option: names like "photo (1).jpg" or "photo - copy.jpg".
+COPY_MARK_PATTERN = r"(\(\d+\)|\bcopy\b|-\s*copy)"
 
 
-def _copy_flag(name: str) -> int:
+@functools.lru_cache(maxsize=32)
+def compile_copy_mark(pattern: str) -> re.Pattern[str]:
+    """The copy-name pattern, compiled once. It ignores case, as in the legacy scripts."""
+    return re.compile(pattern, re.I)
+
+
+def _copy_flag(name: str, copy_mark: str) -> int:
     """1 for names that look like a copy, such as "(1)" or "copy", so they sort last."""
-    return 1 if COPY_MARK.search(name) else 0
+    return 1 if compile_copy_mark(copy_mark).search(name) else 0
 
 
-def image_keep_key(path: Path, *, w: int, h: int, size: int, mtime: float) -> tuple[object, ...]:
+def image_keep_key(
+    path: Path,
+    *,
+    w: int,
+    h: int,
+    size: int,
+    mtime: float,
+    copy_mark: str = COPY_MARK_PATTERN,
+) -> tuple[object, ...]:
     """Largest picture, then largest file, then a non-copy name, then the oldest."""
     name = os.path.basename(path)
-    return (-(w * h), -size, _copy_flag(name), len(name), mtime, name)
+    return (-(w * h), -size, _copy_flag(name, copy_mark), len(name), mtime, name)
 
 
 def video_keep_key(
-    path: Path, *, w: int, h: int, size: int, dur: float, mtime: float
+    path: Path,
+    *,
+    w: int,
+    h: int,
+    size: int,
+    dur: float,
+    mtime: float,
+    copy_mark: str = COPY_MARK_PATTERN,
 ) -> tuple[object, ...]:
     """Largest frame, then highest bitrate (size per second), then a non-copy name, then oldest."""
     name = os.path.basename(path)
-    return (-(w * h), -size / max(dur, 0.1), _copy_flag(name), len(name), mtime, name)
+    return (-(w * h), -size / max(dur, 0.1), _copy_flag(name, copy_mark), len(name), mtime, name)
 
 
 @dataclass(frozen=True)

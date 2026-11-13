@@ -36,7 +36,7 @@ from various_tools.tools.duplicates.explain import explain
 from various_tools.tools.duplicates.images import ImageInfo, ImageRules, read_image
 from various_tools.tools.duplicates.keeper import image_keep_key, video_keep_key
 from various_tools.tools.duplicates.verify_ollama import OllamaVerifier
-from various_tools.tools.duplicates.videos import VideoInfo, VideoRules, same_video
+from various_tools.tools.duplicates.videos import VIDEO_EXT, VideoInfo, VideoRules, same_video
 
 REPO = Path(__file__).resolve().parents[3]
 LEGACY_IMAGES = REPO / "legacy" / "python-find_duplicates.py"
@@ -55,15 +55,12 @@ def journal(tmp_path: Path) -> Iterator[Journal]:
     j.close()
 
 
-@pytest.fixture(autouse=True)
-def _cache_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scan cache lives in the user's cache folder by default. Tests use a temp folder."""
-    monkeypatch.setattr(dup_tool, "CACHE_DIR", tmp_path / "cache")
-
-
 def _ctx(tmp_path: Path, journal: Journal | None, deps: ExternalTools | None = None) -> RunContext:
+    """The scan cache lives in the ``cache_folder`` setting. Tests keep it under ``tmp_path``."""
     return RunContext(
-        settings=Settings.model_validate({"onedrive_root": tmp_path}),
+        settings=Settings.model_validate(
+            {"onedrive_root": tmp_path, "cache_folder": tmp_path / "cache"}
+        ),
         deps=deps or ExternalTools(env={}, ollama_probe=lambda _u: None),
         journal=journal,
     )
@@ -369,9 +366,9 @@ def test_cloud_only_images_are_never_read(tmp_path: Path, monkeypatch: pytest.Mo
     read: list[Path] = []
     real_read = dup_tool.read_image
 
-    def spy(path: Path, size: int, mtime: float) -> ImageInfo:
+    def spy(path: Path, size: int, mtime: float, params: images.ReadParams) -> ImageInfo:
         read.append(path)
-        return real_read(path, size, mtime)
+        return real_read(path, size, mtime, params)
 
     monkeypatch.setattr(dup_tool, "walk", walk_with_one_cloud_file)
     monkeypatch.setattr(dup_tool, "read_image", spy)
@@ -438,9 +435,9 @@ def test_cached_results_are_reused_until_the_file_changes(
     calls: list[Path] = []
     real_read = dup_tool.read_image
 
-    def counting(path: Path, size: int, mtime: float) -> ImageInfo:
+    def counting(path: Path, size: int, mtime: float, params: images.ReadParams) -> ImageInfo:
         calls.append(path)
-        return real_read(path, size, mtime)
+        return real_read(path, size, mtime, params)
 
     monkeypatch.setattr(dup_tool, "read_image", counting)
     second = dup_tool.collect(opts, _ctx(tmp_path, None))
@@ -857,3 +854,232 @@ def test_video_frame_boundaries(gaps: tuple[int, ...], expected: bool) -> None:
     a = _clip("a.mp4", 60.0)
     b = _clip("b.mp4", 60.0, tuple(_bits(g) for g in gaps))
     assert same_video(a, b, VideoRules()) is expected
+
+
+# ---- configurable options (nothing is constant) ------------------------------------------------
+
+
+def test_option_defaults_are_the_old_constants() -> None:
+    opts = DuplicatesOptions()
+    assert opts.thumb_size == 128 and opts.phash_size == 16 and opts.video_phash_size == 16
+    assert opts.frame_width == 320 and opts.sharpness_px == 1600
+    assert opts.frame_retries == 6 and opts.frame_step_back == 0.8
+    assert opts.verify_borderline_block == 2.0
+    assert opts.image_extensions == sorted(images.IMAGE_EXT)
+    assert opts.visual_skip_extensions == [".gif"]
+    assert opts.video_extensions == sorted(VIDEO_EXT)
+    assert opts.ollama_image_px == 512 and opts.ollama_jpeg_quality == 85
+    assert opts.ollama_prompt.endswith("Answer only YES or NO.")
+    assert opts.burst_name == r"^(?:IMG_)?(\d{8}_\d{6})"
+    assert "copy" in opts.copy_mark
+
+
+def test_locked_thresholds_are_marked_locked_and_advanced() -> None:
+    locked = {
+        "phash_max",
+        "dhash_max",
+        "aspect_tol",
+        "burst_phash_max",
+        "pixel_block_max",
+        "dur_tol_s",
+        "dur_tol_pct",
+        "frame_mean_max",
+        "frame_worst_max",
+        "sample_at",
+    }
+    for name in locked:
+        info = DuplicatesOptions.model_fields[name]
+        extra = info.json_schema_extra
+        assert isinstance(extra, dict)
+        assert extra["locked"] is True and extra["advanced"] is True
+        assert (info.description or "").startswith("🔒"), name
+
+
+def test_extension_lists_are_normalised_and_checked() -> None:
+    opts = DuplicatesOptions(image_extensions=["JPG", " .Png ", "jpg"])
+    assert opts.image_extensions == [".jpg", ".png"]
+    for bad in ([""], ["a/b"], ["x.y"], [".j pg"]):
+        with pytest.raises(ValidationError):
+            DuplicatesOptions(image_extensions=bad)
+    with pytest.raises(ValidationError):
+        DuplicatesOptions(image_extensions=[".mp4"], video_extensions=[".mp4"])
+
+
+def test_a_custom_extension_list_changes_what_is_scanned(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    original = _save(_scene(1), tree / "a.png")
+    shutil.copyfile(original, tree / "b.png")
+    shutil.copyfile(original, tree / "c.jpg")
+    both = _ours(tree, tmp_path, None, media="images", use_cache=False, exact_only=True)
+    assert len(both) == 2  # b.png and c.jpg are copies of a.png
+    only_png = _ours(
+        tree,
+        tmp_path,
+        None,
+        media="images",
+        use_cache=False,
+        exact_only=True,
+        image_extensions=[".png"],
+    )
+    assert only_png == {("exact", "a.png", "b.png")}
+
+
+def test_visual_skip_extensions_decide_which_types_are_compared_by_bytes(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _save(_scene(1), tree / "a.png")
+    _save(_scene(1).resize((200, 150)), tree / "b.png")
+    default = _ours(tree, tmp_path, None, media="images", use_cache=False)
+    assert ("visual", "a.png", "b.png") in default
+    skipped = _ours(
+        tree, tmp_path, None, media="images", use_cache=False, visual_skip_extensions=[".png"]
+    )
+    assert skipped == set()  # PNGs are now compared by bytes only
+
+
+def test_burst_name_must_compile_and_have_one_group() -> None:
+    for bad in ("(", r"\d+", r"(a)(b)"):
+        with pytest.raises(ValidationError):
+            DuplicatesOptions(burst_name=bad)
+    DuplicatesOptions(burst_name=r"^(\d{6})_")
+
+
+def test_a_custom_burst_pattern_groups_other_file_names() -> None:
+    a = _crafted("shot_0101_1.png")
+    b = _crafted("shot_0101_2.png", phash=_bits(30))
+    assert images.find_matches([a, b], ImageRules()) == []  # the default pattern sees no burst
+    rules = ImageRules(burst_name=r"^shot_(\d{4})")
+    assert [m.kind for m in images.find_matches([a, b], rules)] == ["burst"]
+
+
+def test_a_custom_copy_mark_changes_which_copy_stays() -> None:
+    default_copy = image_keep_key(Path("a/x_dup.png"), w=4, h=3, size=10, mtime=1.0)
+    custom_copy = image_keep_key(
+        Path("a/x_dup.png"), w=4, h=3, size=10, mtime=1.0, copy_mark=r"_dup"
+    )
+    assert default_copy[2] == 0 and custom_copy[2] == 1
+
+
+def test_borderline_block_option_controls_the_model_check() -> None:
+    a, b = _crafted("a.png", grey=100), _crafted("b.png", grey=102)
+    assert not images.is_borderline(a, b, 2.0, ImageRules())
+    assert images.is_borderline(a, b, 2.0, ImageRules(verify_borderline_block=1.5))
+
+
+def test_thumb_and_hash_sizes_are_part_of_the_cache_identity(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    cache_dir = tmp_path / "cache"
+    base = DuplicatesOptions(roots=[tree], media="images")
+    dup_tool.collect(base, _ctx(tmp_path, None))
+    assert len(list(cache_dir.glob("*.sqlite"))) == 1
+    dup_tool.collect(base.model_copy(update={"thumb_size": 64}), _ctx(tmp_path, None))
+    dup_tool.collect(base.model_copy(update={"phash_size": 8}), _ctx(tmp_path, None))
+    assert len(list(cache_dir.glob("*.sqlite"))) == 3  # each setting gets its own cache
+    identities = {
+        images.ReadParams().cache_identity(),
+        images.ReadParams(thumb_size=64).cache_identity(),
+        images.ReadParams(phash_size=8).cache_identity(),
+        images.ReadParams(sharpness_px=800).cache_identity(),
+        images.ReadParams(visual_skip_ext=frozenset()).cache_identity(),
+    }
+    assert len(identities) == 5
+
+
+def test_changed_thumb_size_is_never_served_stale_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    dup_tool.collect(DuplicatesOptions(roots=[tree], media="images"), _ctx(tmp_path, None))
+    seen: list[int] = []
+    real_read = dup_tool.read_image
+
+    def spy(path: Path, size: int, mtime: float, params: images.ReadParams) -> ImageInfo:
+        info = real_read(path, size, mtime, params)
+        if info.thumb_z is not None:
+            seen.append(images.thumb_array(info.thumb_z).shape[0])
+        return info
+
+    monkeypatch.setattr(dup_tool, "read_image", spy)
+    opts = DuplicatesOptions(roots=[tree], media="images", thumb_size=64)
+    dup_tool.collect(opts, _ctx(tmp_path, None))
+    assert seen and set(seen) == {64}  # recomputed at 64 px, not read back at 128 px
+
+
+def test_a_small_hash_grid_and_thumbnail_still_find_copies(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    found = _ours(
+        tree, tmp_path, None, media="images", use_cache=False, thumb_size=64, phash_size=8
+    )
+    assert {kind for kind, _, _ in found} == {"exact", "visual", "burst"}
+    assert any(kind == "visual" and dup == "pics/beach_small.png" for kind, _, dup in found)
+
+
+def test_cache_folder_setting_decides_where_the_cache_lives(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    target = tmp_path / "somewhere" / "else"
+    settings = Settings.model_validate({"onedrive_root": tmp_path, "cache_folder": target})
+    ctx = RunContext(
+        settings=settings,
+        deps=ExternalTools(env={}, ollama_probe=lambda _u: None),
+        journal=None,
+    )
+    dup_tool.collect(DuplicatesOptions(roots=[tree], media="images"), ctx)
+    assert list(target.glob("duplicates-images-*.sqlite"))
+
+
+def test_missing_program_notes_use_the_install_hint_from_deps(tmp_path: Path) -> None:
+    from various_tools.core.deps import install_hint
+
+    tree = tmp_path / "videos"
+    tree.mkdir()
+    (tree / "clip.mp4").write_bytes(b"not really a video")
+
+    class NoFfmpeg(ExternalTools):
+        def path(self, tool: str) -> Path | None:
+            return None
+
+    plan = TOOL.scan(
+        DuplicatesOptions(roots=[tree], media="videos", use_cache=False),
+        _ctx(tmp_path, None, deps=NoFfmpeg(env={}, ollama_probe=lambda _u: None)),
+    )
+    assert any(install_hint("ffprobe") in note for note in plan.notes)
+
+
+def test_settings_timeouts_and_chunk_size_reach_the_readers(tmp_path: Path) -> None:
+    settings = Settings.model_validate(
+        {
+            "onedrive_root": tmp_path,
+            "hash_chunk_kb": 8,
+            "ffprobe_timeout_s": 11,
+            "frame_grab_timeout_s": 22,
+        }
+    )
+    ctx = RunContext(
+        settings=settings, deps=ExternalTools(env={}, ollama_probe=lambda _u: None), journal=None
+    )
+    opts = DuplicatesOptions(frame_retries=3, frame_step_back=0.5, frame_width=160)
+    assert opts.read_params(ctx).chunk_bytes == 8 * 1024
+    video = opts.video_params(ctx)
+    assert (video.probe_timeout_s, video.frame_timeout_s) == (11, 22)
+    assert (video.frame_retries, video.frame_step_back, video.frame_width) == (3, 0.5, 160)
+
+
+def test_ollama_options_reach_the_verifier(
+    tmp_path: Path, ollama: tuple[str, dict[str, Any]]
+) -> None:
+    url, _answer = ollama
+    seen: dict[str, Any] = {}
+
+    class Spy(OllamaVerifier):
+        def _jpeg_b64(self, path: Path) -> str:
+            seen["px"], seen["quality"] = self.image_px, self.jpeg_quality
+            return super()._jpeg_b64(path)
+
+    verifier = Spy(url, "lfm3-vl:latest", prompt="Same?", image_px=64, jpeg_quality=50)
+    a = _save(_scene(1), tmp_path / "a.png")
+    assert verifier.confirms(a, a) is True
+    assert seen == {"px": 64, "quality": 50}
+    assert verifier.prompt == "Same?"

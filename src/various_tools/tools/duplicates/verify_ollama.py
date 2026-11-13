@@ -19,10 +19,15 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from various_tools.core.media.imaging import open_image
+from various_tools.core.settings import (
+    DEFAULT_OLLAMA_CHAT_TIMEOUT_S,
+    DEFAULT_OLLAMA_TAGS_TIMEOUT_S,
+)
 
-CHECK_TIMEOUT_S = 10
-CHAT_TIMEOUT_S = 300  # a vision model can take a while per pair on modest hardware
+# Defaults of the ``ollama_*`` options on ``DuplicatesOptions``. The verifier gets the option
+# values, and the two timeouts come from the user's settings.
 JPEG_SIZE = 512
+JPEG_QUALITY = 85
 PROMPT = "Image 1 and image 2 are photos. Are they the same photo? Answer only YES or NO."
 
 
@@ -37,7 +42,11 @@ class VerifyStats:
 class OllamaVerifier:
     url: str
     model: str
-    timeout: float = CHAT_TIMEOUT_S
+    timeout: float = DEFAULT_OLLAMA_CHAT_TIMEOUT_S  # seconds per answer (``ollama_chat_timeout_s``)
+    check_timeout: float = DEFAULT_OLLAMA_TAGS_TIMEOUT_S  # seconds to list models
+    prompt: str = PROMPT
+    image_px: int = JPEG_SIZE
+    jpeg_quality: int = JPEG_QUALITY
     stats: VerifyStats = field(default_factory=VerifyStats)
     # Why the most recent ``confirms`` call failed, or None when it got an answer.
     last_error: str | None = None
@@ -45,7 +54,7 @@ class OllamaVerifier:
     def check_model(self) -> str | None:
         """Why the model cannot be used, or None when it is installed."""
         try:
-            with urllib.request.urlopen(f"{self.url}/api/tags", timeout=CHECK_TIMEOUT_S) as resp:
+            with urllib.request.urlopen(f"{self.url}/api/tags", timeout=self.check_timeout) as resp:
                 names = {str(m["name"]) for m in json.load(resp)["models"]}
         except Exception as exc:  # any failure here means the server is not usable
             return f"Ollama is not reachable at {self.url}: {exc}"
@@ -76,7 +85,11 @@ class OllamaVerifier:
             "think": False,
             "options": {"temperature": 0, "num_predict": 16},
             "messages": [
-                {"role": "user", "content": PROMPT, "images": [_jpeg_b64(a), _jpeg_b64(b)]}
+                {
+                    "role": "user",
+                    "content": self.prompt,
+                    "images": [self._jpeg_b64(a), self._jpeg_b64(b)],
+                }
             ],
         }
         request = urllib.request.Request(
@@ -89,12 +102,11 @@ class OllamaVerifier:
         answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S).strip().upper()
         return answer.startswith("YES")
 
-
-def _jpeg_b64(path: Path) -> str:
-    """A small, upright JPEG of the picture, base64 encoded for the model."""
-    with open_image(path) as im:
-        oriented: Image.Image = ImageOps.exif_transpose(im).convert("RGB")
-        oriented.thumbnail((JPEG_SIZE, JPEG_SIZE))
-        buf = io.BytesIO()
-        oriented.save(buf, "JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    def _jpeg_b64(self, path: Path) -> str:
+        """A small, upright JPEG of the picture, base64 encoded for the model."""
+        with open_image(path) as im:
+            oriented: Image.Image = ImageOps.exif_transpose(im).convert("RGB")
+            oriented.thumbnail((self.image_px, self.image_px))
+            buf = io.BytesIO()
+            oriented.save(buf, "JPEG", quality=self.jpeg_quality)
+        return base64.b64encode(buf.getvalue()).decode("ascii")

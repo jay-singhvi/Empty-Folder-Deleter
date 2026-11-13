@@ -18,8 +18,11 @@ from pathlib import Path
 
 from various_tools.core import hashing
 from various_tools.core.media import ffmpeg
-from various_tools.tools.duplicates.keeper import Match, video_keep_key
+from various_tools.core.settings import DEFAULT_FFPROBE_TIMEOUT_S, DEFAULT_FRAME_TIMEOUT_S
+from various_tools.tools.duplicates.keeper import COPY_MARK_PATTERN, Match, video_keep_key
 
+# The values below are the defaults of the matching options on ``DuplicatesOptions``. The code
+# reads the option values (through ``VideoRules`` and ``VideoReadParams``), never these directly.
 VIDEO_EXT = frozenset({".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv", ".webm"})
 FRAME_WIDTH = 320  # frames are compared at this width, as in the legacy script
 PHASH_SIZE = 16
@@ -27,13 +30,29 @@ PHASH_SIZE = 16
 
 @dataclass(frozen=True)
 class VideoRules:
-    """Tuned thresholds (AGENTS.md 🔒). Defaults match the legacy script."""
+    """Tuned thresholds (AGENTS.md 🔒) and the other matching options.
+
+    The first five defaults match the legacy script. ``copy_mark`` is the option default.
+    """
 
     dur_tol_s: float = 0.6
     dur_tol_pct: float = 0.01
     aspect_tol: float = 0.02
     frame_mean_max: float = 10
     frame_worst_max: int = 24
+    copy_mark: str = COPY_MARK_PATTERN
+
+
+@dataclass(frozen=True)
+class VideoReadParams:
+    """How a clip is probed and its frames are grabbed and hashed."""
+
+    frame_width: int = FRAME_WIDTH
+    phash_size: int = PHASH_SIZE
+    frame_retries: int = ffmpeg.FRAME_RETRIES
+    frame_step_back: float = ffmpeg.FRAME_STEP_BACK
+    probe_timeout_s: float = DEFAULT_FFPROBE_TIMEOUT_S
+    frame_timeout_s: float = DEFAULT_FRAME_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -54,18 +73,31 @@ def read_video(
     size: int,
     mtime: float,
     sample_at: Sequence[float],
+    params: VideoReadParams | None = None,
 ) -> VideoInfo:
     """Probe one clip and, when ``ffmpeg_exe`` is given, hash its sampled frames.
 
     Raises :class:`~various_tools.core.media.ffmpeg.MediaError` (or OSError) when the file
     cannot be read. Such files are reported and never moved.
     """
-    dur = ffmpeg.probe_duration(ffprobe, path)
-    w, h = ffmpeg.display_size(ffprobe, path)
+    use = params or VideoReadParams()
+    dur = ffmpeg.probe_duration(ffprobe, path, timeout=use.probe_timeout_s)
+    w, h = ffmpeg.display_size(ffprobe, path, timeout=use.probe_timeout_s)
     frames: tuple[int, ...] = ()
     if ffmpeg_exe is not None:
         frames = tuple(
-            hashing.phash(ffmpeg.grab_frame(ffmpeg_exe, path, dur * f, FRAME_WIDTH), PHASH_SIZE)
+            hashing.phash(
+                ffmpeg.grab_frame(
+                    ffmpeg_exe,
+                    path,
+                    dur * f,
+                    use.frame_width,
+                    timeout=use.frame_timeout_s,
+                    retries=use.frame_retries,
+                    step_back=use.frame_step_back,
+                ),
+                use.phash_size,
+            )
             for f in sample_at
         )
     return VideoInfo(path, size, mtime, dur, w, h, frames)
@@ -83,8 +115,10 @@ def same_video(a: VideoInfo, b: VideoInfo, rules: VideoRules) -> bool:
     return sum(d) / len(d) <= rules.frame_mean_max and max(d) <= rules.frame_worst_max
 
 
-def keep_key(v: VideoInfo) -> tuple[object, ...]:
-    return video_keep_key(v.path, w=v.w, h=v.h, size=v.size, dur=v.dur, mtime=v.mtime)
+def keep_key(v: VideoInfo, rules: VideoRules) -> tuple[object, ...]:
+    return video_keep_key(
+        v.path, w=v.w, h=v.h, size=v.size, dur=v.dur, mtime=v.mtime, copy_mark=rules.copy_mark
+    )
 
 
 def find_matches(
@@ -105,7 +139,7 @@ def find_matches(
         by_content[key].append(v)
     reps: list[VideoInfo] = []
     for members in by_content.values():
-        members.sort(key=keep_key)
+        members.sort(key=lambda video: keep_key(video, rules))
         reps.append(members[0])
         matches += [
             Match("exact", members[0].path, dup.path, "identical bytes (SHA-256)")
@@ -114,7 +148,7 @@ def find_matches(
     if exact_only:
         return matches
 
-    reps.sort(key=keep_key)
+    reps.sort(key=lambda video: keep_key(video, rules))
     leaders: list[VideoInfo] = []
     for r in reps:
         for leader in leaders:

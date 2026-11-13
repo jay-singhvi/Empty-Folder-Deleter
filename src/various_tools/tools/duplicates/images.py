@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
+import math
 import re
 import zlib
 from collections import defaultdict
@@ -31,29 +33,66 @@ from various_tools.core import hashing
 from various_tools.core.context import RunContext
 from various_tools.core.media.exif import EXIF_IFD, TAG_DATETIME_ORIGINAL
 from various_tools.core.media.imaging import open_image
-from various_tools.tools.duplicates.keeper import Match, image_keep_key
+from various_tools.tools.duplicates.keeper import COPY_MARK_PATTERN, Match, image_keep_key
 
+# The values below are the defaults of the matching options on ``DuplicatesOptions``. The code
+# reads the option values (through ``ImageRules`` and ``ReadParams``), never these directly.
 IMAGE_EXT = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff"}
 )
 # Animated GIFs are compared by their bytes only.
 VISUAL_SKIP_EXT = frozenset({".gif"})
-THUMB = 128
+THUMB = 128  # side of the grey thumbnail used for the pixel check
 PHASH_SIZE = 16  # 16x16 hash grid, so 256 bits
+SHARPNESS_PX = 1600  # the picture is shrunk to fit this box before its sharpness is measured
 # A visual match above this block difference, or near a hash limit, gets a model check.
 VERIFY_BORDERLINE_BLOCK = 2.0
-BURST_NAME = re.compile(r"^(?:IMG_)?(\d{8}_\d{6})")  # timestamp to the second
+BURST_NAME_PATTERN = r"^(?:IMG_)?(\d{8}_\d{6})"  # timestamp to the second, in group 1
+# The pixel check compares the thumbnail in blocks of this many pixels per side. It is part of the
+# definition of ``pixel_block_max``, which was tuned for it, so it is not an option.
+BLOCK_PX = 8
+
+
+@functools.lru_cache(maxsize=32)
+def compile_burst_name(pattern: str) -> re.Pattern[str]:
+    """The burst-name pattern, compiled once. Group 1 is the timestamp that frames share."""
+    return re.compile(pattern)
 
 
 @dataclass(frozen=True)
 class ImageRules:
-    """Tuned thresholds (AGENTS.md 🔒). Defaults match the legacy script."""
+    """Tuned thresholds (AGENTS.md 🔒) and the other matching options.
+
+    The first five defaults match the legacy script. The rest are the option defaults.
+    """
 
     phash_max: int = 2
     dhash_max: int = 4
     aspect_tol: float = 0.02
     burst_phash_max: int = 40
     pixel_block_max: float = 3.0
+    phash_size: int = PHASH_SIZE
+    verify_borderline_block: float = VERIFY_BORDERLINE_BLOCK
+    burst_name: str = BURST_NAME_PATTERN
+    copy_mark: str = COPY_MARK_PATTERN
+
+
+@dataclass(frozen=True)
+class ReadParams:
+    """How one image is hashed and measured. Every field except ``chunk_bytes`` changes what is
+    stored for a file, so :meth:`cache_identity` goes into the cache name and old results are
+    never reused after a change."""
+
+    phash_size: int = PHASH_SIZE
+    thumb_size: int = THUMB
+    sharpness_px: int = SHARPNESS_PX
+    visual_skip_ext: frozenset[str] = VISUAL_SKIP_EXT
+    chunk_bytes: int = hashing.CHUNK_SIZE  # read size only; it never changes a result
+
+    def cache_identity(self) -> str:
+        skip = ",".join(sorted(self.visual_skip_ext))
+        skip_id = hashlib.sha1(skip.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+        return f"t{self.thumb_size}-h{self.phash_size}-s{self.sharpness_px}-x{skip_id}"
 
 
 @dataclass(frozen=True)
@@ -70,7 +109,7 @@ class ImageInfo:
     dhash: int | None
     sharp: float | None
     taken: str | None  # EXIF DateTimeOriginal as written, or None
-    thumb_z: bytes | None  # 128×128 grey thumbnail, zlib-compressed
+    thumb_z: bytes | None  # square grey thumbnail (``thumb_size`` px), zlib-compressed
 
 
 def _taken_text(im: Image.Image) -> str | None:
@@ -79,22 +118,25 @@ def _taken_text(im: Image.Image) -> str | None:
     return str(value).strip() if value else None
 
 
-def read_image(path: Path, size: int, mtime: float) -> ImageInfo:
+def read_image(path: Path, size: int, mtime: float, params: ReadParams | None = None) -> ImageInfo:
     """Hash and measure one image. Raises on unreadable files, and for cloud-only files
     (``open_image`` and ``hashing.sha256`` both check OneDrive state first)."""
-    sha = hashing.sha256(path)
+    use = params or ReadParams()
+    sha = hashing.sha256(path, use.chunk_bytes)
     with open_image(path) as im:
         w, h = im.size
         taken = _taken_text(im)
-        if path.suffix.lower() in VISUAL_SKIP_EXT:
+        if path.suffix.lower() in use.visual_skip_ext:
             return ImageInfo(path, size, mtime, w, h, sha, None, None, None, taken, None)
         oriented = ImageOps.exif_transpose(im).convert("RGB")
         w, h = oriented.size
-        phash = hashing.phash(oriented, PHASH_SIZE)
-        dhash = hashing.dhash(oriented, PHASH_SIZE)
+        phash = hashing.phash(oriented, use.phash_size)
+        dhash = hashing.dhash(oriented, use.phash_size)
         grey = oriented.convert("L")
-        thumb = np.asarray(grey.resize((THUMB, THUMB), Image.Resampling.LANCZOS), dtype=np.uint8)
-        grey.thumbnail((1600, 1600))
+        thumb = np.asarray(
+            grey.resize((use.thumb_size, use.thumb_size), Image.Resampling.LANCZOS), dtype=np.uint8
+        )
+        grey.thumbnail((use.sharpness_px, use.sharpness_px))
         sharp = float(np.asarray(grey.filter(ImageFilter.FIND_EDGES), dtype=np.float32).var())
         return ImageInfo(
             path,
@@ -118,8 +160,8 @@ def image_to_cache(info: ImageInfo) -> dict[str, Any]:
         "w": info.w,
         "h": info.h,
         "sha": info.sha,
-        "phash": None if info.phash is None else format(info.phash, "064x"),
-        "dhash": None if info.dhash is None else format(info.dhash, "064x"),
+        "phash": None if info.phash is None else format(info.phash, "x"),
+        "dhash": None if info.dhash is None else format(info.dhash, "x"),
         "sharp": info.sharp,
         "taken": info.taken,
         "thumb": None if info.thumb_z is None else base64.b64encode(info.thumb_z).decode("ascii"),
@@ -149,19 +191,20 @@ def image_from_cache(path: Path, size: int, mtime: float, value: dict[str, Any])
 @functools.lru_cache(maxsize=4096)
 def thumb_array(thumb_z: bytes) -> np.ndarray:
     raw = zlib.decompress(thumb_z)
-    return np.frombuffer(raw, dtype=np.uint8).reshape(THUMB, THUMB).astype(np.float32)
+    side = math.isqrt(len(raw))
+    return np.frombuffer(raw, dtype=np.uint8).reshape(side, side).astype(np.float32)
 
 
-def same_burst(a: ImageInfo, b: ImageInfo) -> bool:
-    """Two different shots taken in the same second (burst mode)."""
-    ma = BURST_NAME.match(a.path.name)
-    mb = BURST_NAME.match(b.path.name)
-    return bool(ma and mb and ma.group(1) == mb.group(1))
-
-
-def burst_key(info: ImageInfo) -> str | None:
-    m = BURST_NAME.match(info.path.name)
+def burst_key(info: ImageInfo, rules: ImageRules) -> str | None:
+    """The timestamp this file name shares with the other frames of its burst, or None."""
+    m = compile_burst_name(rules.burst_name).match(info.path.name)
     return m.group(1) if m else None
+
+
+def same_burst(a: ImageInfo, b: ImageInfo, rules: ImageRules) -> bool:
+    """Two different shots taken in the same second (burst mode)."""
+    ka, kb = burst_key(a, rules), burst_key(b, rules)
+    return ka is not None and ka == kb
 
 
 def same_capture(a: ImageInfo, b: ImageInfo) -> bool:
@@ -187,7 +230,9 @@ def cheap_match(a: ImageInfo, b: ImageInfo, rules: ImageRules) -> bool:
 
 def max_block_diff(a: np.ndarray, b: np.ndarray) -> float:
     """Largest mean absolute difference over 8×8 blocks, which catches local motion."""
-    return float(np.abs(a - b).reshape(16, 8, 16, 8).mean(axis=(1, 3)).max())
+    blocks = a.shape[0] // BLOCK_PX
+    diff = np.abs(a - b).reshape(blocks, BLOCK_PX, blocks, BLOCK_PX)
+    return float(diff.mean(axis=(1, 3)).max())
 
 
 def is_borderline(a: ImageInfo, b: ImageInfo, block: float, rules: ImageRules) -> bool:
@@ -195,7 +240,7 @@ def is_borderline(a: ImageInfo, b: ImageInfo, block: float, rules: ImageRules) -
     assert a.phash is not None and b.phash is not None
     assert a.dhash is not None and b.dhash is not None
     return (
-        block > VERIFY_BORDERLINE_BLOCK
+        block > rules.verify_borderline_block
         or hamming(a.phash, b.phash) >= rules.phash_max
         or hamming(a.dhash, b.dhash) >= rules.dhash_max - 1
     )
@@ -212,8 +257,10 @@ def visual_reason(a: ImageInfo, b: ImageInfo, block: float, rules: ImageRules) -
     )
 
 
-def keep_key(info: ImageInfo) -> tuple[object, ...]:
-    return image_keep_key(info.path, w=info.w, h=info.h, size=info.size, mtime=info.mtime)
+def keep_key(info: ImageInfo, rules: ImageRules) -> tuple[object, ...]:
+    return image_keep_key(
+        info.path, w=info.w, h=info.h, size=info.size, mtime=info.mtime, copy_mark=rules.copy_mark
+    )
 
 
 @dataclass(frozen=True)
@@ -235,11 +282,11 @@ def _find_visual(
     if r.phash is None:
         return None
     candidates: set[int] = set()
-    for key in hashing.band_keys(r.phash, rules.phash_max + 1):
+    for key in hashing.band_keys(r.phash, rules.phash_max + 1, rules.phash_size**2):
         candidates.update(bands.get(key, ()))
     for idx in sorted(candidates):
         leader = leaders[idx]
-        if same_burst(leader, r) or not cheap_match(leader, r, rules):
+        if same_burst(leader, r, rules) or not cheap_match(leader, r, rules):
             continue
         if not same_capture(leader, r):
             continue
@@ -286,7 +333,7 @@ def find_matches(
             tick(done, len(infos), "Comparing identical files")
     reps: list[ImageInfo] = []
     for members in by_sha.values():
-        members.sort(key=keep_key)
+        members.sort(key=lambda info: keep_key(info, rules))
         reps.append(members[0])
         matches += [
             Match("exact", members[0].path, dup.path, "identical bytes (SHA-256)")
@@ -296,7 +343,7 @@ def find_matches(
         return matches
 
     # Pass 2: the same picture, re-saved or resized. Burst frames stay leaders for pass 3.
-    reps.sort(key=keep_key)
+    reps.sort(key=lambda info: keep_key(info, rules))
     leaders: list[ImageInfo] = []
     bands: dict[tuple[int, int], list[int]] = defaultdict(list)
     for done, r in enumerate(reps, start=1):
@@ -308,13 +355,13 @@ def find_matches(
             continue
         leaders.append(r)
         if r.phash is not None:
-            for key in hashing.band_keys(r.phash, rules.phash_max + 1):
+            for key in hashing.band_keys(r.phash, rules.phash_max + 1, rules.phash_size**2):
                 bands[key].append(len(leaders) - 1)
 
     # Pass 3: burst frames. The sharpest frame stays and the rest go to review.
     bursts: dict[str, list[ImageInfo]] = defaultdict(list)
     for leader in leaders:
-        key = burst_key(leader)
+        key = burst_key(leader, rules)
         if key and leader.phash is not None:
             bursts[key].append(leader)
     for done, (key, frames) in enumerate(bursts.items(), start=1):

@@ -1,0 +1,74 @@
+name: Release
+
+# Plan §4 Phase 8.3: a v* tag builds the Windows app, smoke-launches the frozen build, compiles the
+# installer and publishes a GitHub Release with the installer and a portable zip. The version comes
+# from pyproject.toml only; the tag must match it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Read the version from pyproject.toml
+        id: version
+        shell: pwsh
+        run: |
+          $version = uv run python packaging/make_version_info.py --print-version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "Tag ${{ github.ref_name }} does not match pyproject.toml version $version"
+            exit 1
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Lint, types and tests
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+          uv run pyright
+          uv run pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Build the app (PyInstaller one-dir) and the portable zip
+        run: uv run python packaging/build.py
+
+      - name: Smoke-test the frozen build
+        run: uv run python packaging/smoke_test.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "iscc" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Various Tools ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Various-Tools-${{ steps.version.outputs.version }}-setup.exe
+            dist/Various-Tools-${{ steps.version.outputs.version }}-portable.zip

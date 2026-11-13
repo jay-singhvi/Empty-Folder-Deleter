@@ -53,7 +53,7 @@ entry-point line in `pyproject.toml`, tests under `tests/tools/<tool>/` and a pa
   command. A lossy Pillow re-encode is not offered.
 - **ExifTool arguments go through a UTF-8 argument file** (`tools/metadata_strip/exiftool.py:
   run_exiftool`), because names with accents or CJK characters fail as plain arguments on
-  Windows. `media_convert` uses it too.
+  Windows. The helper now lives in `core/media/exif.py`, and every ExifTool call uses it.
 - **`checksum` hashes at apply time,** not at scan time: the plan stores actions only, and the
   manifest should match the folder when it is written. A manifest is never overwritten (temp
   file, then rename without replace). Undo cannot remove a written manifest; delete it by hand.
@@ -64,12 +64,16 @@ entry-point line in `pyproject.toml`, tests under `tests/tools/<tool>/` and a pa
 - **Plans with nothing selected** (`disk_usage`, `corrupt_media`) are applied from the GUI by
   ticking actions, or from the CLI by setting `"selected": true` in a saved plan file.
 
+#### Fixed
+- `media_resize`'s RAW-to-JPEG metadata copy and the ExifTool capture-time fallback
+  (`exiftool_capture_time`, used by `organize_by_date`) failed on file names with characters
+  outside the ANSI code page. Both now use `run_exiftool` from `core/media/exif.py`, tested with
+  names like `café 写真 🙂.jpg`.
+
 #### Follow-ups (not done here)
-- Move `run_exiftool` to `core/media/exif.py` and use it in `media_resize`, whose RAW
-  metadata copy passes plain arguments and probably fails on non-ASCII names.
 - A shared `usable_roots()` helper and a pruning `walk()` in `core/fs.py` (the root checks are
   copied in several tools), and a shared hidden-path check.
-- A `--select-all` (or similar) flag for `apply` in the CLI.
+- A `--select-all` (or similar) flag for `apply` in the CLI, left to the CLI/GUI stages.
 - `make_video` in `tests/conftest.py` could create parent folders.
 
 ### Phase 4: CLI (2026-11-13)

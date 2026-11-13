@@ -1153,3 +1153,31 @@ def test_protected_folders_come_from_the_settings(tmp_path: Path) -> None:
     assert any("rotected" in n for n in plan.notes)
     open_plan = TOOL.scan(MediaResizeOptions(roots=[locked]), _ctx(tmp_path, None))
     assert len(open_plan.actions) == 1  # the default list does not protect this folder
+
+
+# ----- ExifTool with non-ASCII names ------------------------------------------------------
+
+
+def test_raw_metadata_copy_works_with_a_non_ascii_name(tmp_path: Path, exiftool_path: Path) -> None:
+    """The RAW metadata copy runs ExifTool through a UTF-8 argument file, so any name works.
+
+    A CR3 cannot be generated, so a JPEG with EXIF stands in for the RAW source: the ExifTool
+    call is the same.
+    """
+    from various_tools.tools.media_resize import images as resize_images
+
+    folder = tmp_path / "ünïcode 文件夹"
+    folder.mkdir()
+    source = folder / "café 写真 🙂.jpg"
+    exif_obj = Image.Exif()
+    exif_obj[0x0110] = "Test Model"  # Model
+    Image.new("RGB", (64, 48)).save(source, format="JPEG", exif=exif_obj)
+    target = folder / "ausgabe ñ.jpg"
+    Image.new("RGB", (32, 24)).save(target, format="JPEG")
+
+    resize_images._copy_raw_metadata(  # pyright: ignore[reportPrivateUsage]
+        exiftool_path, source, target, g.Target(32, 24), 60
+    )
+
+    with Image.open(target) as copied:
+        assert copied.getexif().get(0x0110) == "Test Model"

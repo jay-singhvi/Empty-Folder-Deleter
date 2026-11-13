@@ -3,11 +3,8 @@
 The program is passed in as a resolved path (``RunContext.deps.exiftool()``). This module never
 looks it up.
 
-Two Windows facts shape :func:`run_exiftool`. ExifTool reads its command line in the ANSI code
-page, so a file name with letters outside it (accents, Chinese, emoji) cannot be passed as an
-argument. Every call therefore passes its arguments through a UTF-8 argument file together with
-``-charset filename=utf8``, which works for any name. The argument file lives in the system temp
-folder, never in a folder the user chose.
+Every call goes through ``core.media.exif.run_exiftool`` (re-exported here), which passes the
+arguments in a UTF-8 argument file so that any Windows file name works.
 
 Which tags count as removable metadata is decided here, once, so that the preview (``scan``), the
 ExifTool arguments (``apply``) and the check of the written copy all agree.
@@ -15,19 +12,16 @@ ExifTool arguments (``apply``) and the check of the written copy all agree.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
-import subprocess
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from various_tools.core.deps import run_tool
 from various_tools.core.jsonutil import as_dict, as_list
+from various_tools.core.media.exif import run_exiftool as run_exiftool
 
 Scope = Literal["gps", "all"]
 
@@ -67,23 +61,6 @@ _DUPLICATE_SUFFIX = re.compile(r"\s\(\d+\)$")
 _OWNER_NAMES = frozenset(
     {"ownername", "cameraownername", "artist", "copyright", "creator", "author", "by-line"}
 )
-
-
-def run_exiftool(
-    exiftool: Path, args: Sequence[str], timeout: float
-) -> subprocess.CompletedProcess[str]:
-    """Run ExifTool with ``args`` (UTF-8, one per line) so any Windows file name works.
-
-    Can raise ``subprocess.TimeoutExpired`` or ``OSError``, like :func:`run_tool`.
-    """
-    fd, name = tempfile.mkstemp(prefix="various-tools-exiftool-", suffix=".args")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(args) + "\n")
-        return run_tool([str(exiftool), "-charset", "filename=utf8", "-@", name], timeout=timeout)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(name)
 
 
 @dataclass(frozen=True)

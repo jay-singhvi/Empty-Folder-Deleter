@@ -20,10 +20,10 @@ from typing import Any, Literal
 from PIL import Image, ImageOps
 
 from various_tools.core.fs import rename_no_replace
+from various_tools.core.media.exif import run_exiftool
 from various_tools.core.media.imaging import open_image
 from various_tools.core.onedrive import ensure_on_device
 from various_tools.core.settings import DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S
-from various_tools.tools.metadata_strip.exiftool import run_exiftool
 
 ImageFormat = Literal["JPEG", "PNG"]
 

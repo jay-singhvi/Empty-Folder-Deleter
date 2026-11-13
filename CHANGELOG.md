@@ -13,8 +13,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed a stale docstring in `tools/__init__.py`.
 
 #### Still open (owner decisions)
-- Undo of trash, delete and convert actions; dropped options (`overwrite`, CR3 removal, `cloud_only`
-  ask/download, `also_resize`, Excel export/import); real CR3 sample test.
+- Dropped options: `overwrite`, `cloud_only` ask/download, `also_resize`, Excel export/import.
+
+#### Accepted by the owner (2026-11-13)
+- Undo of trash, delete and convert actions stays as it is: the journal records them and undo lists
+  them for manual restore. No code change.
+- The real-CR3 end-to-end test is skipped for now (no sample file).
 
 ### Phase 3.6: `organize_by_date` tool (2026-11-12)
 

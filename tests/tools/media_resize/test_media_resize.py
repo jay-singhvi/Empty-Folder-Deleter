@@ -8,8 +8,10 @@ compared file by file, by name and by size. Trees are generated under ``tmp_path
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import os
+import random
 import runpy
 import subprocess
 import sys
@@ -254,15 +256,10 @@ def test_defaults_match_app_py_and_the_plan() -> None:
     assert opts.jpeg_quality == 85
     assert opts.video_quality == "high"  # CRF 18
     assert opts.output == "new_folder"
-    assert opts.output_folder_name == "resized"
+    assert opts.output_folder_name is None  # use the default_output_folder setting ("resized")
     assert opts.never_upscale is True
     assert g.PRESET_BOXES["720p"] == (1280, 720)
     assert g.CRF_BY_QUALITY == {"high": 18, "medium": 23, "low": 28}
-
-
-def test_never_upscale_cannot_be_turned_off() -> None:
-    with pytest.raises(ValidationError):
-        MediaResizeOptions(roots=[], never_upscale=False)  # type: ignore[arg-type]
 
 
 def test_unknown_option_fields_are_rejected() -> None:
@@ -869,3 +866,290 @@ def test_summary_counts_only_selected_rows_and_shows_bytes_saved(tmp_path: Path)
     # Totals are those of the one selected file only.
     size_a = (folder / "a.jpg").stat().st_size
     assert resize_tool._size_label(size_a) + " ->" in summary
+
+
+# ----- configurable options (nothing is constant) -----------------------------------------------
+
+
+def test_new_option_defaults_are_the_old_constants() -> None:
+    opts = MediaResizeOptions(roots=[])
+    assert opts.suffix_tag == "_resized"
+    assert opts.output_folder_name is None  # None means the default_output_folder setting
+    assert Settings().default_output_folder == "resized"
+    assert opts.video_crf is None and opts.video_preset == "medium"
+    assert opts.estimate_compression == 0.8
+    assert opts.image_extensions == list(resize_tool.images.IMAGE_FORMATS)
+    assert opts.video_extensions == sorted(resize_tool.videos.VIDEO_EXTS)
+    assert opts.optimize_output is True and opts.resample == "lanczos"
+    assert opts.extras_scan_kb == 256
+
+
+def test_never_upscale_is_locked_but_can_be_turned_off() -> None:
+    info = MediaResizeOptions.model_fields["never_upscale"]
+    extra = info.json_schema_extra
+    assert isinstance(extra, dict) and extra["locked"] is True and extra["advanced"] is True
+    assert (info.description or "").startswith("🔒")
+    assert MediaResizeOptions(roots=[]).never_upscale is True
+    assert MediaResizeOptions(roots=[], never_upscale=False).never_upscale is False
+
+
+def test_enlarging_rules_apply_only_when_never_upscale_is_off() -> None:
+    # Locked default: nothing grows.
+    assert g.plan_target("fit_box", 800, 600, box=(1920, 1080), target_px=1, amount=50) == (
+        g.ALREADY_SMALLER
+    )
+    # Off: a small file is scaled up to fit the box (1.8 times, limited by the height).
+    assert g.plan_target(
+        "fit_box", 800, 600, box=(1920, 1080), target_px=1, amount=50, never_upscale=False
+    ) == g.Target(1440, 1080)
+    # Off: the rule "both sides must exceed the box" does not apply, a wide file just fits.
+    assert g.fit_box(2560, 800, 1920, 1080, never_upscale=False) == g.Target(1920, 600)
+    assert g.fit_box(1920, 1080, 1920, 1080, never_upscale=False) == g.ALREADY_AT_TARGET
+    assert g.shorter_side(800, 600, 1080, never_upscale=False) == g.Target(1440, 1080)
+    assert g.longer_side(1000, 800, 1920, never_upscale=False) == g.Target(1920, 1536)
+    assert g.shorter_side(600, 800, 600, never_upscale=False) == g.ALREADY_AT_TARGET
+    # A percentage above 100 needs the lock off.
+    assert g.plan_target("percent", 800, 600, box=None, target_px=1, amount=200) == g.WOULD_ENLARGE
+    assert g.plan_target(
+        "percent", 800, 600, box=None, target_px=1, amount=200, never_upscale=False
+    ) == g.Target(1600, 1200)
+
+
+def test_with_never_upscale_off_a_small_image_is_enlarged(tmp_path: Path, journal: Journal) -> None:
+    folder = _image(tmp_path / "pics" / "small.jpg", (800, 600))
+    opts = MediaResizeOptions(roots=[folder.parent], never_upscale=False)
+    plan, result = _run(tmp_path, journal, opts)
+    assert result.count("done") == 1
+    with Image.open(folder.parent / "resized" / "small.jpg") as out:
+        assert out.size == (1440, 1080)
+    assert "800x600 -> 1440x1080" in plan.actions[0].reason
+
+
+def test_with_never_upscale_off_a_small_video_is_enlarged_to_an_even_size() -> None:
+    opts = MediaResizeOptions(roots=[], never_upscale=False, size="1080p")
+    assert resize_tool._video_target(opts, 800, 600) == g.Target(1440, 1080)
+    assert resize_tool._video_target(MediaResizeOptions(roots=[]), 800, 600) == g.ALREADY_SMALLER
+
+
+def test_a_custom_suffix_tag_names_the_copies_and_is_not_rescanned(
+    tmp_path: Path, journal: Journal
+) -> None:
+    folder = _image(tmp_path / "pics" / "a.png", (2560, 1440))
+    opts = MediaResizeOptions(
+        roots=[folder.parent], output="suffix", suffix_tag="_small", mode="percent", percent=50
+    )
+    _run(tmp_path, journal, opts)
+    assert (folder.parent / "a_small.png").exists()
+    assert not (folder.parent / "a_resized.png").exists()
+    second = TOOL.scan(opts, _ctx(tmp_path, journal))
+    assert [a.src.name for a in second.actions if a.src] == ["a.png"]  # a_small.png is an output
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "a/b", "a:b", 'a"b', "a.", "a "])
+def test_suffix_tag_must_be_a_plain_part_of_a_file_name(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        MediaResizeOptions(roots=[], suffix_tag=bad)
+
+
+def test_output_folder_name_comes_from_the_setting_unless_the_option_is_set(
+    tmp_path: Path, journal: Journal
+) -> None:
+    folder = _image(tmp_path / "pics" / "a.jpg", (2560, 1440))
+    settings = Settings.model_validate(
+        {"onedrive_root": tmp_path, "default_output_folder": "small"}
+    )
+    ctx = RunContext(
+        settings=settings, deps=ExternalTools(ollama_probe=lambda _u: None), journal=journal
+    )
+    plan = TOOL.scan(MediaResizeOptions(roots=[folder.parent]), ctx)
+    assert plan.actions[0].dst == folder.parent / "small" / "a.jpg"
+    own = TOOL.scan(MediaResizeOptions(roots=[folder.parent], output_folder_name="mine"), ctx)
+    assert own.actions[0].dst == folder.parent / "mine" / "a.jpg"
+    # The setting is checked like the option: a bad name is a note, not a write.
+    bad = Settings.model_validate({"onedrive_root": tmp_path, "default_output_folder": "a:b"})
+    bad_ctx = RunContext(
+        settings=bad, deps=ExternalTools(ollama_probe=lambda _u: None), journal=None
+    )
+    refused = TOOL.scan(MediaResizeOptions(roots=[folder.parent]), bad_ctx)
+    assert refused.actions == [] and any("Windows does not allow" in n for n in refused.notes)
+
+
+def test_the_setting_folder_is_not_rescanned(tmp_path: Path, journal: Journal) -> None:
+    root = tmp_path / "pics"
+    _image(root / "one" / "a.jpg", (2560, 1440))
+    settings = Settings.model_validate(
+        {"onedrive_root": tmp_path, "default_output_folder": "small"}
+    )
+    ctx = RunContext(
+        settings=settings, deps=ExternalTools(ollama_probe=lambda _u: None), journal=journal
+    )
+    opts = MediaResizeOptions(roots=[root], recursive=True)
+    TOOL.apply(TOOL.scan(opts, ctx), ctx)
+    second = TOOL.scan(opts, ctx)
+    assert [a.src for a in second.actions] == [root / "one" / "a.jpg"]
+    assert not any(a.selected for a in second.actions)
+
+
+def test_extension_options_are_checked_against_what_can_be_written() -> None:
+    assert MediaResizeOptions(roots=[], image_extensions=["PNG", "jpg"]).image_extensions == [
+        ".png",
+        ".jpg",
+    ]
+    for bad in ([".heic"], [".tif"], [".cr3"], ["a/b"], [""]):
+        with pytest.raises(ValidationError):
+            MediaResizeOptions(roots=[], image_extensions=bad)
+    with pytest.raises(ValidationError):
+        MediaResizeOptions(roots=[], video_extensions=[".png"])  # also a picture type
+    with pytest.raises(ValidationError):
+        MediaResizeOptions(roots=[], video_extensions=[".cr3"])
+    assert MediaResizeOptions(roots=[], video_extensions=["MP4"]).video_extensions == [".mp4"]
+
+
+def test_a_custom_picture_type_list_limits_what_is_resized(
+    tmp_path: Path, journal: Journal
+) -> None:
+    folder = tmp_path / "pics"
+    _image(folder / "a.jpg", (2560, 1440))
+    _image(folder / "b.png", (2560, 1440))
+    plan, result = _run(
+        tmp_path, journal, MediaResizeOptions(roots=[folder], image_extensions=[".png"])
+    )
+    assert result.count("done") == 1
+    assert (folder / "resized" / "b.png").exists() and not (folder / "resized" / "a.jpg").exists()
+    assert [a.src.name for a in plan.actions if a.src] == ["b.png"]
+
+
+def test_image_options_reach_the_encoder(tmp_path: Path) -> None:
+    opts = MediaResizeOptions(
+        roots=[], optimize_output=False, resample="nearest", extras_scan_kb=16, never_upscale=False
+    )
+    rules = resize_tool._rules(opts)
+    assert (rules.optimize, rules.resample, rules.extras_scan_bytes) == (False, "nearest", 16384)
+    assert rules.never_upscale is False
+    noise = Image.frombytes("RGB", (400, 200), random.Random(1).randbytes(400 * 200 * 3))
+    path = tmp_path / "noise.png"
+    noise.save(path)
+    base = resize_tool._rules(MediaResizeOptions(roots=[], mode="percent", percent=50))
+    data: dict[str, bytes] = {}
+    for resample in ("lanczos", "nearest"):
+        result = resize_tool.images.render(
+            path, ".png", dataclasses.replace(base, resample=resample), False
+        )
+        assert not isinstance(result, str)
+        data[resample] = result.data
+    assert data["lanczos"] != data["nearest"]  # the filter really changes the pixels
+
+
+def test_motion_photo_marker_beyond_the_scan_size_needs_a_bigger_scan(tmp_path: Path) -> None:
+    path = _image(tmp_path / "late.jpg", (200, 100))
+    with open(path, "ab") as handle:
+        handle.write(b"\0" * 40000)
+        handle.write(b"MotionPhoto_Data")
+    images_module = resize_tool.images
+    assert images_module.has_embedded_extras(path, 16 * 1024) is False
+    assert images_module.has_embedded_extras(path, 64 * 1024) is True
+
+
+class _FakeVideoDeps(ExternalTools):
+    def ffmpeg(self) -> Path | None:
+        return Path("fake-ffmpeg")
+
+    def ffprobe(self) -> Path | None:
+        return Path("fake-ffprobe")
+
+
+def test_video_options_and_timeouts_reach_ffmpeg(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    (folder / "clip.mp4").write_bytes(b"x" * 1000)
+    seen: dict[str, Any] = {"probe_timeouts": []}
+
+    def display_size(_ffprobe: Path, _path: Path, *, timeout: float) -> tuple[int, int]:
+        seen["probe_timeouts"].append(timeout)
+        return (3840, 2160)
+
+    def transcode(_ffmpeg: Path, _src: Path, dst: Path, args: list[str], *, timeout: float) -> None:
+        seen["args"], seen["timeout"] = args, timeout
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"out")
+
+    monkeypatch.setattr(resize_tool.ffmpeg_media, "display_size", display_size)
+    monkeypatch.setattr(resize_tool.videos.ffmpeg_media, "transcode", transcode)
+    settings = Settings.model_validate(
+        {"onedrive_root": tmp_path, "ffprobe_timeout_s": 7, "transcode_timeout_s": 99}
+    )
+    ctx = RunContext(
+        settings=settings, deps=_FakeVideoDeps(ollama_probe=lambda _u: None), journal=journal
+    )
+    opts = MediaResizeOptions(
+        roots=[folder],
+        media="videos",
+        video_crf=31,
+        video_preset="veryfast",
+        estimate_compression=0.5,
+    )
+    plan = TOOL.scan(opts, ctx)
+    assert "about" in plan.actions[0].reason and "(estimate)" in plan.actions[0].reason
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 1
+    args = seen["args"]
+    assert args[args.index("-crf") + 1] == "31"  # the override beats video_quality "high" (18)
+    assert args[args.index("-preset") + 1] == "veryfast"
+    assert seen["timeout"] == 99
+    assert seen["probe_timeouts"] == [7, 7]  # once in the scan and once in the apply
+
+
+def test_crf_follows_the_quality_preset_unless_overridden() -> None:
+    assert resize_tool._crf(MediaResizeOptions(roots=[])) == 18
+    assert resize_tool._crf(MediaResizeOptions(roots=[], video_quality="medium")) == 23
+    assert resize_tool._crf(MediaResizeOptions(roots=[], video_quality="low")) == 28
+    assert resize_tool._crf(MediaResizeOptions(roots=[], video_quality="low", video_crf=0)) == 0
+    assert resize_tool.videos.ffmpeg_args(g.Target(2, 2), 23, False, ".mp4")[-2:] == [
+        "-c:a",
+        "copy",
+    ]
+
+
+def test_estimate_factor_changes_only_the_preview() -> None:
+    default = resize_tool.videos.estimate_bytes(1000, 100, 100, 50, 50)
+    assert default == int(1000 * 0.25 * 0.8)
+    assert resize_tool.videos.estimate_bytes(1000, 100, 100, 50, 50, 0.4) == 100
+
+
+def test_exiftool_timeout_comes_from_the_setting(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _image(tmp_path / "pics" / "a.jpg", (2560, 1440))
+    seen: dict[str, Any] = {}
+    real_write = resize_tool.images.write
+
+    def write(*args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(resize_tool.images, "write", write)
+    settings = Settings.model_validate({"onedrive_root": tmp_path, "exiftool_write_timeout_s": 45})
+    ctx = RunContext(
+        settings=settings, deps=ExternalTools(ollama_probe=lambda _u: None), journal=journal
+    )
+    plan = TOOL.scan(MediaResizeOptions(roots=[folder.parent]), ctx)
+    assert TOOL.apply(plan, ctx).count("done") == 1
+    assert seen["exiftool_timeout"] == 45
+
+
+def test_protected_folders_come_from_the_settings(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    _image(locked / "a.jpg", (2560, 1440))
+    settings = Settings.model_validate(
+        {"onedrive_root": tmp_path, "protected_folders": [str(locked)]}
+    )
+    ctx = RunContext(
+        settings=settings, deps=ExternalTools(ollama_probe=lambda _u: None), journal=None
+    )
+    plan = TOOL.scan(MediaResizeOptions(roots=[locked]), ctx)
+    assert plan.actions == [] and plan.roots == []
+    assert any("rotected" in n for n in plan.notes)
+    open_plan = TOOL.scan(MediaResizeOptions(roots=[locked]), _ctx(tmp_path, None))
+    assert len(open_plan.actions) == 1  # the default list does not protect this folder

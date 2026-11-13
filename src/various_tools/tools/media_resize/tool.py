@@ -6,10 +6,11 @@ resize and CR3 conversion.
 through the generic engine, so every output is journaled.
 
 Rules that always hold:
-* a file is never enlarged (🔒 ``never_upscale``), and a file is resized only by the rule its
-  mode names (for ``fit_box``, only when both sides are larger than the box);
+* a file is never enlarged unless the owner turns off the locked ``never_upscale`` option, and a
+  file is resized only by the rule its mode names (for ``fit_box`` with ``never_upscale``, only
+  when both sides are larger than the box);
 * originals are never changed or removed. The output goes to a new folder, or next to the original
-  with a ``_resized`` suffix. An existing file is never overwritten;
+  with a suffix (``_resized`` by default). An existing file is never overwritten;
 * cloud-only OneDrive files are never read (AGENTS.md rule 3). They are reported as skipped;
 * the selected folders are never changed, junctions are not followed (rule 4), and protected
   folders are refused (rule 6). The output folder is never scanned, so a second run does not
@@ -23,9 +24,9 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
@@ -40,22 +41,28 @@ from various_tools.core.fs import (
 )
 from various_tools.core.media import ffmpeg as ffmpeg_media
 from various_tools.core.media.ffmpeg import MediaError
-from various_tools.core.media.imaging import is_raw
+from various_tools.core.media.imaging import RAW_EXTS, is_raw
 from various_tools.core.onedrive import CloudOnlyFileError, is_on_device, status_from_attributes
 from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
-from various_tools.tools.base import ToolOptions
+from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.media_resize import images, videos
 from various_tools.tools.media_resize.geometry import (
     CRF_BY_QUALITY,
     ResizeMode,
     SizePreset,
     Target,
+    VideoPreset,
     VideoQuality,
     box_for,
     even,
     plan_target,
 )
-from various_tools.tools.media_resize.images import ImageRules, Rendered
+from various_tools.tools.media_resize.images import (
+    EXTRAS_SCAN_BYTES,
+    ImageRules,
+    Rendered,
+    Resample,
+)
 
 TOOL_ID = "media_resize"
 SUFFIX_TAG = "_resized"
@@ -69,79 +76,317 @@ MODE_LABELS: dict[str, str] = {
 }
 
 
+def _hint(group: str, *, advanced: bool = False, locked: bool = False, **extra: Any) -> Any:
+    """The ``json_schema_extra`` hints the GUI and CLI read (see ``core/settings.py``)."""
+    hints: dict[str, Any] = {"group": group}
+    if advanced:
+        hints["advanced"] = True
+    if locked:
+        hints["locked"] = True
+    hints.update(extra)
+    return hints
+
+
+_FORBIDDEN_NAME_CHARS = '\\/:*?"<>|'
+
+
+def normalise_extensions(values: list[str]) -> list[str]:
+    """Lower-case extensions with a leading dot, without repeats, in the order given."""
+    result: list[str] = []
+    for raw in values:
+        ext = raw.strip().lower()
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        if len(ext) < 2 or any(ch in ext[1:] for ch in '.\\/:*?"<>| \t'):
+            raise ValueError(f"{raw!r} is not a file extension such as .jpg")
+        if ext not in result:
+            result.append(ext)
+    return result
+
+
 class MediaResizeOptions(ToolOptions):
+    # ----- files -----------------------------------------------------------------------
     roots: list[Path] = Field(
         default_factory=list,
-        json_schema_extra={"widget": "folders", "group": "Files"},
+        title="Folders to resize",
+        description=(
+            "The folders whose pictures and videos are resized. A drive root or a protected "
+            "folder is refused. Originals are never changed."
+        ),
+        json_schema_extra=_hint("Files", widget="folders"),
     )
     recursive: bool = Field(
         default=False,
-        json_schema_extra={"group": "Files"},
+        title="Include sub-folders",
+        description="Also resize files in the sub-folders of each chosen folder. Default: off.",
+        json_schema_extra=_hint("Files"),
     )
     media: Literal["images", "videos", "both"] = Field(
         default="images",
-        json_schema_extra={"group": "Files"},
+        title="What to resize",
+        description="Resize pictures only, videos only, or both. Default: images only.",
+        json_schema_extra=_hint("Files"),
     )
+    image_extensions: list[str] = Field(
+        default_factory=lambda: list(images.IMAGE_FORMATS),
+        min_length=1,
+        title="Picture file types",
+        description=(
+            "The picture file types that are resized, each lower-case with a leading dot. Only "
+            "types this tool can write are allowed: .jpg, .jpeg, .png, .bmp, .gif, .tiff and "
+            ".webp. Default: all of them."
+        ),
+        json_schema_extra=_hint("Files", advanced=True, widget="ext_list"),
+    )
+    video_extensions: list[str] = Field(
+        default_factory=lambda: sorted(videos.VIDEO_EXTS),
+        min_length=1,
+        title="Video file types",
+        description=(
+            "The video file types that are resized, each lower-case with a leading dot. The "
+            "output keeps the same type, so choose types ffmpeg can write. Default: .mp4, .avi, "
+            ".mov, .mkv, .wmv, .flv, .webm and .m4v."
+        ),
+        json_schema_extra=_hint("Files", advanced=True, widget="ext_list"),
+    )
+
+    # ----- size ------------------------------------------------------------------------
     mode: ResizeMode = Field(
         default="fit_box",
-        json_schema_extra={"group": "Size"},
+        title="How to choose the new size",
+        description=(
+            "Fit inside a box (a file shrinks only when both sides are larger than the box), set "
+            "the shorter or longer side to a number of pixels, or scale by a percentage. "
+            "Default: fit inside the box."
+        ),
+        json_schema_extra=_hint("Size"),
     )
     size: SizePreset = Field(
         default="1080p",
-        json_schema_extra={"group": "Size"},
+        title="Box size",
+        description=(
+            "The box a file must fit inside, as a standard resolution. Choose custom to enter "
+            "your own width and height. Default: 1080p (1920x1080)."
+        ),
+        json_schema_extra=_hint("Size", depends_on="mode=fit_box"),
     )
     max_width: int | None = Field(
         default=None,
         ge=100,
-        json_schema_extra={"group": "Size", "depends_on": "size=custom"},
+        le=16384,
+        title="Custom box width (px)",
+        description="Width of your own box, in pixels. Needed when the box size is custom.",
+        json_schema_extra=_hint("Size", depends_on="size=custom"),
     )
     max_height: int | None = Field(
         default=None,
         ge=100,
-        json_schema_extra={"group": "Size", "depends_on": "size=custom"},
+        le=16384,
+        title="Custom box height (px)",
+        description="Height of your own box, in pixels. Needed when the box size is custom.",
+        json_schema_extra=_hint("Size", depends_on="size=custom"),
     )
     target_px: int = Field(
         default=1080,
         ge=16,
-        json_schema_extra={"group": "Size", "depends_on": "mode=shorter_side|longer_side"},
+        le=16384,
+        title="Side length (px)",
+        description=(
+            "For the shorter-side and longer-side modes: the length, in pixels, that side "
+            "becomes. Default: 1080."
+        ),
+        json_schema_extra=_hint("Size", depends_on="mode=shorter_side|longer_side"),
     )
     percent: int = Field(
         default=50,
         ge=10,
-        le=100,
-        json_schema_extra={"group": "Size", "depends_on": "mode=percent"},
+        le=400,
+        title="Percentage",
+        description=(
+            "For the percentage mode: each side becomes this share of its length. Values over "
+            "100 enlarge, which needs 'Never enlarge' turned off. Default: 50."
+        ),
+        json_schema_extra=_hint("Size", depends_on="mode=percent"),
     )
+    never_upscale: bool = Field(
+        default=True,
+        title="Never enlarge",
+        description=(
+            "🔒 Locked default: files are never made bigger. This was a fixed rule of the "
+            "original tools. Turning it off lets small files be enlarged to the box or side "
+            "length, which makes bigger files and softer pictures. Default: on."
+        ),
+        json_schema_extra=_hint("Size", advanced=True, locked=True),
+    )
+
+    # ----- quality ---------------------------------------------------------------------
     video_quality: VideoQuality = Field(
         default="high",
-        json_schema_extra={"group": "Quality"},
+        title="Video quality",
+        description=(
+            "How closely a resized video keeps the original look. High is CRF 18, medium is "
+            "CRF 23 and low is CRF 28, and a lower CRF makes a bigger, sharper file. "
+            "Default: high."
+        ),
+        json_schema_extra=_hint("Quality"),
+    )
+    video_crf: int | None = Field(
+        default=None,
+        ge=0,
+        le=51,
+        title="Video CRF override",
+        description=(
+            "Your own x264 CRF value, from 0 (lossless, huge) to 51 (worst). Empty uses the "
+            "video quality above: high 18, medium 23, low 28."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
+    )
+    video_preset: VideoPreset = Field(
+        default=videos.PRESET,
+        title="Video encoding speed",
+        description=(
+            "The x264 speed preset. Slower presets take longer and make smaller files at the "
+            "same quality; faster ones do the reverse. Default: medium."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
     )
     jpeg_quality: int = Field(
         default=85,
         ge=1,
         le=100,
-        json_schema_extra={"group": "Quality"},
+        title="JPEG quality",
+        description=(
+            "Quality of resized JPEG pictures, from 1 (smallest) to 100 (best). 85 to 90 is "
+            "the usual range. Default: 85."
+        ),
+        json_schema_extra=_hint("Quality"),
+    )
+    optimize_output: bool = Field(
+        default=True,
+        title="Optimise JPEG and PNG",
+        description=(
+            "Spend a little more time to make resized JPEG and PNG files smaller, with no "
+            "change to the picture. Default: on."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
+    )
+    resample: Resample = Field(
+        default="lanczos",
+        title="Resize filter",
+        description=(
+            "The method used to shrink pictures. Lanczos is the sharpest for photos, bicubic "
+            "and bilinear are softer, and nearest is fast and blocky. Default: lanczos."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
     )
     keep_metadata: bool = Field(
         default=True,
-        json_schema_extra={"group": "Quality", "advanced": True},
+        title="Keep metadata",
+        description=(
+            "Keep the EXIF block, colour profile and resolution of pictures, and the metadata "
+            "of videos. The orientation is reset because the pixels are already turned. "
+            "Default: on."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
     )
-    # 🔒 Files are never enlarged. The field exists so the rule is visible, and it cannot be False.
-    never_upscale: Literal[True] = Field(
-        default=True,
-        json_schema_extra={"group": "Size", "locked": True},
+    estimate_compression: float = Field(
+        default=videos.ESTIMATE_COMPRESSION,
+        ge=0.05,
+        le=2.0,
+        title="Video size estimate factor",
+        description=(
+            "Only for the preview: the expected video file size is the pixel ratio times this "
+            "number. The real size is known after the encode. Default: 0.8."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
     )
+    extras_scan_kb: int = Field(
+        default=EXTRAS_SCAN_BYTES // 1024,
+        ge=16,
+        le=4096,
+        title="Motion-photo scan size (KB)",
+        description=(
+            "How much of the start of each JPEG is searched for a motion-photo or HDR marker. "
+            "Such files are left as they are. A larger value finds markers placed later in the "
+            "file. Default: 256 KB."
+        ),
+        json_schema_extra=_hint("Quality", advanced=True),
+    )
+
+    # ----- output ----------------------------------------------------------------------
     output: Literal["new_folder", "suffix"] = Field(
         default="new_folder",
-        json_schema_extra={"group": "Output"},
+        title="Where the copies go",
+        description=(
+            "Write the resized copies into a new folder inside each chosen folder, or next to "
+            "the original with a suffix added to the name. Originals are never replaced. "
+            "Default: new folder."
+        ),
+        json_schema_extra=_hint("Output"),
     )
-    output_folder_name: str = Field(
-        default="resized",
-        json_schema_extra={"group": "Output", "depends_on": "output=new_folder"},
+    output_folder_name: str | None = Field(
+        default=None,
+        title="Output folder name",
+        description=(
+            "Name of the new folder for the copies. Empty uses the 'Resized output folder name' "
+            "setting (resized unless you changed it)."
+        ),
+        json_schema_extra=_hint("Output", depends_on="output=new_folder"),
+    )
+    suffix_tag: str = Field(
+        default=SUFFIX_TAG,
+        min_length=1,
+        title="File name suffix",
+        description=(
+            "Text added to the end of a file name, before the extension, for the suffix output "
+            "(photo.jpg becomes photo_resized.jpg). Files already ending with it are skipped. "
+            "Default: _resized."
+        ),
+        json_schema_extra=_hint("Output", depends_on="output=suffix"),
     )
     convert_raw_to_jpeg: bool = Field(
         default=False,
-        json_schema_extra={"group": "Output", "advanced": True},
+        title="Convert RAW (CR3) to JPEG",
+        description=(
+            "Also turn Canon RAW (CR3) files into resized JPEGs. Needs ExifTool to keep their "
+            "metadata. The RAW originals are kept. Default: off."
+        ),
+        json_schema_extra=_hint("Output", advanced=True),
     )
+
+    @field_validator("image_extensions")
+    @classmethod
+    def _writable_image_types(cls, value: list[str]) -> list[str]:
+        exts = normalise_extensions(value)
+        unsupported = [ext for ext in exts if ext not in images.IMAGE_FORMATS]
+        if unsupported:
+            raise ValueError(
+                f"cannot write {', '.join(unsupported)}; allowed: {', '.join(images.IMAGE_FORMATS)}"
+            )
+        return exts
+
+    @field_validator("video_extensions")
+    @classmethod
+    def _video_types(cls, value: list[str]) -> list[str]:
+        return normalise_extensions(value)
+
+    @field_validator("suffix_tag")
+    @classmethod
+    def _suffix_is_a_plain_name_part(cls, value: str) -> str:
+        if not value.strip() or any(ch in value for ch in _FORBIDDEN_NAME_CHARS):
+            raise ValueError('the suffix needs text, and cannot contain any of \\ / : * ? " < > |')
+        if value != value.rstrip(" ."):
+            raise ValueError("the suffix cannot end with a space or a dot, which Windows drops")
+        return value
+
+    @model_validator(mode="after")
+    def _picture_and_video_types_differ(self) -> MediaResizeOptions:
+        shared = sorted(set(self.image_extensions) & set(self.video_extensions))
+        if shared:
+            raise ValueError(f"{', '.join(shared)} cannot be both a picture and a video type")
+        if RAW_EXTS & set(self.video_extensions):
+            raise ValueError("RAW types are handled by 'Convert RAW to JPEG', not as videos")
+        return self
 
 
 def _folder_name_problem(name: str) -> str | None:
@@ -153,13 +398,27 @@ def _folder_name_problem(name: str) -> str | None:
     return None
 
 
-def _options_problem(opts: MediaResizeOptions) -> str | None:
+def _folder_name(opts: MediaResizeOptions, ctx: RunContext) -> str:
+    """The output folder name: the option, or the ``default_output_folder`` setting."""
+    return opts.output_folder_name or ctx.settings.default_output_folder
+
+
+def _crf(opts: MediaResizeOptions) -> int:
+    """The CRF override, or the one the video quality preset names."""
+    return opts.video_crf if opts.video_crf is not None else CRF_BY_QUALITY[opts.video_quality]
+
+
+def _is_video(path: Path, opts: MediaResizeOptions) -> bool:
+    return path.suffix.lower() in opts.video_extensions
+
+
+def _options_problem(opts: MediaResizeOptions, ctx: RunContext) -> str | None:
     if not opts.roots:
         return "Choose at least one folder."
     if opts.mode == "fit_box" and box_for(opts.size, opts.max_width, opts.max_height) is None:
         return "The custom size needs both a maximum width and a maximum height."
     if opts.output == "new_folder":
-        return _folder_name_problem(opts.output_folder_name)
+        return _folder_name_problem(_folder_name(opts, ctx))
     return None
 
 
@@ -174,11 +433,11 @@ def _same(a: Path, b: Path) -> bool:
 def _extensions(opts: MediaResizeOptions) -> set[str]:
     exts: set[str] = set()
     if opts.media in ("images", "both"):
-        exts |= set(images.IMAGE_FORMATS)
+        exts |= set(opts.image_extensions)
         if opts.convert_raw_to_jpeg:
-            exts.add(".cr3")
+            exts |= RAW_EXTS
     if opts.media in ("videos", "both"):
-        exts |= videos.VIDEO_EXTS
+        exts |= set(opts.video_extensions)
     return exts
 
 
@@ -190,14 +449,20 @@ def _rules(opts: MediaResizeOptions) -> ImageRules:
         amount=opts.percent,
         jpeg_quality=opts.jpeg_quality,
         keep_metadata=opts.keep_metadata,
+        never_upscale=opts.never_upscale,
+        optimize=opts.optimize_output,
+        resample=opts.resample,
+        extras_scan_bytes=opts.extras_scan_kb * 1024,
     )
 
 
-def _output_path(src: Path, root: Path, opts: MediaResizeOptions, out_suffix: str) -> Path:
+def _output_path(
+    src: Path, root: Path, opts: MediaResizeOptions, out_suffix: str, folder: str
+) -> Path:
     if opts.output == "suffix":
-        return src.with_name(f"{src.stem}{SUFFIX_TAG}{out_suffix}")
+        return src.with_name(f"{src.stem}{opts.suffix_tag}{out_suffix}")
     relative = src.relative_to(root) if opts.recursive else Path(src.name)
-    return root / opts.output_folder_name / relative.with_suffix(out_suffix)
+    return root / folder / relative.with_suffix(out_suffix)
 
 
 def _out_suffix(src: Path) -> str:
@@ -205,11 +470,11 @@ def _out_suffix(src: Path) -> str:
     return ".jpg" if is_raw(src) else src.suffix.lower()
 
 
-def _is_output(src: Path, root: Path, opts: MediaResizeOptions) -> bool:
+def _is_output(src: Path, root: Path, opts: MediaResizeOptions, folder: str) -> bool:
     """True for a file this tool wrote, so that a second run does not resize it again."""
     if opts.output == "suffix":
-        return src.stem.endswith(SUFFIX_TAG)
-    return is_inside(src, root / opts.output_folder_name)
+        return src.stem.endswith(opts.suffix_tag)
+    return is_inside(src, root / folder)
 
 
 def _size_label(num_bytes: int) -> str:
@@ -232,7 +497,7 @@ class _Candidate:
 
 
 def _candidates(
-    roots: Iterable[Path], opts: MediaResizeOptions, exts: set[str]
+    roots: Iterable[Path], opts: MediaResizeOptions, exts: set[str], folder: str
 ) -> list[_Candidate]:
     """Files to consider, once each even when roots overlap. Output files are left out."""
     seen: set[str] = set()
@@ -240,7 +505,7 @@ def _candidates(
     for root in roots:
         for info in walk(root, exts=exts, recursive=opts.recursive):
             key = os.path.normcase(os.path.abspath(info.path))
-            if key in seen or _is_output(info.path, root, opts):
+            if key in seen or _is_output(info.path, root, opts, folder):
                 continue
             seen.add(key)
             found.append(_Candidate(root, info))
@@ -256,6 +521,7 @@ class _Planner:
         self.ctx = ctx
         self.plan = plan
         self.rules = _rules(opts)
+        self.folder = _folder_name(opts, ctx)
         self.claimed: set[str] = set()
         self.actions: list[PlannedAction] = []
         self.before = 0
@@ -329,7 +595,7 @@ class _Planner:
 
     def _record_image(self, candidate: _Candidate, out_suffix: str, result: Rendered) -> None:
         src = candidate.info.path
-        dst = _output_path(src, candidate.root, self.opts, out_suffix)
+        dst = _output_path(src, candidate.root, self.opts, out_suffix, self.folder)
         before = candidate.info.size
         after = len(result.data)
         width, height = result.source_size
@@ -346,7 +612,9 @@ class _Planner:
             self.skip("cloud-only, not read", src)
             return
         try:
-            width, height = ffmpeg_media.display_size(ffprobe, src)
+            width, height = ffmpeg_media.display_size(
+                ffprobe, src, timeout=self.ctx.settings.ffprobe_timeout_s
+            )
         except (MediaError, OSError, CloudOnlyFileError) as exc:
             self.skip(f"could not read the video size ({exc})", src)
             return
@@ -355,9 +623,11 @@ class _Planner:
             self.skip(target, src)
             return
         before = candidate.info.size
-        after = videos.estimate_bytes(before, width, height, target.width, target.height)
+        after = videos.estimate_bytes(
+            before, width, height, target.width, target.height, self.opts.estimate_compression
+        )
         self.estimated = True
-        dst = _output_path(src, candidate.root, self.opts, src.suffix.lower())
+        dst = _output_path(src, candidate.root, self.opts, src.suffix.lower(), self.folder)
         reason = (
             f"resize {_dims(width, height)} -> {_dims(target.width, target.height)}; "
             f"{_size_label(before)} -> about {_size_label(after)} {ESTIMATE_NOTE}"
@@ -374,11 +644,12 @@ def _video_target(opts: MediaResizeOptions, width: int, height: int) -> Target |
         box=box_for(opts.size, opts.max_width, opts.max_height),
         target_px=opts.target_px,
         amount=opts.percent,
+        never_upscale=opts.never_upscale,
     )
     if isinstance(target, str):
         return target
     adjusted = Target(even(target.width), even(target.height))
-    if adjusted.width > width or adjusted.height > height:
+    if opts.never_upscale and (adjusted.width > width or adjusted.height > height):
         return "the target would enlarge the video, and files are never enlarged"
     return adjusted
 
@@ -402,7 +673,7 @@ class _Converter:
         refusal = destination_refusal(dst, stop=self._root_of(dst))
         if refusal is not None:
             raise ValueError(refusal)
-        if src.suffix.lower() in videos.VIDEO_EXTS:
+        if _is_video(src, self.opts):
             return self._video(src, dst)
         return self._image(src, dst)
 
@@ -415,8 +686,9 @@ class _Converter:
         if not any(is_inside(dst, root) for root in self.roots):
             raise ValueError(f"output is outside the selected folders: {dst}")
         if not self.ctx.settings.allow_protected_paths:
+            rules = self.ctx.settings.protected_paths()
             for path in (src, dst):
-                reason = protected_reason(path)
+                reason = protected_reason(path, rules=rules)
                 if reason:
                     raise ValueError(f"protected path ({reason}): {path}")
 
@@ -432,6 +704,7 @@ class _Converter:
             src,
             exiftool=self.ctx.deps.exiftool(),
             keep_metadata=self.opts.keep_metadata,
+            exiftool_timeout=self.ctx.settings.exiftool_write_timeout_s,
         )
         return dst
 
@@ -440,7 +713,9 @@ class _Converter:
         ffprobe = self.ctx.deps.ffprobe()
         if ffmpeg is None or ffprobe is None:
             raise MediaError("ffmpeg and ffprobe are needed to resize a video")
-        width, height = ffmpeg_media.display_size(ffprobe, src)
+        width, height = ffmpeg_media.display_size(
+            ffprobe, src, timeout=self.ctx.settings.ffprobe_timeout_s
+        )
         target = _video_target(self.opts, width, height)
         if isinstance(target, str):
             raise ValueError(target)
@@ -449,8 +724,10 @@ class _Converter:
             src,
             dst,
             target,
-            crf=CRF_BY_QUALITY[self.opts.video_quality],
+            crf=_crf(self.opts),
             keep_metadata=self.opts.keep_metadata,
+            preset=self.opts.video_preset,
+            timeout=self.ctx.settings.transcode_timeout_s,
         )
         stat = os.stat(src)
         os.utime(dst, ns=(stat.st_atime_ns, stat.st_mtime_ns))
@@ -462,16 +739,17 @@ class MediaResize:
     name = "Resize media"
     description = (
         "Reduce the resolution of images and videos to a box, a shorter or longer side, or a "
-        "percentage. Files are never enlarged. Originals stay as they are."
+        "percentage. Files are never enlarged unless you turn that locked option off. "
+        "Originals stay as they are."
     )
-    category = "Media"
+    category: Category = "Media"
     Options = MediaResizeOptions
 
     def scan(self, opts: MediaResizeOptions, ctx: RunContext) -> Plan:
         if not isinstance(opts, MediaResizeOptions):
             raise TypeError("MediaResize.scan needs MediaResizeOptions")
         plan = Plan(tool=self.id, roots=[], options_json=opts.model_dump_json())
-        problem = _options_problem(opts)
+        problem = _options_problem(opts, ctx)
         if problem is not None:
             plan.notes.append(problem)
             return plan
@@ -479,7 +757,7 @@ class MediaResize:
         roots: list[Path] = []
         for raw in opts.roots:
             root = Path(os.path.abspath(raw))
-            refusal = root_refusal(root, ctx.settings.allow_protected_paths)
+            refusal = root_refusal(root, ctx.settings.protected_paths())
             if refusal is None:
                 roots.append(root)
             else:
@@ -496,12 +774,12 @@ class MediaResize:
                 "Videos are skipped: ffmpeg and ffprobe are needed. Install them with "
                 f"`{install_hint('ffmpeg')}`, or set their paths in Settings."
             )
-        candidates = _candidates(roots, opts, _extensions(opts))
+        candidates = _candidates(roots, opts, _extensions(opts), planner.folder)
         total = len(candidates)
         for index, candidate in enumerate(candidates, start=1):
             ctx.check_cancelled()
             ctx.report(index - 1, total, f"Checking {candidate.info.path.name}")
-            if candidate.info.path.suffix.lower() in videos.VIDEO_EXTS:
+            if _is_video(candidate.info.path, opts):
                 if planner.ffmpeg is not None and planner.ffprobe is not None:
                     planner.video(candidate, planner.ffprobe)
                 else:

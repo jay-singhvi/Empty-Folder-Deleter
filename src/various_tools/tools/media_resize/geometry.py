@@ -10,8 +10,10 @@ The rules are ported from the legacy scripts, and the formulas are kept as writt
 * ``longer_side`` is the same rule applied to the longer side.
 * ``percent`` is app.py's percentage mode (lines 244-247).
 
-Files are never enlarged (🔒 never_upscale). Every mode returns a target at or below the original
-size, and ``plan_target`` checks this again, so a future rule cannot enlarge by accident.
+Files are never enlarged by default (🔒 never_upscale). Every mode then returns a target at or
+below the original size, and ``plan_target`` checks this again, so a future rule cannot enlarge by
+accident. With ``never_upscale=False`` the owner has chosen to allow enlarging: ``fit_box`` scales
+the file to fit the box (up or down), and the side modes make the side exactly the target.
 """
 
 from __future__ import annotations
@@ -22,6 +24,10 @@ from typing import Literal
 ResizeMode = Literal["fit_box", "shorter_side", "longer_side", "percent"]
 SizePreset = Literal["360p", "480p", "720p", "1080p", "2k", "4k", "custom"]
 VideoQuality = Literal["high", "medium", "low"]
+# The x264 speed presets, slowest last. Slower presets make smaller files at the same quality.
+VideoPreset = Literal[
+    "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"
+]
 
 # app.py's RESOLUTION_PRESETS, without the "Custom" entry (which is the custom box below).
 PRESET_BOXES: dict[str, tuple[int, int]] = {
@@ -49,8 +55,17 @@ class Target:
     height: int
 
 
-def fit_box(width: int, height: int, box_width: int, box_height: int) -> Target | str:
-    """app.py's rule. Returns the target size, or the reason the file is left alone."""
+def fit_box(
+    width: int, height: int, box_width: int, box_height: int, *, never_upscale: bool = True
+) -> Target | str:
+    """app.py's rule. Returns the target size, or the reason the file is left alone.
+
+    With ``never_upscale=False`` the file is scaled, up or down, to fit the box exactly.
+    """
+    if not never_upscale:
+        scale = min(box_width / width, box_height / height)
+        target = Target(max(1, int(width * scale)), max(1, int(height * scale)))
+        return ALREADY_AT_TARGET if target == Target(width, height) else target
     if width > box_width and height > box_height:
         scale = min(box_width / width, box_height / height)
         return Target(max(1, int(width * scale)), max(1, int(height * scale)))
@@ -59,19 +74,27 @@ def fit_box(width: int, height: int, box_width: int, box_height: int) -> Target 
     return ONE_SIDE_ONLY
 
 
-def shorter_side(width: int, height: int, target: int) -> Target | str:
+def shorter_side(
+    width: int, height: int, target: int, *, never_upscale: bool = True
+) -> Target | str:
     """metadata-8's rule: the shorter side becomes ``target``."""
     short = min(width, height)
-    if short <= target:
+    if short == target:
+        return ALREADY_SMALLER if never_upscale else ALREADY_AT_TARGET
+    if short < target and never_upscale:
         return ALREADY_SMALLER
     scale = target / short
     return Target(max(1, round(width * scale)), max(1, round(height * scale)))
 
 
-def longer_side(width: int, height: int, target: int) -> Target | str:
+def longer_side(
+    width: int, height: int, target: int, *, never_upscale: bool = True
+) -> Target | str:
     """The same rule, for the longer side."""
     long_edge = max(width, height)
-    if long_edge <= target:
+    if long_edge == target:
+        return ALREADY_SMALLER if never_upscale else ALREADY_AT_TARGET
+    if long_edge < target and never_upscale:
         return ALREADY_SMALLER
     scale = target / long_edge
     return Target(max(1, round(width * scale)), max(1, round(height * scale)))
@@ -98,8 +121,10 @@ def plan_target(
     box: tuple[int, int] | None,
     target_px: int,
     amount: int,
+    never_upscale: bool = True,
 ) -> Target | str:
-    """The target for one file, or the reason to leave it alone. Never enlarges.
+    """The target for one file, or the reason to leave it alone. Enlarges only when
+    ``never_upscale`` is False (🔒 the default is True).
 
     ``box`` is used by ``fit_box``, ``target_px`` by the side modes and ``amount`` by ``percent``.
     """
@@ -107,16 +132,16 @@ def plan_target(
     if mode == "fit_box":
         if box is None:
             return "no size box is set"
-        result = fit_box(width, height, box[0], box[1])
+        result = fit_box(width, height, box[0], box[1], never_upscale=never_upscale)
     elif mode == "shorter_side":
-        result = shorter_side(width, height, target_px)
+        result = shorter_side(width, height, target_px, never_upscale=never_upscale)
     elif mode == "longer_side":
-        result = longer_side(width, height, target_px)
+        result = longer_side(width, height, target_px, never_upscale=never_upscale)
     else:
         result = percent(width, height, amount)
     if isinstance(result, str):
         return result
-    if result.width > width or result.height > height:
+    if never_upscale and (result.width > width or result.height > height):
         return WOULD_ENLARGE
     return result
 

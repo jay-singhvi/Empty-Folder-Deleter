@@ -14,9 +14,11 @@ It replaces `app.py` (the resolution reducer) and the resize and CR3 conversion 
 
 ## Rules
 
-- **Files are never enlarged.** A file is resized only when the chosen rule makes it smaller.
+- **Files are never enlarged** (🔒 locked option `never_upscale`, on by default). A file is
+  resized only when the chosen rule makes it smaller. See the options for turning it off.
 - **Originals are never changed or removed.** The output goes to a new folder (`resized` by
-  default, inside each folder you chose), or next to the original with a `_resized` suffix.
+  default, inside each folder you chose), or next to the original with a suffix (`_resized` by
+  default).
 - **An existing file is never overwritten.** If the output name is taken, the file is listed and
   left alone.
 - **Cloud-only OneDrive files are never read.** They are reported as skipped.
@@ -37,26 +39,43 @@ Presets for the box: 360p (640×360), 480p (854×480), 720p (1280×720), 1080p (
 
 ## Options
 
+Nothing is fixed in the code. Every value below is an option with a default and a hint (title and
+description) in the GUI and in `--help`. 🔒 marks a value that was a fixed rule of the original
+tools. It is an advanced option, and the GUI warns before it is changed.
+
 | Option | Default | What it does |
 |---|---|---|
 | Folders | (required) | Folders to process. A drive root or a protected folder is refused. |
 | Recursive | off | Also process subfolders. Off, as in `app.py`. |
 | Media | Images only | Images, videos, or both. |
+| Picture file types (`image_extensions`) | `.jpg .jpeg .png .bmp .gif .tiff .webp` | Picture types to resize. Only types this tool can write are accepted. |
+| Video file types (`video_extensions`) | `.avi .flv .m4v .mkv .mov .mp4 .webm .wmv` | Video types to resize. The output keeps the type. A type cannot be a picture type too. |
 | Mode | Fit inside a box | See the table above. |
-| Size | 1080p | The preset for the box. Choose Custom to set your own width and height. |
-| Shorter / longer side (px) | 1080 | Used by the side modes. |
-| Percentage | 50 | Used by the percentage mode. |
+| Size | 1080p | The preset for the box. Choose Custom to set your own width and height (100 to 16384). |
+| Shorter / longer side (px) | 1080 | Used by the side modes (16 to 16384). |
+| Percentage | 50 | Used by the percentage mode (10 to 400; over 100 needs the lock below off). |
+| 🔒 Never enlarge (`never_upscale`) | on | Files are never made bigger. Turned off, small files are enlarged: *fit inside a box* scales the file to the box (up or down, without the "both sides larger" rule), the side modes make the side exactly the target, and a percentage over 100 is allowed. Enlarging makes bigger files and softer pictures. |
 | Video quality | High (CRF 18) | Medium is CRF 23, low is CRF 28. Lower CRF means higher quality. |
+| Video CRF override (`video_crf`) | empty | Your own CRF, 0 to 51. Empty uses the video quality above. |
+| Video encoding speed (`video_preset`) | medium | The x264 preset, `ultrafast` to `veryslow`. Slower makes smaller files at the same quality. |
 | JPEG quality | 85 | 85 to 90 is the recommended range. |
+| Optimise JPEG and PNG (`optimize_output`) | on | A slower encode that makes the files smaller, with the same picture. |
+| Resize filter (`resample`) | lanczos | `lanczos`, `bicubic`, `bilinear`, `box`, `hamming` or `nearest`. |
 | Keep metadata | on | Keeps the EXIF block. The orientation is reset, because the pixels are already turned. |
-| Output | New folder | Or a `_resized` suffix next to the original. |
-| Output folder name | `resized` | Used by the new-folder output. |
+| Video size estimate factor (`estimate_compression`) | 0.8 | Preview only: expected video size is the pixel ratio times this. |
+| Motion-photo scan size (`extras_scan_kb`) | 256 | How much of the start of each JPEG is searched for a motion-photo or HDR marker. |
+| Output | New folder | Or a suffix next to the original. |
+| Output folder name | the `default_output_folder` setting (`resized`) | Used by the new-folder output. |
+| File name suffix (`suffix_tag`) | `_resized` | Added before the extension by the suffix output. No `\ / : * ? " < > \|`, and no trailing dot or space. Files already ending in it are skipped. |
 | Convert RAW (CR3) to JPEG | off | Needs ExifTool to keep the metadata. See below. |
+
+These app-wide settings also apply (Settings page): the resized output folder name, the protected
+folders, the `ffprobe` timeout, the video encode timeout and the ExifTool write timeout.
 
 ## Programs it needs
 
 - **ffmpeg and ffprobe** for videos. Without them, videos are skipped with a note, and images are
-  still processed. Install with `winget install Gyan.FFmpeg`.
+  still processed. The note shows the install command (`winget install Gyan.FFmpeg`).
 - **ExifTool** only for RAW conversion, to copy the metadata. Install with
   `winget install OliverBetz.ExifTool`.
 

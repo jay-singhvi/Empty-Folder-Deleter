@@ -16,7 +16,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image, ImageOps
 
@@ -24,6 +24,7 @@ from various_tools.core.deps import run_tool
 from various_tools.core.fs import rename_no_replace
 from various_tools.core.media.imaging import is_raw, open_image
 from various_tools.core.onedrive import ensure_on_device
+from various_tools.core.settings import DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S
 from various_tools.tools.media_resize.geometry import ResizeMode, Target, plan_target
 
 IMAGE_FORMATS: dict[str, str] = {
@@ -36,9 +37,22 @@ IMAGE_FORMATS: dict[str, str] = {
     ".webp": "WEBP",
 }
 
-ORIENTATION_TAG = 0x0112
-EXTRAS_MARKERS = (b"MotionPhoto", b"MicroVideo", b"hdrgm")
-EXIFTOOL_TIMEOUT_S = 120
+# The resampling filters the ``resample`` option offers, best for photos first.
+Resample = Literal["lanczos", "bicubic", "bilinear", "box", "hamming", "nearest"]
+RESAMPLE_FILTERS: dict[str, Image.Resampling] = {
+    "lanczos": Image.Resampling.LANCZOS,
+    "bicubic": Image.Resampling.BICUBIC,
+    "bilinear": Image.Resampling.BILINEAR,
+    "box": Image.Resampling.BOX,
+    "hamming": Image.Resampling.HAMMING,
+    "nearest": Image.Resampling.NEAREST,
+}
+# The defaults of the ``optimize_output``, ``resample`` and ``extras_scan_kb`` options.
+EXTRAS_SCAN_BYTES = 262144
+
+# File-format facts, not preferences: these stay in the code.
+ORIENTATION_TAG = 0x0112  # the EXIF tag number for orientation
+EXTRAS_MARKERS = (b"MotionPhoto", b"MicroVideo", b"hdrgm")  # byte signatures in the file
 
 
 class ImageError(RuntimeError):
@@ -53,6 +67,10 @@ class ImageRules:
     amount: int
     jpeg_quality: int
     keep_metadata: bool
+    never_upscale: bool = True
+    optimize: bool = True
+    resample: Resample = "lanczos"
+    extras_scan_bytes: int = EXTRAS_SCAN_BYTES
 
 
 @dataclass(frozen=True)
@@ -70,15 +88,16 @@ def is_image_name(name: str) -> bool:
     return Path(name).suffix.lower() in IMAGE_FORMATS
 
 
-def has_embedded_extras(path: Path) -> bool:
+def has_embedded_extras(path: Path, scan_bytes: int = EXTRAS_SCAN_BYTES) -> bool:
     """True for Motion Photo and Ultra HDR JPEGs, which Pillow cannot re-save intact.
 
-    Reads 256 KB of the file, so a cloud-only file raises :class:`CloudOnlyFileError` first.
+    Reads the first ``scan_bytes`` of the file, so a cloud-only file raises
+    :class:`CloudOnlyFileError` first.
     """
     ensure_on_device(path)
     try:
         with open(path, "rb") as handle:
-            head = handle.read(262144)
+            head = handle.read(scan_bytes)
     except OSError:
         return False
     return any(marker in head for marker in EXTRAS_MARKERS)
@@ -104,9 +123,9 @@ def _save_options(
     options: dict[str, Any] = {}
     if fmt == "JPEG":
         options["quality"] = rules.jpeg_quality
-        options["optimize"] = True
+        options["optimize"] = rules.optimize
     elif fmt == "PNG":
-        options["optimize"] = True
+        options["optimize"] = rules.optimize
     if exif is not None and fmt in ("JPEG", "PNG", "WEBP", "TIFF"):
         options["exif"] = exif
     if icc_profile and fmt in ("JPEG", "PNG", "WEBP", "TIFF"):
@@ -146,7 +165,8 @@ def render(source: Path, out_suffix: str, rules: ImageRules, raw_to_jpeg: bool) 
     else:
         if not is_image_name(source.name):
             return "not an image format this tool resizes"
-        if source.suffix.lower() in (".jpg", ".jpeg") and has_embedded_extras(source):
+        is_jpeg = IMAGE_FORMATS.get(source.suffix.lower()) == "JPEG"
+        if is_jpeg and has_embedded_extras(source, rules.extras_scan_bytes):
             return "motion photo or HDR image, left as-is (resizing would drop embedded data)"
         out_fmt = IMAGE_FORMATS[out_suffix.lower()]
 
@@ -170,10 +190,11 @@ def render(source: Path, out_suffix: str, rules: ImageRules, raw_to_jpeg: bool) 
             box=rules.box,
             target_px=rules.target_px,
             amount=rules.amount,
+            never_upscale=rules.never_upscale,
         )
         if isinstance(result, str):
             return result
-        image = displayed.resize((result.width, result.height), Image.Resampling.LANCZOS)
+        image = displayed.resize((result.width, result.height), RESAMPLE_FILTERS[rules.resample])
     if out_fmt == "JPEG" and image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
     buffer = io.BytesIO()
@@ -194,6 +215,7 @@ def write(
     *,
     exiftool: Path | None,
     keep_metadata: bool,
+    exiftool_timeout: float = DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S,
 ) -> None:
     """Write a rendered image to ``destination`` and keep the source's modified time.
 
@@ -211,7 +233,7 @@ def write(
         if rendered.from_raw and keep_metadata:
             if exiftool is None:
                 raise ImageError("ExifTool is needed to keep the metadata of a RAW conversion")
-            _copy_raw_metadata(exiftool, source, tmp, rendered.target)
+            _copy_raw_metadata(exiftool, source, tmp, rendered.target, exiftool_timeout)
         with Image.open(tmp) as check:
             if check.size != (rendered.target.width, rendered.target.height):
                 raise ImageError("the written image has the wrong size; it was not kept")
@@ -222,7 +244,9 @@ def write(
         tmp.unlink(missing_ok=True)
 
 
-def _copy_raw_metadata(exiftool: Path, source: Path, target: Path, size: Target) -> None:
+def _copy_raw_metadata(
+    exiftool: Path, source: Path, target: Path, size: Target, timeout: float
+) -> None:
     """Copy every tag ExifTool can write into the JPEG (metadata-8's arguments)."""
     result = run_tool(
         [
@@ -237,7 +261,7 @@ def _copy_raw_metadata(exiftool: Path, source: Path, target: Path, size: Target)
             f"-ExifIFD:ExifImageHeight={size.height}",
             str(target),
         ],
-        timeout=EXIFTOOL_TIMEOUT_S,
+        timeout=timeout,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[:300]

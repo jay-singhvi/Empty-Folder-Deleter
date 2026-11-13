@@ -373,9 +373,11 @@ class _PlanProxy(QSortFilterProxyModel):
         self.setRecursiveFilteringEnabled(True)
 
     def set_filters(self, text: str, kind: str) -> None:
+        # begin/endFilterChange replace the deprecated invalidateFilter() (Qt 6.10+).
+        self.beginFilterChange()
         self._text = text.strip().casefold()
         self._kind = kind
-        self.invalidateFilter()
+        self.endFilterChange()
 
     def filterAcceptsRow(self, source_row: int, source_parent: AnyIndex) -> bool:
         node = self._model.node_at(self._model.index(source_row, 0, source_parent))

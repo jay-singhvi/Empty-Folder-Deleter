@@ -36,7 +36,7 @@ organize_by_date = "various_tools.tools.organize_by_date:TOOL"
 
 [dependency-groups]
 gui = [
-    "pyside6>=6.8",
+    "pyside6>=6.10",
 ]
 media = [
     "pillow>=11.0",

@@ -998,7 +998,7 @@ dev = [
     { name = "ruff", specifier = ">=0.8" },
     { name = "types-openpyxl", specifier = ">=3.1.5.20261017" },
 ]
-gui = [{ name = "pyside6", specifier = ">=6.8" }]
+gui = [{ name = "pyside6", specifier = ">=6.10" }]
 media = [
     { name = "imagehash", specifier = ">=4.3" },
     { name = "numpy", specifier = ">=2.1" },

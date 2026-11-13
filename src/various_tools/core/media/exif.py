@@ -5,12 +5,21 @@ Ported from the duplicate finder's ``capture_time`` and metadata-8's ``get_exif_
 
 Reading EXIF opens the file, so :func:`read_exif` checks OneDrive state first. ExifTool is
 passed in as a resolved path (from ``RunContext.deps``). This module never locates it.
+
+Every ExifTool call goes through :func:`run_exiftool`. On Windows ExifTool reads its command line
+in the ANSI code page, so a file name with letters outside it (accents, Chinese, emoji) fails as a
+plain argument. The arguments are passed in a UTF-8 argument file with ``-charset filename=utf8``
+instead, which works for any name.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import subprocess
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -137,22 +146,33 @@ def _exif_from_image(img: Image.Image) -> ExifInfo:
     )
 
 
+def run_exiftool(
+    exiftool: Path, args: Sequence[str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run ExifTool with ``args`` (written one per line, UTF-8) so any Windows file name works.
+
+    The argument file lives in the system temp folder, never in a folder the user chose, and is
+    removed afterwards. Can raise ``subprocess.TimeoutExpired`` or ``OSError``, like ``run_tool``.
+    """
+    fd, name = tempfile.mkstemp(prefix="various-tools-exiftool-", suffix=".args")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(args) + "\n")
+        return run_tool([str(exiftool), "-charset", "filename=utf8", "-@", name], timeout=timeout)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+
+
 def exiftool_capture_time(
     exiftool: Path, path: Path, timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S
 ) -> datetime | None:
     """Capture time from ExifTool, for files Pillow cannot open (CR3). None when it has none."""
     try:
-        result = run_tool(
-            [
-                str(exiftool),
-                "-s3",
-                "-d",
-                "%Y:%m:%d %H:%M:%S",
-                "-DateTimeOriginal",
-                "-CreateDate",
-                str(path),
-            ],
-            timeout=timeout,
+        result = run_exiftool(
+            exiftool,
+            ["-s3", "-d", "%Y:%m:%d %H:%M:%S", "-DateTimeOriginal", "-CreateDate", str(path)],
+            timeout,
         )
     except subprocess.TimeoutExpired:
         log.warning("ExifTool timed out on %s", path)

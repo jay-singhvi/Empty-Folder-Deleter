@@ -27,12 +27,19 @@ from various_tools.tools import base
 from various_tools.tools.base import discover
 
 TOOL_IDS = {
+    "checksum",
+    "corrupt_media",
+    "disk_usage",
     "duplicates",
     "empty_folders",
+    "media_convert",
     "media_resize",
+    "metadata_strip",
     "organize_by_date",
     "project_export",
     "rename",
+    "sort_by_type",
+    "temp_cleaner",
 }
 
 

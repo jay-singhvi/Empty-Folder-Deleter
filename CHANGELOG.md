@@ -71,6 +71,77 @@ Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 5 and 6. Usage is in `RE
   metadata still finds every tool.
 - The Excel export imports Pillow (openpyxl does); CSV does not.
 
+### Phase 7: new tools (2026-11-13)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 7, items 1–7. Item 8 (scheduled runs) is
+not part of this change. Each tool is a package under `src/various_tools/tools/`, with one
+entry-point line in `pyproject.toml`, tests under `tests/tools/<tool>/` and a page in
+`docs/tools/<tool>.md`. None needed GUI, CLI or core code.
+
+#### Added
+- `disk_usage` (Clean up): the largest files and folders, with size, type, category and age
+  filters. Files are `trash` actions, none selected by default. Folder totals are plan notes in
+  the documented formats `root-size: <bytes> <path>` and `folder-size: <bytes> <path>`
+  (`parse_size_note()`), for a later treemap.
+- `sort_by_type` (Organize): ordered rules `PATTERN[|PATTERN...]=FOLDER` with defaults (for
+  example `*.pdf=Documents/PDF`). Moves are journaled and undoable. Clashes with existing files
+  and within the batch are renamed (`_dup` suffix) or skipped. Sorted files are never re-sorted.
+- `temp_cleaner` (Clean up): files older than N days (default 7) matching patterns under the
+  chosen roots, which default to `%TEMP%`, `%TMP%` and `%LOCALAPPDATA%\Temp`. Optionally removes
+  folders left empty. Browser caches (Chrome, Edge, Firefox) are notes only, in the format
+  `browser-cache (read-only): <name> | <path> | <bytes|unknown>`, and never get actions.
+- `media_convert` (Media): HEIC to JPG or PNG, WebP to JPG or PNG, and MOV to MP4. A video is
+  remuxed when MP4 can hold its streams and re-encoded otherwise. Every output is verified.
+  Originals are kept unless `trash_originals` (off, advanced) is on.
+- `metadata_strip` (Media): removes GPS (default) or all metadata with ExifTool, without
+  re-encoding. The preview lists what each file loses. Output goes to a new `stripped` folder by
+  default, or uses a suffix. In-place mode is advanced and off by default.
+- `checksum` (Developer): `create` writes one `sha256sum`-compatible manifest per root through a
+  `write` action; `verify` is read-only and reports `mismatch:`, `missing:`, `extra:`,
+  `unreadable:` and `invalid:` notes. sha1, md5 and sha512 are offered for old manifests.
+- `corrupt_media` (Media): pictures and videos that fail to open or decode (Pillow; ffprobe and,
+  at `deep`, an ffmpeg decode through `ctx.deps`). Quarantine moves (undoable) or trash, none
+  selected by default.
+
+#### Decisions (not covered by the plan, safer option picked)
+- **Categories:** no new category. `checksum` is under Developer.
+- **Folders are never trash actions in `disk_usage`.** The engine refuses to trash a non-empty
+  folder, so folder sizes are information only.
+- **Cloud-only files:** `disk_usage` neither counts nor offers them (they take no local space,
+  and deleting one deletes it from the cloud). `sort_by_type` skips them, because a cross-volume
+  move would download them. The other tools skip them as "cloud-only".
+- **Trashing originals (`media_convert`) and in-place stripping (`metadata_strip`)** happen
+  inside the `convert` handler, only after the output is verified, and go to the Recycle Bin.
+  The action's reason says so, so the journal records it. In-place writes and verifies a temp
+  copy, recycles the original, then renames the copy. A failed check keeps the original.
+  Undo cannot reverse a `convert`; restore the original from the Recycle Bin.
+- **`metadata_strip` needs ExifTool.** Without it, nothing is planned and a note gives the install
+  command. A lossy Pillow re-encode is not offered.
+- **ExifTool arguments go through a UTF-8 argument file** (`tools/metadata_strip/exiftool.py:
+  run_exiftool`), because names with accents or CJK characters fail as plain arguments on
+  Windows. The helper now lives in `core/media/exif.py`, and every ExifTool call uses it.
+- **`checksum` hashes at apply time,** not at scan time: the plan stores actions only, and the
+  manifest should match the folder when it is written. A manifest is never overwritten (temp
+  file, then rename without replace). Undo cannot remove a written manifest; delete it by hand.
+- **`corrupt_media`:** Pillow's `LOAD_TRUNCATED_IMAGES` is forced off during the run and restored
+  afterwards. A timeout, permission error or missing ffprobe is "could not check", never corrupt.
+- **Dedicated output folder defaults** (`converted`, `stripped`) instead of the
+  `default_output_folder` setting, whose title is "Resized output folder name".
+- **Plans with nothing selected** (`disk_usage`, `corrupt_media`) are applied from the GUI by
+  ticking actions, or from the CLI by setting `"selected": true` in a saved plan file.
+
+#### Fixed
+- `media_resize`'s RAW-to-JPEG metadata copy and the ExifTool capture-time fallback
+  (`exiftool_capture_time`, used by `organize_by_date`) failed on file names with characters
+  outside the ANSI code page. Both now use `run_exiftool` from `core/media/exif.py`, tested with
+  names like `café 写真 🙂.jpg`.
+
+#### Follow-ups (not done here)
+- A shared `usable_roots()` helper and a pruning `walk()` in `core/fs.py` (the root checks are
+  copied in several tools), and a shared hidden-path check.
+- A `--select-all` (or similar) flag for `apply` in the CLI, left to the CLI/GUI stages.
+- `make_video` in `tests/conftest.py` could create parent folders.
+
 ### Phase 4: CLI (2026-11-13)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 4. Usage and the legacy-script mapping table

@@ -20,8 +20,8 @@ from typing import Any, Literal
 
 from PIL import Image, ImageOps
 
-from various_tools.core.deps import run_tool
 from various_tools.core.fs import rename_no_replace
+from various_tools.core.media.exif import run_exiftool
 from various_tools.core.media.imaging import is_raw, open_image
 from various_tools.core.onedrive import ensure_on_device
 from various_tools.core.settings import DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S
@@ -248,9 +248,10 @@ def _copy_raw_metadata(
     exiftool: Path, source: Path, target: Path, size: Target, timeout: float
 ) -> None:
     """Copy every tag ExifTool can write into the JPEG (metadata-8's arguments)."""
-    result = run_tool(
+    # Through an argument file, so a source with a non-ASCII name works (see run_exiftool).
+    result = run_exiftool(
+        exiftool,
         [
-            str(exiftool),
             "-overwrite_original",
             "-TagsFromFile",
             str(source),
@@ -261,7 +262,7 @@ def _copy_raw_metadata(
             f"-ExifIFD:ExifImageHeight={size.height}",
             str(target),
         ],
-        timeout=timeout,
+        timeout,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[:300]

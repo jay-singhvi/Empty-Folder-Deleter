@@ -5,6 +5,79 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 3.6: `organize_by_date` tool (2026-11-12)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.6. User page: `docs/tools/organize_by_date.md`.
+
+#### Added
+- `tools/organize_by_date/`: options (`OrganizeByDateOptions`, `extra="forbid"`) and the
+  `OrganizeByDate` tool. `scan()` works out each file's date and destination and writes nothing to
+  the media. `apply()` runs the moves through the generic engine, so each one is journaled and can
+  be undone.
+- `tools/organize_by_date/dates.py`: the date rules, as legacy rules 1 and 2. The sources are tried
+  in the order the options give (default: EXIF, video creation time, ExifTool for RAW files,
+  modified time). A source is used only when its date is plausible. A file with no usable date
+  goes to the unknown-date folder.
+- `tools/organize_by_date/catalog.py`: the SQLite media catalog that replaces the Excel master log.
+  One row per file (path, capture time, date source, camera, size, dimensions, GPS, sync status,
+  destination, status, error). Includes CSV export.
+- Rules 1–4 of the legacy docstring, kept as they are (🔒): the capture date first, the modified
+  time only when it is plausible, cloud-only files never read or moved, and only on-device files
+  moved.
+- `pyproject.toml`: the `organize_by_date` entry point.
+- Tests (`tests/tools/organize_by_date/`, 26 tests). **Parity with
+  `legacy/python-extract_file_metadata-8.py`:** the legacy `process_file()` is run read-only on a
+  generated tree (EXIF, digitized date, modified date, implausible modified date, implausible EXIF,
+  and a video's creation time). Its destinations and date sources must match the tool's plan, and
+  the applied layout must match the legacy paths. Also: the date rules and their order, cloud-only
+  files never read (the read is patched to fail if it happens), scan changing nothing, apply and
+  undo, name clashes, files already in place, dot-files and subfolders, junctions not followed,
+  protected destinations refused, resume and retry, the same plan for any worker count, a saved
+  plan applied later, a file that turns cloud-only before apply, and bad options.
+- `docs/tools/organize_by_date.md`: user page.
+
+#### Changed
+- Nothing outside the new tool, the entry point and this changelog.
+
+#### Decisions (not covered by the plan)
+- **Cloud-only files are always skipped, and nothing is downloaded.** The plan lists `ask` and
+  `download` options and `download_wait_seconds` / `keep_pinned`. A download changes the disk
+  before any move is journaled, and the engine has no journaled action kind for it. Adding one
+  needs owner review, so those options are left out for now. Cloud-only files are reported as
+  skipped, with the reason, and their date is not guessed.
+- **`also_resize` is not implemented.** The legacy `--resize` overwrites each image in place, and
+  CR3 originals are deleted. Both conflict with the rule that originals are kept and that undo can
+  restore what it moved. The owner should decide this, as the Phase 3.5 entry says for the same
+  question. Use `media_resize` after organizing.
+- **Excel export and the one-time import of the old `Photo_Metadata_Master.xlsx` are not
+  implemented.** That needs pandas or openpyxl, which are not project dependencies. The catalog's
+  CSV export covers the export side.
+- **Name clashes use `name_dupN`** (from `core/fs.py: unique_destination`), not the legacy
+  `name (N)`. Names are also claimed within one batch, so two files with the same name in one run
+  get different names at scan time, and the plan shows them. The legacy script could give both the
+  same name, and the second move would then overwrite or fail.
+- **ExifTool is used only for RAW files,** as in the legacy script. Other files are not sent to it,
+  so the default order gives the same answers as the legacy script.
+- **The default destination is `<OneDrive>\Pictures\Camera Roll`,** derived from the settings, as
+  the legacy `DEST_ROOT` was. No personal path is hardcoded. The source folders have no default.
+- **The catalog is written during the scan,** as a cache of what was read. That is the one
+  exception to "scan never changes the disk" (AGENTS.md). It lives in the user data folder by
+  default, not in a media folder. Each move updates its row.
+- **Apply checks sync status again** before each move. A file that became cloud-only after the
+  scan is not moved, because a move across volumes would read it.
+- **The legacy `run()` is never called in tests,** because it reads and writes the owner's real
+  master log. Parity uses the legacy `process_file()` only. Its pandas import is stubbed, and the
+  located ffprobe folder is put on `PATH` for that run only, because the legacy code calls
+  `ffprobe` by name.
+- **Dot-files are ignored** (the legacy script's `run()` did the same).
+- **Folder template** may use only `{year}` and `{month}`, and it must stay inside the destination.
+- **Unknown-date folder** is used when no usable date exists, including when the modified time is
+  implausible (as in the legacy script).
+- **`_root_refusal` is a fifth local copy** (rename, project_export, duplicates, media_resize and
+  this tool each have one). It should move into `core/fs.py` in the cleanup mentioned in 3.5.
+- **Local environment note:** `uv` is not on this machine, so the entry point was added to the
+  venv's installed metadata by hand. `uv sync` regenerates the same entry.
+
 ### Phase 3.5: `media_resize` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.5. User page: `docs/tools/media_resize.md`.

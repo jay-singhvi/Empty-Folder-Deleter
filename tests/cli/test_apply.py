@@ -110,6 +110,36 @@ def test_apply_honours_unselected_actions_in_a_plan(cli: Cli) -> None:
     assert _names(folder) == ["photo1.txt", "pic-002.txt"]
 
 
+def _unselected_plan(cli: Cli, folder: Path) -> Path:
+    plan = cli.work / "rename-plan.json"
+    cli.run("rename", "scan", str(folder), *RENAME_FLAGS, "--save-plan", str(plan))
+    data = json.loads(plan.read_text(encoding="utf-8"))
+    for action in data["actions"]:
+        action["selected"] = False  # like a tool that starts its plan unselected
+    plan.write_text(json.dumps(data), encoding="utf-8")
+    return plan
+
+
+def test_fully_unselected_plan_suggests_select_all(cli: Cli) -> None:
+    folder = _photos(cli)
+    result = cli.run("rename", "apply", "--plan", str(_unselected_plan(cli, folder)), "--yes")
+    assert result.exit_code == 0, result.output
+    assert "--select-all" in result.output
+    assert _names(folder) == ["photo1.txt", "photo2.txt"]
+
+
+def test_select_all_applies_every_action_after_asking(cli: Cli) -> None:
+    folder = _photos(cli)
+    plan = _unselected_plan(cli, folder)
+    declined = cli.run("rename", "apply", "--plan", str(plan), "--select-all", input="n\n")
+    assert declined.exit_code == 1
+    assert "Apply 2 action(s)" in declined.output
+    assert _names(folder) == ["photo1.txt", "photo2.txt"]
+    result = cli.run("rename", "apply", "--plan", str(plan), "--select-all", "--yes")
+    assert result.exit_code == 0, result.output
+    assert _names(folder) == ["pic-001.txt", "pic-002.txt"]
+
+
 def test_plan_for_another_tool_is_rejected(cli: Cli, empty_tree: Path, snapshot: Snapshot) -> None:
     plan = cli.work / "plan.json"
     cli.run("empty_folders", "scan", str(empty_tree), "--save-plan", str(plan))

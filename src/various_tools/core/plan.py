@@ -94,6 +94,18 @@ class Plan:
     def selected_actions(self) -> list[PlannedAction]:
         return [a for a in self.actions if a.selected]
 
+    def select_all(self, selected: bool = True) -> int:
+        """Check (or uncheck) every action. Returns how many changed.
+
+        Some tools start a plan unselected on purpose (for example a list of the largest files),
+        so selecting everything is always an explicit user choice. Apply still asks first and the
+        engine still checks every guard rule.
+        """
+        changed = sum(1 for a in self.actions if a.selected != selected)
+        for action in self.actions:
+            action.selected = selected
+        return changed
+
     def to_json(self) -> str:
         payload = {
             "format": PLAN_FORMAT,

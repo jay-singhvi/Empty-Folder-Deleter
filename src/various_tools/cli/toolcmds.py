@@ -3,8 +3,8 @@
 For every discovered tool this builds ``<tool> scan``, ``<tool> apply`` and
 ``presets save <tool>``. The flags come from :func:`various_tools.core.schema.describe`, so a new
 tool or a new option field needs no CLI code. Hand-written flags exist only for the shared
-``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--export`` and
-``--export-format``.
+``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--select-all``, ``--export``
+and ``--export-format``.
 
 How values travel: every generated flag defaults to ``None`` meaning "not given". Only the flags
 the user typed are collected as overrides, and they are applied on top of the preset (if any) and
@@ -53,6 +53,7 @@ RESERVED_FLAGS = frozenset(
         "save-plan",
         "plan",
         "yes",
+        "select-all",
         "export",
         "export-format",
         "config",
@@ -415,11 +416,18 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
                 state, lambda ctx: tool.scan(opts, ctx), label="Scanning", with_journal=False
             ).unwrap()
 
+        if kw["select_all"]:
+            plan.select_all()
         selected = plan.selected_actions()
         console = out()
         if not selected:
             print_plan(console, plan, show_table=False)
             console.print("Nothing to apply: no action is selected.")
+            if plan.actions:
+                console.print(
+                    f"The plan has {len(plan.actions)} unselected action(s). Edit 'selected' in a "
+                    "saved plan, or add --select-all to apply all of them."
+                )
             if kw["export"]:
                 note("Nothing was exported: no action was applied.")
             return
@@ -479,6 +487,20 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             "yes",
             Annotated[
                 bool, typer.Option("--yes", help="Do not ask for confirmation (for scripts).")
+            ],
+            False,
+        ),
+        _param(
+            "select_all",
+            Annotated[
+                bool,
+                typer.Option(
+                    "--select-all",
+                    help=(
+                        "Select every action before applying, including ones the tool left "
+                        "unselected (for example the largest-files list). Still asks first."
+                    ),
+                ),
             ],
             False,
         ),

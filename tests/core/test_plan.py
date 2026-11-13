@@ -389,3 +389,18 @@ def test_move_through_a_junction_is_refused(tree: Path, journal: Journal, tmp_pa
     assert (tree / "file.txt").exists()
     assert not any(outside.iterdir())
     assert journal.actions(result.run_id)[0].status == "skipped"
+
+
+def test_select_all_checks_and_unchecks_every_action() -> None:
+    plan = Plan(
+        tool="t",
+        roots=[],
+        actions=[
+            PlannedAction(ActionKind.TRASH, Path("a"), selected=False),
+            PlannedAction(ActionKind.TRASH, Path("b"), selected=True),
+        ],
+    )
+    assert plan.select_all() == 1
+    assert all(a.selected for a in plan.actions)
+    assert plan.select_all(False) == 2
+    assert plan.selected_actions() == []

@@ -197,6 +197,12 @@ class ToolPage(QWidget):
             "or explain a match."
         )
         self.compare_button.setVisible(tool.id in COMPARE_TOOLS)
+        self.select_all_button = QPushButton("Select all")
+        self.select_all_button.setToolTip(
+            "Check every action, including ones the tool left unchecked. Apply still asks first."
+        )
+        self.select_none_button = QPushButton("Select none")
+        self.select_none_button.setToolTip("Uncheck every action.")
         self.undo_button = QPushButton("Undo this run")
         self.undo_button.setToolTip("Move and rename everything this run changed back.")
         self.progress_bar = QProgressBar()
@@ -211,6 +217,8 @@ class ToolPage(QWidget):
             self.apply_button,
             self.export_button,
             self.compare_button,
+            self.select_all_button,
+            self.select_none_button,
             self.undo_button,
         ):
             buttons.addWidget(button)
@@ -271,6 +279,8 @@ class ToolPage(QWidget):
         self.export_button.clicked.connect(lambda _c=False: self.export())
         self.compare_button.clicked.connect(lambda _c=False: self.open_compare())
         self.undo_button.clicked.connect(lambda _c=False: self.undo_last())
+        self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
+        self.select_none_button.clicked.connect(lambda _c=False: self.select_all(False))
         self.save_preset_button.clicked.connect(lambda _c=False: self.save_preset())
         self.delete_preset_button.clicked.connect(lambda _c=False: self.delete_preset())
         self.preset_combo.activated.connect(self._preset_chosen)
@@ -430,6 +440,15 @@ class ToolPage(QWidget):
         if not any(values.get(name) for name in self.form.folder_fields()):
             return
         self.scan(quiet=True)
+
+    def select_all(self, selected: bool = True) -> int:
+        """Check (or uncheck) every action of the plan. Returns how many changed."""
+        if self.plan is None or self._applied or self.busy:
+            return 0
+        changed = self.plan.select_all(selected)
+        self.table.refresh()
+        self._update_buttons()
+        return changed
 
     # ----- apply ------------------------------------------------------------------------------
 
@@ -680,6 +699,9 @@ class ToolPage(QWidget):
         self.cancel_button.setEnabled(busy)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
         self.export_button.setEnabled(not busy and has_plan)
+        can_select = not busy and has_plan and not self._applied
+        self.select_all_button.setEnabled(can_select)
+        self.select_none_button.setEnabled(can_select)
         self.compare_button.setEnabled(
             not busy
             and has_plan

@@ -375,6 +375,36 @@ class Settings(BaseModel):
         json_schema_extra=_hint("External programs", advanced=True),
     )
 
+    # ----- desktop app ---------------------------------------------------------
+    theme: Literal["system", "light", "dark"] = Field(
+        default="system",
+        title="Theme",
+        description=(
+            "Colours of the desktop app. system follows the Windows light or dark mode; light and "
+            "dark always use that look. Default: system."
+        ),
+        json_schema_extra=_hint("Desktop app"),
+    )
+    remember_last_folders: bool = Field(
+        default=True,
+        title="Remember last folders",
+        description=(
+            "On: each tool page opens with the folders you used last time on that page. Off: "
+            "tool pages start empty and nothing is remembered."
+        ),
+        json_schema_extra=_hint("Desktop app"),
+    )
+    shell_integration: bool = Field(
+        default=False,
+        title="Folder right-click menu",
+        description=(
+            "On: adds 'Open with Various Tools' (Find empty folders, Find duplicates) to the "
+            "right-click menu of folders in Explorer, for your Windows account only (no admin "
+            "needed). Off removes it. Default: off."
+        ),
+        json_schema_extra=_hint("Desktop app"),
+    )
+
     # ----- derived values ------------------------------------------------------
     def protected_paths(self) -> ProtectedPaths:
         """The protected-path rules (AGENTS.md rule 6) to pass to ``core/fs.py`` checks."""

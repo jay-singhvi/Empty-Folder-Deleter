@@ -1,0 +1,133 @@
+"""Run work off the UI thread. The UI only hears about it through Qt signals.
+
+Two entry points:
+
+* :class:`Worker` runs any ``fn(worker)`` on its own ``QThread``. ``fn`` may call
+  ``worker.report(done, total, message)`` and should check ``worker.cancel_event`` (or call
+  ``worker.check_cancelled()``) between steps. Use it for thumbnails, "Explain match", program
+  checks and undo.
+* :func:`tool_worker` runs ``job(ctx)`` with a :class:`~various_tools.core.context.RunContext`
+  built from the app state, exactly like ``cli/runner.py: run_job()``: the journal is opened only
+  when ``with_journal`` is set (apply), progress goes to the ``progress`` signal, and
+  :meth:`Worker.cancel` sets the context's cancel event. The context is closed in the worker.
+
+Signals (always delivered on the UI thread, because the receivers live there):
+
+* ``progress(int, int, str)``: throttled to about 20 per second, the last report always arrives;
+* exactly one of ``succeeded(object)`` (the return value), ``failed(object)`` (the exception) or
+  ``cancelled()`` (``Cancelled`` was raised);
+* then ``QThread.finished``.
+
+Keep a reference to a running worker (``start()`` returns it and parents it to ``parent``).
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections.abc import Callable
+from typing import Any
+
+from PySide6.QtCore import QObject, QThread, Signal
+
+from various_tools.core.context import Cancelled, RunContext, make_context
+from various_tools.gui.state import AppState
+
+log = logging.getLogger(__name__)
+
+_MIN_INTERVAL_S = 0.05
+
+
+class Worker(QThread):
+    progress = Signal(int, int, str)
+    succeeded = Signal(object)
+    failed = Signal(object)
+    cancelled = Signal()
+
+    def __init__(self, fn: Callable[[Worker], Any], parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._fn = fn
+        self.cancel_event = threading.Event()
+        self._last_emit = 0.0
+
+    # ----- called from the worker thread -------------------------------------------
+
+    def report(self, done: int, total: int, message: str = "") -> None:
+        now = time.monotonic()
+        if done < total and now - self._last_emit < _MIN_INTERVAL_S:
+            return
+        self._last_emit = now
+        self.progress.emit(done, total, message)
+
+    def check_cancelled(self) -> None:
+        if self.cancel_event.is_set():
+            raise Cancelled("run cancelled")
+
+    def run(self) -> None:
+        try:
+            result = self._fn(self)
+        except Cancelled:
+            self.cancelled.emit()
+        except BaseException as exc:  # shown to the user by whoever listens to ``failed``
+            log.exception("Background job failed")
+            self.failed.emit(exc)
+        else:
+            self.succeeded.emit(result)
+
+    # ----- called from the UI thread ------------------------------------------------
+
+    def cancel(self) -> None:
+        """Ask the job to stop at its next check. Safe to call more than once."""
+        self.cancel_event.set()
+
+    def start_job(self) -> Worker:
+        self.start()
+        return self
+
+
+def tool_worker(
+    state: AppState,
+    job: Callable[[RunContext], Any],
+    *,
+    with_journal: bool,
+    parent: QObject | None = None,
+) -> Worker:
+    """A (not yet started) worker that runs ``job(ctx)`` with a fresh run context.
+
+    The context uses ``state.settings`` and the session's program lookup (``state.deps``).
+    """
+    settings = state.settings
+    deps = state.deps
+
+    def run(worker: Worker) -> Any:
+        ctx = make_context(
+            settings,
+            with_journal=with_journal,
+            progress=worker.report,
+            cancel_event=worker.cancel_event,
+        )
+        ctx.deps = deps
+        try:
+            return job(ctx)
+        finally:
+            ctx.close()
+
+    return Worker(run, parent)
+
+
+def run_in_background(
+    fn: Callable[[Worker], Any],
+    *,
+    parent: QObject | None = None,
+    on_success: Callable[[Any], None] | None = None,
+    on_failure: Callable[[BaseException], None] | None = None,
+) -> Worker:
+    """Start ``fn(worker)`` on a worker thread and connect the optional callbacks."""
+    worker = Worker(fn, parent)
+    if on_success is not None:
+        worker.succeeded.connect(on_success)
+    if on_failure is not None:
+        worker.failed.connect(on_failure)
+    worker.start()
+    return worker

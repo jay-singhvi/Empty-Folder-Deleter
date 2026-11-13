@@ -17,7 +17,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -30,7 +30,14 @@ from various_tools.core.fs import (
     long_path,
     protected_reason,
 )
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    ActionOutcome,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+)
 from various_tools.tools.base import ToolOptions
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
@@ -267,28 +274,134 @@ class EmptyFolders:
         return plan
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
-        return apply_plan(plan, ctx)
+        checked, refused = _recheck(plan)
+        result = apply_plan(checked, ctx)
+        _journal_refused(ctx, result, refused)
+        return result
+
+
+def _is_junk_action(action: PlannedAction) -> bool:
+    return action.reason.startswith(JUNK_REASON)
 
 
 def set_folder_selected(plan: Plan, folder: Path, selected: bool) -> None:
     """Check or uncheck the removal of one folder, with its junk files.
 
-    Unchecking also unchecks the removal of every folder above it, because those would no longer
-    be empty. Checking a folder never checks its parents.
+    Unchecking also unchecks the removal of every folder above it, with the junk files inside
+    those folders, because those folders would no longer be empty. Checking a folder never checks
+    its parents.
     """
     target = _key(folder)
+    unchecked_parents: set[str] = set()
     for action in plan.actions:
-        if action.src is None:
+        if action.src is None or _is_junk_action(action):
             continue
         src = _key(action.src)
-        is_junk = action.reason.startswith(JUNK_REASON)
-        if is_junk:
-            if _key(action.src.parent) == target:
-                action.selected = selected
-        elif src == target:
+        if src == target:
             action.selected = selected
         elif not selected and is_inside(folder, action.src):
             action.selected = False
+            unchecked_parents.add(src)
+    for action in plan.actions:
+        if action.src is None or not _is_junk_action(action):
+            continue
+        owner = _key(action.src.parent)
+        if owner == target:
+            action.selected = selected
+        elif owner in unchecked_parents:
+            action.selected = False
+
+
+def _will_be_empty(
+    folder: Path, junk: frozenset[str], removable: frozenset[str], memo: dict[str, bool]
+) -> bool:
+    """True when ``folder`` holds only junk files and subfolders that are themselves going."""
+    key = _key(folder)
+    if key in memo:
+        return memo[key]
+    memo[key] = False  # a guard against loops; replaced below
+    ok = True
+    try:
+        with os.scandir(long_path(folder)) as iterator:
+            for entry in iterator:
+                path = folder / entry.name
+                try:
+                    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                except OSError:
+                    ok = False
+                    break
+                if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                    ok = False
+                elif entry.is_dir(follow_symlinks=False):
+                    ok = _key(path) in removable and _will_be_empty(path, junk, removable, memo)
+                else:
+                    ok = entry.is_file(follow_symlinks=False) and entry.name.casefold() in junk
+                if not ok:
+                    break
+    except OSError:
+        ok = False
+    memo[key] = ok
+    return ok
+
+
+def _recheck(plan: Plan) -> tuple[Plan, list[ActionOutcome]]:
+    """Unselect any junk-file removal whose folder has gained real content since the scan.
+
+    A junk file is only trashed when its folder will really end up empty, so a file that was
+    added after the scan is never left behind in a folder that lost its ``Thumbs.db``. Returns
+    the plan to run and the outcomes of the rows that were refused.
+    """
+    options = EmptyFoldersOptions.model_validate_json(plan.options_json)
+    junk = frozenset(name.casefold() for name in options.treat_as_empty)
+    removable = frozenset(
+        _key(a.src)
+        for a in plan.actions
+        if a.selected and a.src is not None and not _is_junk_action(a)
+    )
+    memo: dict[str, bool] = {}
+    kept: list[PlannedAction] = []
+    refused: list[ActionOutcome] = []
+    for action in plan.actions:
+        if (
+            action.selected
+            and action.src is not None
+            and _is_junk_action(action)
+            and not _will_be_empty(action.src.parent, junk, removable, memo)
+        ):
+            kept.append(replace(action, selected=False))
+            refused.append(
+                ActionOutcome(
+                    0,
+                    str(action.kind),
+                    "skipped",
+                    str(action.src),
+                    None,
+                    "its folder is no longer empty, so the file was kept",
+                )
+            )
+            continue
+        kept.append(action)
+    return replace(plan, actions=kept), refused
+
+
+def _journal_refused(ctx: RunContext, result: RunResult, refused: list[ActionOutcome]) -> None:
+    """Record the rows refused before the engine ran, as skipped, like the engine's own refusals."""
+    journal = ctx.journal
+    seq = len(result.outcomes)
+    for outcome in refused:
+        seq += 1
+        if journal is not None:
+            journal.record_action(
+                result.run_id,
+                seq,
+                outcome.kind,
+                Path(outcome.src) if outcome.src else None,
+                None,
+                JUNK_REASON,
+                status="skipped",
+                error=outcome.detail,
+            )
+        result.outcomes.append(replace(outcome, seq=seq))
 
 
 TOOL = EmptyFolders()

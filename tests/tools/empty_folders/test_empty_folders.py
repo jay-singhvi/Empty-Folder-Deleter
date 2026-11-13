@@ -368,6 +368,58 @@ def test_unchecking_a_folder_keeps_it_and_its_parents(tmp_path: Path, journal: J
     assert (root / "a" / "b").is_dir() and (root / "a").is_dir()
 
 
+def test_unchecking_a_folder_also_unchecks_junk_files_in_its_parents(
+    tmp_path: Path, sent_to_trash: list[str], journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "Thumbs.db").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    assert [_rel(a.src, root) for a in plan.actions] == ["a/b", "a/Thumbs.db", "a"]
+
+    set_folder_selected(plan, root / "a" / "b", False)
+    assert [a.selected for a in plan.actions] == [False, False, False]
+
+    result = TOOL.apply(plan, _ctx(tmp_path, journal))
+    assert result.outcomes == []
+    assert (root / "a" / "Thumbs.db").exists() and not sent_to_trash
+
+
+def test_a_file_added_after_the_scan_keeps_the_junk_file_and_is_journaled_skipped(
+    tmp_path: Path, sent_to_trash: list[str], journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    folder = root / "photos"
+    folder.mkdir(parents=True)
+    (folder / "Thumbs.db").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    (folder / "new.txt").write_text("appeared", encoding="utf-8")
+
+    result = TOOL.apply(plan, _ctx(tmp_path, journal))
+    assert (folder / "Thumbs.db").exists() and (folder / "new.txt").exists()
+    assert not sent_to_trash
+    assert result.count("done") == 0
+    junk = [o for o in result.outcomes if o.src == str(folder / "Thumbs.db")]
+    assert [o.status for o in junk] == ["skipped"]
+    assert "no longer empty" in junk[0].detail
+    statuses = [a.status for a in journal.actions(result.run_id)]
+    assert statuses.count("skipped") == 2  # the junk file, and the folder the engine refused
+
+
+def test_a_file_added_deep_in_a_planned_tree_keeps_the_junk_files_above_it(
+    tmp_path: Path, sent_to_trash: list[str], journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "Thumbs.db").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    (root / "a" / "b" / "new.txt").write_text("appeared", encoding="utf-8")
+
+    TOOL.apply(plan, _ctx(tmp_path, journal))
+    assert (root / "a" / "Thumbs.db").exists()
+    assert not sent_to_trash
+
+
 def test_a_parent_selected_by_hand_is_still_refused_while_its_child_remains(
     tmp_path: Path, journal: Journal
 ) -> None:

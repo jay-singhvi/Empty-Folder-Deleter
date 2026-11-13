@@ -178,3 +178,15 @@ def test_is_inside_matches_root_and_children_only(tmp_path: Path) -> None:
     assert is_inside(tmp_path, tmp_path)
     assert is_inside(tmp_path / "x" / "y", tmp_path)
     assert not is_inside(tmp_path.parent / (tmp_path.name + "2"), tmp_path)
+
+
+def test_root_refusal_rejects_missing_and_protected_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core import fs
+
+    assert fs.root_refusal(tmp_path) is None
+    assert "Not a folder" in (fs.root_refusal(tmp_path / "missing") or "")
+    monkeypatch.setattr(fs, "protected_reason", lambda _p: "Windows folder")
+    assert "Protected folder refused" in (fs.root_refusal(tmp_path) or "")
+    assert fs.root_refusal(tmp_path, allow_protected=True) is None

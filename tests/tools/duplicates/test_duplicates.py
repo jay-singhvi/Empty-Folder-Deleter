@@ -22,6 +22,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from pydantic import ValidationError
 
+from various_tools.core import fs as fs_module
 from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal, undo_run
@@ -398,7 +399,7 @@ def test_capture_time_difference_blocks_a_visual_match(tmp_path: Path) -> None:
 def test_protected_root_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tree = tmp_path / "tree"
     _make_image_tree(tree)
-    monkeypatch.setattr(dup_tool, "protected_reason", lambda _p: "Windows folder")
+    monkeypatch.setattr(fs_module, "protected_reason", lambda _p: "Windows folder")
     plan = TOOL.scan(DuplicatesOptions(roots=[tree], use_cache=False), _ctx(tmp_path, None))
     assert plan.roots == []
     assert plan.actions == []

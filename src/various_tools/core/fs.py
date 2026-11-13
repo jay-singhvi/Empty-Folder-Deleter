@@ -227,3 +227,25 @@ def is_inside(path: Path, root: Path) -> bool:
     """True when ``path`` is ``root`` or below it, compared without resolving links."""
     target, base = _norm(path), _norm(root)
     return target == base or target.startswith(base + os.sep)
+
+
+def root_refusal(root: Path, allow_protected: bool = False) -> str | None:
+    """Why ``root`` cannot be used as a target folder, or ``None``.
+
+    Refuses a missing folder, a junction or symlink, and a protected path (AGENTS.md rules 4
+    and 6) unless ``allow_protected`` is set. Opens no file and lists nothing.
+    """
+    if not root.is_dir():
+        return f"Not a folder: {root}"
+    try:
+        attributes = getattr(
+            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
+        )
+    except OSError as exc:
+        return f"Could not read the folder: {exc.strerror or exc}"
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        return f"Junction or symlink, not followed: {root}"
+    reason = protected_reason(root)
+    if reason and not allow_protected:
+        return f"Protected folder refused ({reason}): {root}"
+    return None

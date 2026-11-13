@@ -30,11 +30,9 @@ from various_tools.core import hashing
 from various_tools.core.cache import FileCache
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     FileInfo,
     is_inside,
-    long_path,
-    protected_reason,
+    root_refusal,
     walk,
 )
 from various_tools.core.onedrive import is_on_device, status_from_attributes
@@ -177,24 +175,6 @@ class Findings:
     notes: list[str] = field(default_factory=list[str])
     cloud_only: int = 0
     unreadable: int = 0
-
-
-def _root_refusal(root: Path, ctx: RunContext) -> str | None:
-    """Why ``root`` cannot be used, or None. Opens no file; lists nothing."""
-    if not root.is_dir():
-        return f"Not a folder: {root}"
-    try:
-        attributes = getattr(
-            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
-        )
-    except OSError as exc:
-        return f"Could not read the folder: {exc.strerror or exc}"
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        return f"Junction or symlink, not followed: {root}"
-    reason = protected_reason(root)
-    if reason and not ctx.settings.allow_protected_paths:
-        return f"Protected folder refused ({reason}): {root}"
-    return None
 
 
 def _cloud_only(info: FileInfo) -> bool:
@@ -350,7 +330,7 @@ def collect(
         return out
     for raw in opts.roots:
         root = Path(os.path.abspath(raw))
-        refusal = _root_refusal(root, ctx)
+        refusal = root_refusal(root, ctx.settings.allow_protected_paths)
         if refusal is None:
             out.roots.append(root)
         else:

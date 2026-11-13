@@ -24,10 +24,10 @@ from pydantic import Field
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     FileInfo,
     long_path,
     protected_reason,
+    root_refusal,
     unique_destination,
     walk,
 )
@@ -116,24 +116,6 @@ class _Entry:
 
 def _key(path: Path) -> str:
     return os.path.normcase(os.path.abspath(path))
-
-
-def _root_refusal(root: Path, ctx: RunContext) -> str | None:
-    """Why ``root`` cannot be exported, or ``None``. Opens no file; lists nothing."""
-    if not root.is_dir():
-        return f"Not a folder: {root}"
-    try:
-        attributes = getattr(
-            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
-        )
-    except OSError as exc:
-        return f"Could not read the folder: {exc.strerror or exc}"
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        return f"Junction or symlink, not followed: {root}"
-    reason = protected_reason(root)
-    if reason and not ctx.settings.allow_protected_paths:
-        return f"Protected folder refused ({reason}): {root}"
-    return None
 
 
 def _output_path(opts: ProjectExportOptions) -> Path:
@@ -306,7 +288,7 @@ class ProjectExport:
             raise TypeError("ProjectExport.scan needs ProjectExportOptions")
         plan = Plan(tool=self.id, roots=[], options_json=opts.model_dump_json())
         root = Path(os.path.abspath(opts.root))
-        refusal = _root_refusal(root, ctx)
+        refusal = root_refusal(root, ctx.settings.allow_protected_paths)
         if refusal is not None:
             plan.notes.append(refusal)
             plan.notes.append("Nothing to export.")
@@ -341,7 +323,9 @@ class ProjectExport:
             assert action.dst is not None
             opts = ProjectExportOptions.model_validate_json(plan.options_json)
             root = Path(os.path.abspath(opts.root))
-            refusal = _root_refusal(root, ctx) or _output_refusal(action.dst, ctx)
+            refusal = root_refusal(root, ctx.settings.allow_protected_paths) or _output_refusal(
+                action.dst, ctx
+            )
             if refusal is not None:
                 raise PermissionError(refusal)
             text = _export_text(root, opts, action.dst, ctx)

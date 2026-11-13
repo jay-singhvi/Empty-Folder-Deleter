@@ -30,11 +30,10 @@ from pydantic import Field
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     FileInfo,
     is_inside,
     long_path,
-    protected_reason,
+    root_refusal,
     walk,
 )
 from various_tools.core.media import ffmpeg
@@ -174,24 +173,6 @@ def _folder_key(path: Path) -> str:
 def _claim_key(path: Path) -> tuple[str, str]:
     """Two names clash when they sit in the same folder and differ only by letter case."""
     return _folder_key(path), path.name.casefold()
-
-
-def _root_refusal(root: Path, ctx: RunContext) -> str | None:
-    """Why ``root`` cannot be used, or None. Opens no file; lists nothing."""
-    if not root.is_dir():
-        return f"Not a folder: {root}"
-    try:
-        attributes = getattr(
-            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
-        )
-    except OSError as exc:
-        return f"Could not read the folder: {exc.strerror or exc}"
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        return f"Junction or symlink, not followed: {root}"
-    reason = protected_reason(root)
-    if reason and not ctx.settings.allow_protected_paths:
-        return f"Protected folder refused ({reason}): {root}"
-    return None
 
 
 def _name_matches(name: str, spec: RenameSpec) -> bool:
@@ -353,7 +334,11 @@ def _actions(dated: list[_Dated], spec: RenameSpec, notes: list[str]) -> list[Pl
 def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
     """Clear the selection of any rename whose name is now taken, so nothing is renamed onto a
     file. Returns the plan to run and the outcomes of the rows that were dropped."""
-    refused = [root for root in plan.roots if _root_refusal(root, ctx) is not None]
+    refused = [
+        root
+        for root in plan.roots
+        if root_refusal(root, ctx.settings.allow_protected_paths) is not None
+    ]
     claimed: set[tuple[str, str]] = set()
     kept: list[PlannedAction] = []
     dropped: list[ActionOutcome] = []
@@ -417,7 +402,7 @@ class Rename:
         roots: list[Path] = []
         for raw in opts.roots:
             root = Path(os.path.abspath(raw))
-            refusal = _root_refusal(root, ctx)
+            refusal = root_refusal(root, ctx.settings.allow_protected_paths)
             if refusal is None:
                 roots.append(root)
             else:

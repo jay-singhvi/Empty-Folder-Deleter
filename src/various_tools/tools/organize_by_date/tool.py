@@ -34,10 +34,10 @@ from pydantic import Field, field_validator
 from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     FileInfo,
     long_path,
     protected_reason,
+    root_refusal,
     walk,
 )
 from various_tools.core.media.exif import ExifInfo
@@ -210,24 +210,6 @@ def _dest_refusal(dest_root: Path, ctx: RunContext) -> str | None:
     reason = protected_reason(dest_root)
     if reason and not ctx.settings.allow_protected_paths:
         return f"The destination is a protected folder ({reason}): {dest_root}"
-    return None
-
-
-def _root_refusal(root: Path, ctx: RunContext) -> str | None:
-    """Why ``root`` cannot be used, or None. Opens no file; lists nothing."""
-    if not root.is_dir():
-        return f"Not a folder: {root}"
-    try:
-        attributes = getattr(
-            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
-        )
-    except OSError as exc:
-        return f"Could not read the folder: {exc.strerror or exc}"
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        return f"Junction or symlink, not followed: {root}"
-    reason = protected_reason(root)
-    if reason and not ctx.settings.allow_protected_paths:
-        return f"Protected folder refused ({reason}): {root}"
     return None
 
 
@@ -431,7 +413,7 @@ class OrganizeByDate:
         roots: list[Path] = []
         for raw in opts.sources:
             root = Path(os.path.abspath(raw))
-            problem = _root_refusal(root, ctx)
+            problem = root_refusal(root, ctx.settings.allow_protected_paths)
             if problem is None:
                 roots.append(root)
             else:

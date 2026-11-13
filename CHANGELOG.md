@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Review fixes (2026-11-12)
+
+#### Changed
+- `core/fs.py: root_refusal()` replaces the five local `_root_refusal` copies in rename, project_export,
+  duplicates, media_resize and organize_by_date. Behavior is unchanged. Test added.
+- Fixed a stale docstring in `tools/__init__.py`.
+
+#### Still open (owner decisions)
+- Undo of trash, delete and convert actions; dropped options (`overwrite`, CR3 removal, `cloud_only`
+  ask/download, `also_resize`, Excel export/import); real CR3 sample test.
+
 ### Phase 3.6: `organize_by_date` tool (2026-11-12)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md`, §4 Phase 3, item 3.6. User page: `docs/tools/organize_by_date.md`.

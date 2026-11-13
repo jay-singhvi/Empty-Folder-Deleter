@@ -20,8 +20,12 @@ These are **read-only reference copies** of the original standalone scripts (cop
 | `python-v3-Extract_Project_Code.py` | Concatenate project source into one text file | `src/various_tools/tools/project_export/` |
 | `python-v1-Extract_Project_Structure.py` | List project files with include/exclude filters | `src/various_tools/tools/project_export/` |
 | `requirements-find_duplicates.txt` | Dependencies for the duplicate finder | `pyproject.toml` (Phase 1) |
+| `empty_folder_deleter.spec` | PyInstaller one-file build of the old Tkinter app (with UPX) | `packaging/various_tools.spec` (Phase 8) |
+| `installer.nsi` | Per-machine NSIS installer of the old app, with a "start on Windows startup" option | `packaging/installer.iss` (Phase 8, per-user, no startup option) |
 
 The root-level `empty_folder_deleter.py` in this repo is ported to `src/various_tools/tools/empty_folders/`
-(Phase 3.1). It is not a legacy copy here.
+(Phase 3.1). It is not a legacy copy here. Its old build files (`empty_folder_deleter.spec`,
+`installer.nsi`) were moved here from the repository root in Phase 8; they are not copies from
+OneDrive.
 
 Source of truth for the mapping and the rules: `docs/MODERNIZATION_PLAN.md`, §2.2 and §4.

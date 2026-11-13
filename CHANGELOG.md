@@ -5,6 +5,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 8: Packaging and release (2026-11-13)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 8, items 1 to 3. Build steps are in
+`packaging/README.md`; install and run instructions in `README.md` ("Install").
+
+#### Added
+- `packaging/various_tools.spec`: PyInstaller one-dir build, no UPX, into `dist/Various Tools/`
+  with two programs sharing one `_internal` folder: `Various Tools.exe` (the desktop app, no
+  console) and `various-tools.exe` (the command line). Both carry the icon and Windows version
+  info written by `packaging/make_version_info.py` from the `pyproject.toml` version.
+  ffmpeg, ffprobe and ExifTool are not bundled; they are found at run time as before.
+- `packaging/build.py` (build plus `dist/Various-Tools-<version>-portable.zip`) and
+  `packaging/smoke_test.py`, which checks the frozen build on temp folders with a temp settings
+  file: the desktop app opens its window and stays up (plain and with `--tool --folder`), `--help`,
+  `version`, `list` shows all 13 tools, `doctor`, `empty_folders` scan, apply (Recycle Bin) and
+  undo, `rename` scan, apply and undo (names restored), and a `duplicates` scan with HEIC input and
+  an Excel export (Pillow, pillow-heif, imagehash, openpyxl in the frozen app).
+- `packaging/installer.iss` (Inno Setup 6): per-user install to
+  `%LOCALAPPDATA%\Programs\Various Tools` with no admin prompt, Start menu shortcut, optional
+  desktop shortcut, optional Explorer folder menu (the same keys and commands as
+  `gui/shell.py`), no startup option. The uninstaller always removes the Explorer menu and asks
+  whether to keep settings, presets, History and caches (`%LOCALAPPDATA%\Various Tools`); a silent
+  uninstall keeps them. The version is passed in (`/DAppVersion=`); the script stops without it.
+- `.github/workflows/release.yml`: on a `v*` tag, checks the tag against the `pyproject.toml`
+  version, runs lint, types and tests, builds, smoke-tests the frozen build, installs Inno Setup
+  with Chocolatey, compiles the installer and publishes a GitHub Release with the installer and
+  the portable zip.
+- `pyinstaller` in the dev dependency group.
+
+#### Changed
+- `README.md`: install (installer, portable zip, from source), external programs with their
+  `winget install` commands, and the desktop app run instructions. The old Tkinter app section is
+  now a short note. Fixed the Undo note: items in the Recycle Bin are restored from there by hand,
+  Undo reports them as not reversible.
+- The old app's `empty_folder_deleter.spec` and `installer.nsi` moved from the repository root to
+  `legacy/` (nothing referenced them). `empty_folder_deleter.py` stays at the root for the
+  empty_folders parity tests.
+
+#### Decisions
+- Two executables in one folder rather than one program with a mode switch, so the command line
+  gets a real console and the desktop app never flashes one.
+- Inno Setup rather than the old NSIS script: the plan allows either, and Inno's per-user mode,
+  tasks and uninstall hooks cover Phase 8.2 directly. It cannot be compiled on the development
+  machine (not installed, and nothing is installed system-wide); CI compiles it.
+- The installer's context-menu task writes the same registry values as the app's setting, but
+  does not change the setting, so Settings still shows it off. Uninstalling always removes the
+  menu; inside the app, switching the setting on and then off removes it too.
+- The build is about 290 MB unpacked (134 MB zipped): PySide6, SciPy (imagehash's pHash), x265
+  (pillow-heif) and NumPy are most of it. Unused Qt modules (WebEngine, Pdf, Quick, Qml, 3D) and
+  Tkinter are excluded.
+- send2trash runs its ctypes backend in the frozen app (pywin32 is not a dependency), the same
+  as from source.
+
+#### Follow-ups for the owner (not done here)
+- Rename the GitHub repository once the name is confirmed, then update the URLs in `README.md`
+  and `packaging/installer.iss` (plan Phase 8.4).
+- Delete `legacy/` once every tool has passed its parity test, then archive the OneDrive
+  `Scripts` copies (plan Phase 8.5). The parity tests still read `legacy/` and the root
+  `empty_folder_deleter.py`.
+- Code signing: the exes and installer are unsigned, so SmartScreen warns on first run.
+
 ### Phase 5: Desktop GUI and Phase 6: Reporting (2026-11-13)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 5 and 6. Usage is in `README.md`
@@ -70,6 +131,22 @@ Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 5 and 6. Usage is in `RE
   `various_tools.tools`) when no entry point is registered, so a frozen build without package
   metadata still finds every tool.
 - The Excel export imports Pillow (openpyxl does); CSV does not.
+
+#### Fixed
+- The plan table used `QSortFilterProxyModel.invalidateFilter()`, deprecated in PySide6 6.10, so
+  every refresh raised under `filterwarnings = error`. It now uses `beginFilterChange()` and
+  `endFilterChange()`; PySide6 6.10 or newer is required.
+
+#### Tests
+- `tests/gui/` (pytest-qt, run headless with `QT_QPA_PLATFORM=offscreen`): a smoke test and a form
+  round trip for every tool page (parametrized over `discover()`, so a new tool is covered
+  automatically, and a test fails if a tool has no round-trip values), and scan -> apply -> undo
+  through the GUI for all 13 tools (`test_tool_pages.py`, `test_tool_pages_phase7.py`). Also the
+  schema form, plan table, compare view, History, Settings, External programs, the Explorer menu
+  (fake registry backend), theme, log panel and the app entry point (in a subprocess). Every test
+  uses generated temp trees, a temp settings file and a faked Recycle Bin; `temp_cleaner` runs
+  with `TEMP`, `APPDATA` and `LOCALAPPDATA` pointed at the temp folder. The full ExifTool test of
+  `metadata_strip` skips itself when ExifTool is not installed.
 
 ### Phase 7: new tools (2026-11-13)
 

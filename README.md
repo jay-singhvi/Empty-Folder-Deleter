@@ -1,8 +1,46 @@
 # Various Tools
 
-Various Tools is a collection of Windows utilities for tidying up files and media. It is being built as one installable app with a desktop GUI and a command-line interface. The plan is in [docs/MODERNIZATION_PLAN.md](docs/MODERNIZATION_PLAN.md).
+Various Tools is a Windows app for tidying up files and media: empty folders, duplicates, large files, temp files, photo organizing, renaming, converting and more. One install gives you a desktop app and a command line (`various-tools`). Every tool previews first, changes nothing until you apply, sends deletes to the Recycle Bin, and records what it did in History. The plan is in [docs/MODERNIZATION_PLAN.md](docs/MODERNIZATION_PLAN.md).
 
-This repository currently ships the original **Empty Folder Deleter** app. It is the first tool, and it is being rewritten as part of Various Tools. The description below covers that current app.
+This repository started as the **Empty Folder Deleter** Tkinter app; that app is now the `empty_folders` tool (see [The original Empty Folder Deleter](#the-original-empty-folder-deleter)).
+
+## Install
+
+Windows 10 or 11, 64-bit. Downloads are on the [Releases](https://github.com/jay-singhvi/Empty-Folder-Deleter/releases) page.
+
+- **Installer** (`Various-Tools-<version>-setup.exe`): installs for your Windows account only, with no admin prompt, to `%LOCALAPPDATA%\Programs\Various Tools`. It adds a Start menu shortcut and, if you tick them, a desktop shortcut and the Explorer folder menu "Open with Various Tools". It never starts with Windows. Uninstall from *Settings > Apps*; it asks whether to keep your settings, presets and History.
+- **Portable zip** (`Various-Tools-<version>-portable.zip`): unzip anywhere and double-click `Various Tools.exe`. Nothing is installed.
+
+Either way the folder holds two programs:
+
+- `Various Tools.exe`: the desktop app.
+- `various-tools.exe`: the command line. Open a terminal in that folder (or add it to `PATH`) and run `various-tools.exe --help`.
+
+Settings, presets, History (the journal that makes Undo possible) and caches are kept in `%LOCALAPPDATA%\Various Tools`.
+
+### External programs (optional)
+
+Some features use free programs that are not bundled. The app finds them automatically (`PATH`, the winget folders and the usual install folders), or you point to them in *Settings > External programs* (or `various-tools config set external_tools.<name>.path ...`). A missing program turns off only the features that need it, and `various-tools doctor` shows what was found.
+
+| Program | Used for | Install |
+|---|---|---|
+| ffmpeg and ffprobe | videos in `duplicates`, `media_resize`, `media_convert` and `corrupt_media`; video dates | `winget install Gyan.FFmpeg` |
+| ExifTool | `metadata_strip`; capture dates and metadata of files Pillow cannot read (for example CR3) in `organize_by_date`, `rename`, `media_resize` and `media_convert` | `winget install OliverBetz.ExifTool` |
+| Ollama (optional) | AI double check of borderline duplicate pictures | `winget install Ollama.Ollama`, then `ollama pull <model>` |
+
+### Run from source
+
+Needs [uv](https://docs.astral.sh/uv/) (`winget install astral-sh.uv`); uv fetches the Python version in `.python-version`.
+
+```
+git clone https://github.com/jay-singhvi/Empty-Folder-Deleter.git
+cd Empty-Folder-Deleter
+uv sync                       # everything, including the GUI, media and dev groups
+uv run various-tools-gui      # desktop app
+uv run various-tools --help   # command line
+```
+
+To build the Windows app and the installer yourself, see [packaging/README.md](packaging/README.md).
 
 ## Tools
 
@@ -26,7 +64,7 @@ Each tool has a page in [docs/tools/](docs/tools/) with its options and safety r
 
 ## Command line: `various-tools`
 
-Every tool is available from the command line. The flags are generated from each tool's options, so the CLI, the GUI and the docs always agree. Run the commands with `uv run various-tools ...` from a source checkout (after `uv sync`), or `various-tools ...` once installed.
+Every tool is available from the command line. The flags are generated from each tool's options, so the CLI, the GUI and the docs always agree. Run the commands as `various-tools.exe ...` from the installed or unzipped folder, or `uv run various-tools ...` from a source checkout (after `uv sync`). The examples below write `various-tools`.
 
 ```
 various-tools list                          # the tools: id, name, category, description
@@ -62,7 +100,7 @@ various-tools duplicates scan "D:\Photos" --media images --json > plan.json
 Rules that always hold (the same as in the app):
 
 - Deletes go to the Recycle Bin. Permanent delete needs the setting `delete_mode = permanent` and asks a second, explicit question (`--yes` skips both questions for scripts). Without `--yes`, a run with nobody to answer is refused.
-- `various-tools undo RUN_ID` moves renamed and moved files back. Items sent to the Recycle Bin are restored from there.
+- `various-tools undo RUN_ID` moves renamed and moved files back. Items sent to the Recycle Bin are not restored by Undo (the report says so); restore them from the Recycle Bin. Files a tool wrote (exports, converted or resized copies, manifests) are left in place.
 - OneDrive cloud-only files are never read or downloaded; they are reported as skipped.
 - `Ctrl+C` stops a running scan or apply at the next safe point and exits with code 130.
 
@@ -111,16 +149,16 @@ Every documented use of the original scripts has a command. All of them preview 
 | `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`. |
 | `python-v1-Extract_Project_Structure.py` (list project files with filters) | `various-tools project_export scan FOLDER --mode tree --exts .py,.md --exclude-globs .git,.venv`, then `apply` to write the listing. |
 
-## Desktop app: `various-tools-gui`
+## Desktop app
 
-Run `uv run various-tools-gui` from a source checkout (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
+Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. From a source checkout run `uv run various-tools-gui` (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
 
 - **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Pick or save a **preset**, drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there.
 - **Duplicates:** *Compare group* shows a group side by side (thumbnail, resolution, size, date, reason); you can choose which copy to keep, and *Explain match* shows every check. Cloud-only OneDrive files are never opened for a preview.
 - **Rename:** the table is a live preview of old name to new name while you edit the template.
 - **History:** every applied run with its actions, **Undo**, and **Export**.
 - **Settings:** every setting with its explanation, the theme (light, dark or follow Windows), and **External programs** (ffmpeg, ffprobe, ExifTool, Ollama: status, path, version, Browse, Test, Auto-detect, Reset and the `winget install` command). A tool page also offers *Locate...* when a feature needs a missing program.
-- **Explorer menu (optional, off by default):** turn on *Folder right-click menu* in Settings to add "Open with Various Tools > Find empty folders / Find duplicates" for your Windows account (no admin). It runs `various-tools-gui --tool ID --folder PATH`.
+- **Explorer menu (optional, off by default):** turn on *Folder right-click menu* in Settings to add "Open with Various Tools > Find empty folders / Find duplicates" for your Windows account (no admin). It runs `"Various Tools.exe" --tool ID --folder PATH`. The installer can add the same menu, and uninstalling removes it.
 
 ### Reports
 
@@ -133,69 +171,9 @@ various-tools export report.csv --run 12                           # a run from 
 various-tools export report.html --plan plan.json
 ```
 
-## Empty Folder Deleter (current app)
+## The original Empty Folder Deleter
 
-Empty Folder Deleter helps you clean up your file system by identifying and removing empty folders. It is useful for keeping a tidy directory structure and reclaiming disk space.
-
-### Features
-
-- **User-friendly GUI**: Easy-to-use interface for selecting the root directory to scan.
-- **Recursive Scanning**: Scans subdirectories to find all empty folders within a given directory.
-- **Safe Deletion**: Confirms with the user before deleting any folders.
-- **Detailed Logging**: Provides a log of all actions taken, including successful deletions and any errors encountered.
-- **Windows Integration**: Option to start the application on Windows startup.
-
-## Installation
-
-### Prerequisites
-
-- Windows operating system
-- Python 3.6 or higher (if running from source)
-
-### Option 1: Install from Executable
-
-1. Download the latest `EmptyFolderDeleterSetup.exe` from the [Releases](https://github.com/jay-singhvi/Empty-Folder-Deleter/releases) page.
-2. Run the installer and follow the on-screen instructions.
-3. Once installed, you can run Empty Folder Deleter from the Start menu.
-
-### Option 2: Run from Source
-
-1. Clone this repository:
-   ```
-   git clone https://github.com/jay-singhvi/Empty-Folder-Deleter.git
-   ```
-2. Navigate to the project directory:
-   ```
-   cd Empty-Folder-Deleter
-   ```
-3. No third-party packages are needed. The app uses only the Python standard library (Tkinter ships with Python).
-4. Run the application:
-   ```
-   python empty_folder_deleter.py
-   ```
-
-## Usage
-
-1. Launch the Empty Folder Deleter application.
-2. Click the "Browse" button to select the root directory you want to scan for empty folders.
-3. Click the "Start" button to begin the scanning process.
-4. Review the list of empty folders found.
-5. Confirm the deletion when prompted.
-6. Check the log for details on the operation's success.
-
-## Building from Source
-
-To build the executable from source:
-
-1. Install PyInstaller:
-   ```
-   pip install pyinstaller
-   ```
-2. Run PyInstaller with the spec file:
-   ```
-   pyinstaller empty_folder_deleter.spec
-   ```
-3. The executable will be created in the `dist` folder.
+The first app in this repository was a small Tkinter program, `empty_folder_deleter.py`, that found and deleted empty folders. It is replaced by the `empty_folders` tool, which adds junk-file rules, exclusions, a minimum age, the Recycle Bin by default, History and Undo; the table in [Old script to new command](#old-script-to-new-command) maps its use. The file stays in the repository for the parity tests until the legacy code is removed, and its old PyInstaller spec and NSIS installer script are kept under [legacy/](legacy/) for reference. The old per-machine installer and its "start on Windows startup" option are gone.
 
 ## Contributing
 
@@ -208,7 +186,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Thanks to all contribution provided by Claude 3.5 Sonnet on helping with error resolution to improve this tool and help convert this app to an actual windows installer.
-- Icon provided by [Python libraries].
+- The app icon is drawn in code (`src/various_tools/gui/icon.py`).
 
 ## Support
 

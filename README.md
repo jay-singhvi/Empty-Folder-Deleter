@@ -17,6 +17,7 @@ various-tools undo RUN_ID                   # move a run's files back
 various-tools doctor                        # are ffmpeg, ffprobe, ExifTool and Ollama available?
 various-tools presets list|save|delete      # named option sets
 various-tools config show|get|set|unset     # settings
+various-tools export FILE --run ID|--plan F # CSV, Excel, HTML or text report
 various-tools TOOL scan --help              # every flag, with its meaning, default and limits
 ```
 
@@ -89,6 +90,28 @@ Every documented use of the original scripts has a command. All of them preview 
 | `rename_snapchat.py` | `various-tools rename scan FOLDER --opt-preset snapchat`, then `apply`. Other built-in presets: `whatsapp`, `screenshot`. Your own pattern: `--match "IMG_*.jpg" --template "Trip-{date:%Y%m%d}-{counter:03}{ext}"`. Name clashes are listed and never overwritten. |
 | `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`. |
 | `python-v1-Extract_Project_Structure.py` (list project files with filters) | `various-tools project_export scan FOLDER --mode tree --exts .py,.md --exclude-globs .git,.venv`, then `apply` to write the listing. |
+
+## Desktop app: `various-tools-gui`
+
+Run `uv run various-tools-gui` from a source checkout (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
+
+- **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Pick or save a **preset**, drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there.
+- **Duplicates:** *Compare group* shows a group side by side (thumbnail, resolution, size, date, reason); you can choose which copy to keep, and *Explain match* shows every check. Cloud-only OneDrive files are never opened for a preview.
+- **Rename:** the table is a live preview of old name to new name while you edit the template.
+- **History:** every applied run with its actions, **Undo**, and **Export**.
+- **Settings:** every setting with its explanation, the theme (light, dark or follow Windows), and **External programs** (ffmpeg, ffprobe, ExifTool, Ollama: status, path, version, Browse, Test, Auto-detect, Reset and the `winget install` command). A tool page also offers *Locate...* when a feature needs a missing program.
+- **Explorer menu (optional, off by default):** turn on *Folder right-click menu* in Settings to add "Open with Various Tools > Find empty folders / Find duplicates" for your Windows account (no admin). It runs `various-tools-gui --tool ID --folder PATH`.
+
+### Reports
+
+Any plan, applied run or History entry can be exported as CSV, an Excel workbook, a self-contained HTML report (with thumbnails for duplicate groups), the old duplicates review list (`.txt`) or the old duplicates CSV log. From the command line:
+
+```
+various-tools duplicates scan "D:\Photos" --export review.html     # plan report
+various-tools empty_folders apply "D:\Old" --export done.xlsx      # what was applied
+various-tools export report.csv --run 12                           # a run from History
+various-tools export report.html --plan plan.json
+```
 
 ## Empty Folder Deleter (current app)
 

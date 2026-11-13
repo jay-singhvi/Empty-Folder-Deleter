@@ -5,6 +5,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 5: Desktop GUI and Phase 6: Reporting (2026-11-13)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 5 and 6. Usage is in `README.md`
+("Desktop app" and "Reports").
+
+#### Added
+- `various-tools-gui` (also `python -m various_tools.gui`), PySide6. Main window with a sidebar of
+  tools by category and a search box, History, Settings and a collapsible log panel fed from any
+  thread. Window title "Various Tools <version>"; the icon is drawn in code (`gui/icon.py`) and
+  `packaging/make_icon.py` writes `packaging/icon.ico`.
+- Tool page for every registered tool, with no per-tool form code: `gui/widgets/schema_form.py`
+  renders any options model (and the Settings model) from the `core/schema.py` hints: Basic and
+  Advanced sections by group, dropdowns, bounded spinners, "use app setting" for `X | None`
+  fields, `depends_on` visibility, reorderable choice lists, key/value tables, inline validation
+  errors, and a confirmation before a 🔒 value changes. Presets (load, save, delete), folders
+  dropped from Explorer, last folders remembered per tool.
+- Scan in a worker thread, then a plan table (`gui/widgets/plan_table.py`): sortable, filterable
+  by text and kind, checkable, grouped by `group_id`, reason and size columns, totals. Unchecking
+  an empty folder goes through `set_folder_selected`. Apply, Cancel, progress bar, Export, and
+  Undo of the run just applied.
+- Duplicates compare view (`gui/widgets/compare_view.py`): a group side by side (thumbnail,
+  resolution, size, date, reason), "Keep this one" (`gui/plan_edit.py: change_keeper`) and
+  "Explain match". Rename shows Folder / Old name / New name and re-scans as you type (live
+  preview, read-only).
+- History page: runs from the journal, each run's actions, Undo and Export.
+- Settings page: the Settings model through the same generic form, plus the External programs
+  panel (status, path, version, source, Browse, Test, Auto-detect, Reset to automatic, copyable
+  `winget install` command; Ollama is tested at its address). A tool page offers "Locate…" when
+  its scan notes say a program is missing.
+- New settings (group "Desktop app"): `theme` (system, light, dark), `remember_last_folders`
+  (on), `shell_integration` (off). Theme uses Fusion with a light or dark palette; system follows
+  Windows.
+- Per-user Explorer menu (`gui/shell.py`, HKCU `Software\Classes\Directory\shell` and
+  `Directory\Background\shell`, no admin): "Open with Various Tools > Find empty folders / Find
+  duplicates", running `--tool ID --folder PATH`. Off by default; written only when the setting
+  changes. The registry sits behind a backend so tests never touch the real one.
+- `gui/state.py` (shared AppState, no Qt) and `gui/workers.py` (QThread worker with throttled
+  progress, cancel, and the same context recipe as `cli/runner.py`).
+- Phase 6, `core/report.py` (no Qt): export a plan, an applied result or a journal run as CSV
+  (UTF-8 with BOM), an Excel workbook (Actions and Summary sheets), a self-contained HTML report
+  (duplicate groups with base64 thumbnails), the old duplicates review list (`.txt`, replaces
+  `find_duplicates_review_list_<date>.txt`) and the old duplicates CSV log. CLI: `--export FILE`
+  (and `--export-format`) on `scan` and `apply`, and `various-tools export OUTPUT (--plan F |
+  --run ID)`.
+- `core/media/thumbs.py`: shared previews and file facts. A cloud-only file is never opened.
+- Dependencies: `openpyxl` (and `types-openpyxl` for development).
+
+#### Decisions
+- Apply always asks; a selected permanent delete asks a second time. Cancel stops at the next
+  safe point. Undo from History and from the tool page both run `undo_run` on their own journal
+  connection in a worker.
+- External program checks, thumbnails, Explain match, undo, export and scans all run in workers;
+  pages update only from signals. One program lookup (`AppState.deps`) is shared per session and
+  rebuilt when settings are saved; Auto-detect clears it.
+- Changing the keeper swaps the old keeper into the moved action (same destination folder) and
+  rewrites "keeps NAME" in the reasons. Matches were measured against the previous keeper; for
+  exact copies that is the same file content.
+- The rename live preview is the only per-tool page behaviour besides the duplicates compare
+  view (`LIVE_PREVIEW_TOOLS`, `COMPARE_TOOLS` in `gui/tool_page.py`).
+- Missing programs are detected from the scan notes (a program name with "not found" or
+  "needs"); Ollama has no Locate button because it is an address set in Settings.
+- `tools/base.py: discover()` falls back to the built-in tool packages (`pkgutil` over
+  `various_tools.tools`) when no entry point is registered, so a frozen build without package
+  metadata still finds every tool.
+- The Excel export imports Pillow (openpyxl does); CSV does not.
+
 ### Phase 4: CLI (2026-11-13)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 4. Usage and the legacy-script mapping table

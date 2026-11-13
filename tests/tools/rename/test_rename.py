@@ -24,7 +24,7 @@ from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal, undo_run
 from various_tools.core.media import exif
-from various_tools.core.plan import ActionKind, Plan, RunResult
+from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult
 from various_tools.core.settings import Settings
 from various_tools.tools.base import discover
 from various_tools.tools.rename import TOOL, RenameOptions
@@ -249,6 +249,11 @@ def test_apply_checks_again_and_never_renames_onto_a_file_that_appeared(
     assert [o.src for o in skipped] == [str(root / "Snapchat-1001.jpg")]
     assert result.count("done") == 7
     assert not any("_dup" in p.name for p in root.iterdir())
+    # The dropped row is in the journal too, as skipped, with a fresh sequence number.
+    rows = [r for r in journal.actions(result.run_id) if r.status == "skipped"]
+    assert [r.src for r in rows] == [str(root / "Snapchat-1001.jpg")]
+    assert "a file with this name already exists" in (rows[0].error or "")
+    assert [o.seq for o in result.outcomes] == list(range(1, len(result.outcomes) + 1))
 
 
 def test_a_plan_edited_to_select_a_clashing_row_still_does_not_clash(
@@ -550,6 +555,43 @@ def test_links_out_of_the_root_are_not_followed(tmp_path: Path, journal: Journal
     assert plan.actions == []
     assert outside.exists() and outside.read_text(encoding="utf-8") == "outside"
     assert result.outcomes == []
+
+
+def test_a_rename_under_a_junction_is_refused_by_the_engine(
+    tmp_path: Path, journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    outside = _write(tmp_path / "outside" / "a.jpg", "outside", (2024, 1, 1, 12, 0, 0))
+    root.mkdir()
+    try:
+        os.symlink(outside.parent, root / "link", target_is_directory=True)
+    except OSError:
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(root / "link"), str(outside.parent)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("could not create a symlink or a junction here")
+    ctx = _ctx(tmp_path, journal)
+    plan = Plan(
+        tool=TOOL.id,
+        roots=[root],
+        actions=[
+            PlannedAction(
+                kind=ActionKind.RENAME,
+                src=root / "link" / "a.jpg",
+                dst=root / "link" / "b.jpg",
+                reason="hand-made plan",
+            )
+        ],
+        options_json=RenameOptions(roots=[root], preset="snapchat").model_dump_json(),
+    )
+    result = TOOL.apply(plan, ctx)
+    assert [o.status for o in result.outcomes] == ["skipped"]
+    assert "junction" in result.outcomes[0].detail or "symlink" in result.outcomes[0].detail
+    assert outside.exists() and not (outside.parent / "b.jpg").exists()
 
 
 # ---- helpers, registry and the undo path -----------------------------------------------

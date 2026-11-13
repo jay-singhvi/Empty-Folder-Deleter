@@ -35,6 +35,7 @@ from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
 from various_tools.core.fs import (
     FileInfo,
+    destination_refusal,
     long_path,
     protected_reason,
     root_refusal,
@@ -207,6 +208,11 @@ def _dest_root(opts: OrganizeByDateOptions, ctx: RunContext) -> Path:
 def _dest_refusal(dest_root: Path, ctx: RunContext) -> str | None:
     if dest_root.exists() and not dest_root.is_dir():
         return f"The destination is not a folder: {dest_root}"
+    # AGENTS.md rule 4: never write through a junction or symlink. Only the folder itself is
+    # checked here; the apply engine refuses a destination that passes through one deeper down.
+    link = destination_refusal(dest_root, dest_root)
+    if link is not None:
+        return f"The destination is a junction or symlink, not followed: {dest_root}"
     reason = protected_reason(dest_root)
     if reason and not ctx.settings.allow_protected_paths:
         return f"The destination is a protected folder ({reason}): {dest_root}"

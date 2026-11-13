@@ -29,7 +29,7 @@ from various_tools.core.deps import ExternalTools
 from various_tools.core.fs import protected_reason
 from various_tools.core.journal import Journal, undo_run
 from various_tools.core.onedrive import SyncStatus
-from various_tools.core.plan import Plan
+from various_tools.core.plan import Plan, apply_plan
 from various_tools.core.settings import Settings
 from various_tools.tools.base import discover
 from various_tools.tools.organize_by_date import TOOL, OrganizeByDateOptions
@@ -266,6 +266,80 @@ def test_cloud_only_file_is_never_read_or_moved(
     assert skipped[0].dst is None
     assert "cloud-only" in skipped[0].reason
     assert cloud.exists()
+
+
+def test_cloud_only_row_is_not_executable_and_apply_does_not_fail(
+    tmp_path: Path, src: Path, dest: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cloud = _jpeg(src / "cloud.jpg", original="2024:10:05 14:02:11")
+    monkeypatch.setattr(
+        obd,
+        "get_sync_status",
+        lambda path: SyncStatus.CLOUD_ONLY if _same(path, cloud) else SyncStatus.LOCAL,
+    )
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(tmp_path, [src], dest), ctx)
+    assert plan.selected_actions() == []
+
+    result = TOOL.apply(plan, ctx)
+    assert result.outcomes == []
+    assert cloud.exists() and not dest.exists()
+
+    # Even if someone ticks the row by hand, the tool unticks it again at apply time.
+    row = next(a for a in plan.actions if a.src is not None and _same(a.src, cloud))
+    row.selected = True
+    result = TOOL.apply(plan, ctx)
+    assert result.outcomes == [] and cloud.exists()
+
+    # And the engine alone refuses a move without a destination: skipped, never failed.
+    row.selected = True
+    result = apply_plan(plan, ctx)
+    assert [o.status for o in result.outcomes] == ["skipped"]
+    assert "no destination" in result.outcomes[0].detail
+    assert result.count("failed") == 0
+    assert cloud.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows feature")
+def test_destination_that_is_a_junction_is_refused_and_deeper_ones_fail_at_apply(
+    tmp_path: Path, src: Path, dest: Path, journal: Journal
+) -> None:
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    dest.mkdir(parents=True)
+    _jpeg(src / "a.jpg", original="2024:10:05 14:02:11")
+
+    # A junction inside the destination: the scan plans the move, the engine refuses it.
+    inner = dest / "2024"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(inner), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip(f"could not create a junction: {made.stderr or made.stdout}")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(tmp_path, [src], dest), ctx)
+    assert len(plan.selected_actions()) == 1
+    result = TOOL.apply(plan, ctx)
+    assert [o.status for o in result.outcomes] == ["skipped"]
+    assert "junction" in result.outcomes[0].detail
+    assert (src / "a.jpg").exists() and list(outside.iterdir()) == []
+
+    # The destination folder itself is a junction: the scan refuses it.
+    linked = tmp_path / "LinkedDest"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(linked), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip(f"could not create a junction: {made.stderr or made.stdout}")
+    refused = TOOL.scan(_opts(tmp_path, [src], linked), ctx)
+    assert refused.actions == []
+    assert any("junction" in note for note in refused.notes)
 
 
 def test_scan_changes_nothing_on_disk(tmp_path: Path, src: Path, dest: Path) -> None:

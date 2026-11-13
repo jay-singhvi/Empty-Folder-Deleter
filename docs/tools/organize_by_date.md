@@ -61,7 +61,9 @@ If none of them gives a plausible date, the file goes to the **Unknown Date** fo
 The catalog replaces the Excel master log. It has one row per file: its path, capture date, where
 the date came from, camera make and model, size, dimensions, GPS, sync status, destination, and
 its status (`planned`, `moved`, `organized`, `skipped` or `error`). It is a SQLite file, so it can
-be written safely from several workers. It can be exported to CSV.
+be written safely from several workers. A CSV export exists as a library function
+(`Catalog.export_csv`) only; the tool does not expose it yet, and a button or option for it is
+planned for a later phase.
 
 Excel export and importing the old `Photo_Metadata_Master.xlsx` are not in this version.
 

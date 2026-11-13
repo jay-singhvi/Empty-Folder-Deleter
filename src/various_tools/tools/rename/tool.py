@@ -376,6 +376,26 @@ def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
     return replace(plan, actions=kept), dropped
 
 
+def _journal_dropped(ctx: RunContext, result: RunResult, dropped: list[ActionOutcome]) -> None:
+    """Record the rows dropped before the engine ran as skipped, like the engine's own refusals."""
+    journal = ctx.journal
+    seq = len(result.outcomes)
+    for outcome in dropped:
+        seq += 1
+        if journal is not None:
+            journal.record_action(
+                result.run_id,
+                seq,
+                outcome.kind,
+                Path(outcome.src) if outcome.src else None,
+                Path(outcome.dst) if outcome.dst else None,
+                outcome.detail,
+                status="skipped",
+                error=outcome.detail,
+            )
+        result.outcomes.append(replace(outcome, seq=seq))
+
+
 class Rename:
     id = TOOL_ID
     name = "Rename"
@@ -429,7 +449,7 @@ class Rename:
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
         checked, dropped = _recheck(plan, ctx)
         result = apply_plan(checked, ctx)
-        result.outcomes.extend(dropped)
+        _journal_dropped(ctx, result, dropped)
         return result
 
 

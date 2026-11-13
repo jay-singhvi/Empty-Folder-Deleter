@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
+from various_tools.core.fs import rename_no_replace as fs_rename_no_replace
 from various_tools.core.journal import Journal, undo_run
 from various_tools.core.media import ffmpeg as ffmpeg_media
 from various_tools.core.plan import ActionKind, Plan, RunResult
@@ -710,3 +711,161 @@ def test_module_exposes_the_tool_and_options() -> None:
     assert TOOL.id == "media_resize"
     assert TOOL.Options is MediaResizeOptions
     assert LEGACY.is_file()
+
+
+# ----- review fixes ---------------------------------------------------------------------------
+
+
+def test_apply_never_reads_a_file_that_became_cloud_only_after_scan(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core import onedrive
+    from various_tools.tools.media_resize import images as images_module
+
+    src = _image(tmp_path / "pics" / "a.jpg", (2560, 1440))
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(MediaResizeOptions(roots=[src.parent]), ctx)
+    assert len(plan.selected_actions()) == 1
+
+    # The file is recalled to the cloud between scan and apply.
+    real_attributes = onedrive.get_attributes
+
+    def attributes(path: Path) -> int | None:
+        if path.name == "a.jpg":
+            return onedrive.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        return real_attributes(path)
+
+    def must_not_read(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a cloud-only file was read")
+
+    monkeypatch.setattr(onedrive, "get_attributes", attributes)
+    monkeypatch.setattr(images_module, "open", must_not_read, raising=False)
+    monkeypatch.setattr(images_module, "open_image", must_not_read)
+
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 0
+    assert result.count("failed") + result.count("skipped") == 1
+    assert not (src.parent / "resized").exists()
+
+
+def test_has_embedded_extras_refuses_a_cloud_only_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core import onedrive
+    from various_tools.core.onedrive import CloudOnlyFileError
+    from various_tools.tools.media_resize import images as images_module
+
+    src = _image(tmp_path / "a.jpg", (200, 100))
+    monkeypatch.setattr(onedrive, "get_attributes", lambda _p: 0x1000)
+    with pytest.raises(CloudOnlyFileError):
+        images_module.has_embedded_extras(src)
+
+
+def test_output_created_between_scan_and_apply_is_never_replaced(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.tools.media_resize import images as images_module
+
+    src = _image(tmp_path / "pics" / "wide.jpg", (2560, 1440))
+    out = src.parent / "resized" / "wide.jpg"
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(MediaResizeOptions(roots=[src.parent]), ctx)
+    assert plan.selected_actions()
+
+    # The file appears after the converter's own check, right before the final rename.
+    real_rename = images_module.rename_no_replace
+
+    def late_file(tmp: Path, destination: Path) -> None:
+        destination.write_bytes(b"keep me")
+        real_rename(tmp, destination)
+
+    monkeypatch.setattr(images_module, "rename_no_replace", late_file)
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 0
+    assert result.count("failed") == 1
+    assert out.read_bytes() == b"keep me"
+    assert [p.name for p in out.parent.iterdir()] == ["wide.jpg"]  # no temp file left behind
+
+
+def test_rename_no_replace_refuses_an_existing_target(tmp_path: Path) -> None:
+    source = tmp_path / "s.bin"
+    target = tmp_path / "t.bin"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+    with pytest.raises(FileExistsError):
+        fs_rename_no_replace(source, target)
+    assert target.read_bytes() == b"old"
+    assert source.read_bytes() == b"new"
+    free = tmp_path / "free.bin"
+    fs_rename_no_replace(source, free)
+    assert free.read_bytes() == b"new"
+    assert not source.exists()
+
+
+def test_output_through_a_junction_is_refused(tmp_path: Path, journal: Journal) -> None:
+    folder = tmp_path / "pics"
+    _image(folder / "sub" / "wide.jpg", (2560, 1440))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ctx = _ctx(tmp_path, journal)
+    opts = MediaResizeOptions(roots=[folder], recursive=True)
+    plan = TOOL.scan(opts, ctx)
+    assert len(plan.selected_actions()) == 1
+
+    # After the scan, the output folder is swapped for a junction that points outside the root.
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(folder / "resized"), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("could not create a junction in this environment")
+    try:
+        result = TOOL.apply(plan, ctx)
+        assert result.count("done") == 0
+        assert result.count("failed") == 1
+        assert "junction or symlink" in result.outcomes[0].detail
+        assert list(outside.rglob("*")) == []
+    finally:
+        os.rmdir(folder / "resized")  # removes the junction only, never its target
+
+
+def test_keep_metadata_keeps_the_icc_profile_and_dpi(tmp_path: Path, journal: Journal) -> None:
+    from PIL import ImageCms
+
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    folder = tmp_path / "pics"
+    folder.mkdir()
+    Image.new("RGB", (2560, 1440), (10, 20, 30)).save(
+        folder / "p.jpg", format="JPEG", icc_profile=profile, dpi=(300, 300)
+    )
+    _run(tmp_path, journal, MediaResizeOptions(roots=[folder]))
+    with Image.open(folder / "resized" / "p.jpg") as out:
+        assert out.info.get("icc_profile") == profile
+        dpi = out.info.get("dpi")
+        assert dpi is not None and round(dpi[0]) == 300
+
+    # With metadata off, the profile is dropped.
+    plain = MediaResizeOptions(roots=[folder], output_folder_name="plain", keep_metadata=False)
+    _run(tmp_path, journal, plain)
+    with Image.open(folder / "plain" / "p.jpg") as out:
+        assert out.info.get("icc_profile") is None
+
+
+def test_summary_counts_only_selected_rows_and_shows_bytes_saved(tmp_path: Path) -> None:
+    folder = tmp_path / "pics"
+    _image(folder / "a.jpg", (2560, 1440))
+    _image(folder / "b.jpg", (2560, 1440))
+    blocked = folder / "resized" / "b.jpg"
+    blocked.parent.mkdir()
+    blocked.write_bytes(b"keep me")
+
+    plan = TOOL.scan(MediaResizeOptions(roots=[folder]), _ctx(tmp_path, None))
+    assert sorted(a.selected for a in plan.actions) == [False, True]
+    summary = plan.notes[0]
+    assert "1 file(s) will be resized" in summary
+    assert "1 not resized" in summary
+    assert "saved" in summary
+    # Totals are those of the one selected file only.
+    size_a = (folder / "a.jpg").stat().st_size
+    assert resize_tool._size_label(size_a) + " ->" in summary

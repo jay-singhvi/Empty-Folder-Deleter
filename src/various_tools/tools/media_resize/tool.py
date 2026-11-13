@@ -31,6 +31,7 @@ from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
 from various_tools.core.fs import (
     FileInfo,
+    destination_refusal,
     is_inside,
     long_path,
     protected_reason,
@@ -270,8 +271,13 @@ class _Planner:
         self.skipped += 1
         self.plan.notes.append(f"skipped: {reason}: {path}")
 
-    def add(self, candidate: _Candidate, dst: Path, reason: str) -> None:
-        """Add one resize. An output that cannot be written is listed, but not selected."""
+    def add(
+        self, candidate: _Candidate, dst: Path, reason: str, before: int = 0, after: int = 0
+    ) -> None:
+        """Add one resize. An output that cannot be written is listed, but not selected.
+
+        Only a selected resize counts towards the totals in the summary.
+        """
         key = os.path.normcase(str(dst)).casefold()
         conflict = None
         if os.path.lexists(long_path(dst)):
@@ -290,6 +296,9 @@ class _Planner:
             )
             return
         self.claimed.add(key)
+        self.before += before
+        self.after += after
+        self.resized += 1
         self.actions.append(
             PlannedAction(kind=ActionKind.CONVERT, src=candidate.info.path, dst=dst, reason=reason)
         )
@@ -323,16 +332,13 @@ class _Planner:
         dst = _output_path(src, candidate.root, self.opts, out_suffix)
         before = candidate.info.size
         after = len(result.data)
-        self.before += before
-        self.after += after
-        self.resized += 1
         width, height = result.source_size
         target = result.target
         reason = (
             f"resize {_dims(width, height)} -> {_dims(target.width, target.height)}; "
             f"{_size_label(before)} -> {_size_label(after)}"
         )
-        self.add(candidate, dst, reason)
+        self.add(candidate, dst, reason, before, after)
 
     def video(self, candidate: _Candidate, ffprobe: Path) -> None:
         src = candidate.info.path
@@ -350,16 +356,13 @@ class _Planner:
             return
         before = candidate.info.size
         after = videos.estimate_bytes(before, width, height, target.width, target.height)
-        self.before += before
-        self.after += after
-        self.resized += 1
         self.estimated = True
         dst = _output_path(src, candidate.root, self.opts, src.suffix.lower())
         reason = (
             f"resize {_dims(width, height)} -> {_dims(target.width, target.height)}; "
             f"{_size_label(before)} -> about {_size_label(after)} {ESTIMATE_NOTE}"
         )
-        self.add(candidate, dst, reason)
+        self.add(candidate, dst, reason, before, after)
 
 
 def _video_target(opts: MediaResizeOptions, width: int, height: int) -> Target | str:
@@ -396,9 +399,15 @@ class _Converter:
         self._check_paths(src, dst)
         if os.path.lexists(long_path(dst)):
             raise FileExistsError(f"the output file already exists, so it was not replaced: {dst}")
+        refusal = destination_refusal(dst, stop=self._root_of(dst))
+        if refusal is not None:
+            raise ValueError(refusal)
         if src.suffix.lower() in videos.VIDEO_EXTS:
             return self._video(src, dst)
         return self._image(src, dst)
+
+    def _root_of(self, dst: Path) -> Path | None:
+        return next((root for root in self.roots if is_inside(dst, root)), None)
 
     def _check_paths(self, src: Path, dst: Path) -> None:
         if not any(is_inside(src, root) and not _same(src, root) for root in self.roots):
@@ -524,7 +533,7 @@ def _summary(opts: MediaResizeOptions, planner: _Planner) -> str:
         share = saved * 100 // planner.before if planner.before else 0
         text += (
             f" Total {_size_label(planner.before)} -> {_size_label(planner.after)}"
-            f", about {share}% smaller"
+            f", about {share}% smaller ({_size_label(saved)} saved)"
             + (" (video sizes are estimates)." if planner.estimated else ".")
         )
     return text

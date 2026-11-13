@@ -10,6 +10,8 @@ A file with no usable date goes to the unknown-date folder. It is never moved on
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,9 @@ from various_tools.core.media.exif import (
     read_exif,
 )
 from various_tools.core.media.ffmpeg import creation_time
+from various_tools.core.onedrive import CloudOnlyFileError
+
+log = logging.getLogger(__name__)
 
 DateSource = Literal["exif", "video_tag", "exiftool", "modified"]
 DATE_SOURCES: tuple[str, ...] = get_args(DateSource)
@@ -43,6 +48,21 @@ PHOTO_EXTS = frozenset(
 RAW_EXTS = frozenset({".cr3"})
 VIDEO_EXTS = frozenset({".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv"})
 PROCESSABLE_EXTS = PHOTO_EXTS | RAW_EXTS | VIDEO_EXTS
+
+
+def _safe_date(label: str, path: Path, reader: Callable[[], datetime | None]) -> datetime | None:
+    """Run one metadata reader. Any failure gives None, so the next source is tried.
+
+    The legacy script catches everything here. A cloud-only file is the one exception: it is
+    never read, so the error goes up to the caller, which reports it as skipped.
+    """
+    try:
+        return reader()
+    except CloudOnlyFileError:
+        raise
+    except Exception as exc:
+        log.warning("%s could not be read for %s: %s", label, path, exc)
+        return None
 
 
 @dataclass(frozen=True)
@@ -71,7 +91,14 @@ def read_capture_date(
     size.
     """
     suffix = path.suffix.lower()
-    exif = read_exif(path) if suffix in PHOTO_EXTS else None
+    exif: ExifInfo | None = None
+    if suffix in PHOTO_EXTS:
+        try:
+            exif = read_exif(path)
+        except CloudOnlyFileError:
+            raise
+        except Exception as exc:
+            log.warning("EXIF could not be read for %s: %s", path, exc)
 
     def plausible(value: datetime | None) -> bool:
         return is_plausible_date(value, min_year=min_year, now=now)
@@ -82,12 +109,12 @@ def read_capture_date(
                 return Reading(exif.capture_time, LABELS[step], exif)
         elif step == "video_tag":
             if suffix in VIDEO_EXTS and ffprobe is not None:
-                taken = creation_time(ffprobe, path)
+                taken = _safe_date("Video metadata", path, lambda: creation_time(ffprobe, path))
                 if plausible(taken):
                     return Reading(taken, LABELS[step], exif)
         elif step == "exiftool":
             if suffix in RAW_EXTS and exiftool is not None:
-                taken = exiftool_capture_time(exiftool, path)
+                taken = _safe_date("ExifTool", path, lambda: exiftool_capture_time(exiftool, path))
                 if plausible(taken):
                     return Reading(taken, LABELS[step], exif)
         elif step == "modified" and plausible(modified):

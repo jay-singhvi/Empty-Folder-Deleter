@@ -10,6 +10,7 @@ passed in as a resolved path (from ``RunContext.deps``). This module never locat
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -96,8 +97,8 @@ def read_exif(path: Path) -> ExifInfo:
             return _exif_from_image(img)
     except CloudOnlyFileError:
         raise
-    except (OSError, ValueError) as exc:
-        log.debug("No readable EXIF in %s: %s", path, exc)
+    except Exception as exc:  # malformed EXIF raises many types in Pillow; none may stop a scan
+        log.warning("No readable EXIF in %s: %s", path, exc)
         return ExifInfo()
 
 
@@ -147,10 +148,16 @@ def exiftool_capture_time(exiftool: Path, path: Path, timeout: float = 30) -> da
             ],
             timeout=timeout,
         )
-    except (OSError, ValueError) as exc:
-        log.debug("ExifTool failed on %s: %s", path, exc)
+    except subprocess.TimeoutExpired:
+        log.warning("ExifTool timed out on %s", path)
         return None
-    for line in result.stdout.splitlines():
+    except (OSError, ValueError) as exc:
+        log.warning("ExifTool failed on %s: %s", path, exc)
+        return None
+    if result.returncode != 0:
+        log.warning("ExifTool failed on %s: %s", path, (result.stderr or "").strip()[:200])
+        return None
+    for line in (result.stdout or "").splitlines():
         parsed = parse_exif_datetime(line)
         if parsed:
             return parsed

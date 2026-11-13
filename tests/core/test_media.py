@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -250,3 +251,116 @@ def test_transcode_failure_leaves_no_partial_output(tmp_path: Path) -> None:
         ffmpeg.transcode(failing, source, out, [])
     assert not out.exists()
     assert list(out.parent.iterdir()) == []
+
+
+# ----- degrade on timeouts and malformed output ------------------------------------------------
+
+
+def _timeout(*_args: object, **_kwargs: object) -> object:
+    raise subprocess.TimeoutExpired(cmd="tool", timeout=1)
+
+
+def _garbage(stdout: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=["tool"], returncode=0, stdout=stdout, stderr="")
+
+    return run
+
+
+def test_ffprobe_timeout_becomes_media_error_and_no_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(ffmpeg, "run_tool", _timeout)
+    with pytest.raises(ffmpeg.MediaError, match="timed out"):
+        ffmpeg.display_size(tmp_path / "ffprobe.exe", clip)
+    assert ffmpeg.creation_time(tmp_path / "ffprobe.exe", clip) is None
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "not json at all",
+        "[1, 2, 3]",
+        '{"streams": [{"width": "wide", "height": null}], "format": {"tags": 5}}',
+        '{"streams": [5], "format": {"duration": "n/a", "tags": {"creation_time": 7}}}',
+    ],
+)
+def test_malformed_ffprobe_output_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(ffmpeg, "run_tool", _garbage(stdout))
+    probe = tmp_path / "ffprobe.exe"
+    with pytest.raises(ffmpeg.MediaError):
+        ffmpeg.display_size(probe, clip)
+    with pytest.raises(ffmpeg.MediaError):
+        ffmpeg.probe_duration(probe, clip)
+    assert ffmpeg.creation_time(probe, clip) is None
+
+
+def test_ffmpeg_timeouts_become_media_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(ffmpeg, "run_binary", _timeout)
+    with pytest.raises(ffmpeg.MediaError, match="timed out"):
+        ffmpeg.grab_frame(tmp_path / "ffmpeg.exe", clip, 1.0)
+    monkeypatch.setattr(ffmpeg, "run_tool", _timeout)
+    out = tmp_path / "out" / "x.mp4"
+    with pytest.raises(ffmpeg.MediaError, match="timed out"):
+        ffmpeg.transcode(tmp_path / "ffmpeg.exe", clip, out, [])
+    assert list(out.parent.iterdir()) == []
+
+
+def test_transcode_never_replaces_an_existing_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    out = tmp_path / "out" / "x.mp4"
+    out.parent.mkdir()
+
+    def encode(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        out.write_bytes(b"keep me")  # appears while the encode is running
+        return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ffmpeg, "run_tool", encode)
+    with pytest.raises(FileExistsError):
+        ffmpeg.transcode(tmp_path / "ffmpeg.exe", source, out, [])
+    assert out.read_bytes() == b"keep me"
+    assert [p.name for p in out.parent.iterdir()] == ["x.mp4"]
+
+
+def test_exiftool_timeout_and_garbage_give_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    photo = tmp_path / "IMG.cr3"
+    photo.write_bytes(b"x")
+    monkeypatch.setattr(exif, "run_tool", _timeout)
+    assert exif.exiftool_capture_time(tmp_path / "exiftool.exe", photo) is None
+    monkeypatch.setattr(exif, "run_tool", _garbage("\x00\xff garbage\nnot a date\n"))
+    assert exif.exiftool_capture_time(tmp_path / "exiftool.exe", photo) is None
+
+    def failed(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["exiftool"], returncode=1, stdout="2024:01:02 03:04:05", stderr="boom"
+        )
+
+    monkeypatch.setattr(exif, "run_tool", failed)
+    assert exif.exiftool_capture_time(tmp_path / "exiftool.exe", photo) is None
+
+
+def test_read_exif_degrades_on_unexpected_pillow_errors(
+    make_image: ImageMaker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = make_image("pic.jpg")
+
+    def broken(_img: object) -> object:
+        raise KeyError("odd tag")
+
+    monkeypatch.setattr(exif, "_exif_from_image", broken)
+    assert exif.read_exif(path) == exif.ExifInfo()

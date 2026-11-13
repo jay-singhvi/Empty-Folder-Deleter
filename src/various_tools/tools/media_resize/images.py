@@ -21,7 +21,9 @@ from typing import Any
 from PIL import Image, ImageOps
 
 from various_tools.core.deps import run_tool
+from various_tools.core.fs import rename_no_replace
 from various_tools.core.media.imaging import is_raw, open_image
+from various_tools.core.onedrive import ensure_on_device
 from various_tools.tools.media_resize.geometry import ResizeMode, Target, plan_target
 
 IMAGE_FORMATS: dict[str, str] = {
@@ -69,7 +71,11 @@ def is_image_name(name: str) -> bool:
 
 
 def has_embedded_extras(path: Path) -> bool:
-    """True for Motion Photo and Ultra HDR JPEGs, which Pillow cannot re-save intact."""
+    """True for Motion Photo and Ultra HDR JPEGs, which Pillow cannot re-save intact.
+
+    Reads 256 KB of the file, so a cloud-only file raises :class:`CloudOnlyFileError` first.
+    """
+    ensure_on_device(path)
     try:
         with open(path, "rb") as handle:
             head = handle.read(262144)
@@ -88,7 +94,13 @@ def _kept_exif(original: Image.Image) -> bytes | None:
     return bytes(exif.tobytes())
 
 
-def _save_options(fmt: str, rules: ImageRules, exif: bytes | None) -> dict[str, Any]:
+def _save_options(
+    fmt: str,
+    rules: ImageRules,
+    exif: bytes | None,
+    icc_profile: bytes | None = None,
+    dpi: tuple[float, float] | None = None,
+) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if fmt == "JPEG":
         options["quality"] = rules.jpeg_quality
@@ -97,15 +109,35 @@ def _save_options(fmt: str, rules: ImageRules, exif: bytes | None) -> dict[str, 
         options["optimize"] = True
     if exif is not None and fmt in ("JPEG", "PNG", "WEBP", "TIFF"):
         options["exif"] = exif
+    if icc_profile and fmt in ("JPEG", "PNG", "WEBP", "TIFF"):
+        options["icc_profile"] = icc_profile
+    if dpi is not None and fmt in ("JPEG", "PNG", "TIFF"):
+        options["dpi"] = dpi
     return options
+
+
+def _kept_dpi(original: Image.Image) -> tuple[float, float] | None:
+    value: object = original.info.get("dpi")
+    if not isinstance(value, tuple) or len(value) != 2:
+        return None
+    try:
+        return float(value[0]), float(value[1])
+    except TypeError, ValueError:
+        return None
+
+
+def _kept_icc(original: Image.Image) -> bytes | None:
+    value = original.info.get("icc_profile")
+    return value if isinstance(value, bytes) and value else None
 
 
 def render(source: Path, out_suffix: str, rules: ImageRules, raw_to_jpeg: bool) -> Rendered | str:
     """Resize ``source`` in memory. Returns the result, or the reason the file is left alone.
 
-    The caller must have checked that the file is on the device (rule 3). ``open_image`` checks
-    again, so a cloud-only file raises instead of being read.
+    The caller must have checked that the file is on the device (rule 3). This checks again,
+    before anything is read, so a cloud-only file raises instead of being read.
     """
+    ensure_on_device(source)
     from_raw = is_raw(source)
     if from_raw:
         if not raw_to_jpeg:
@@ -128,6 +160,8 @@ def render(source: Path, out_suffix: str, rules: ImageRules, raw_to_jpeg: bool) 
         displayed = original if from_raw else ImageOps.exif_transpose(original)
         keep_exif = rules.keep_metadata and not from_raw
         exif = _kept_exif(original) if keep_exif else None
+        icc = _kept_icc(original) if keep_exif else None
+        dpi = _kept_dpi(original) if keep_exif else None
         width, height = displayed.size
         result = plan_target(
             rules.mode,
@@ -143,7 +177,7 @@ def render(source: Path, out_suffix: str, rules: ImageRules, raw_to_jpeg: bool) 
     if out_fmt == "JPEG" and image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
     buffer = io.BytesIO()
-    image.save(buffer, format=out_fmt, **_save_options(out_fmt, rules, exif))
+    image.save(buffer, format=out_fmt, **_save_options(out_fmt, rules, exif, icc, dpi))
     return Rendered(
         source_size=(width, height),
         target=result,
@@ -165,7 +199,8 @@ def write(
 
     The bytes go to a temporary file first. For a RAW source the metadata is copied with ExifTool,
     and the copy is checked (size and format) before the final rename, so a failed step leaves
-    no half-written file at ``destination``. The caller checks that ``destination`` is free.
+    no half-written file at ``destination``. The final rename never replaces an existing file:
+    when ``destination`` appeared since the scan, :class:`FileExistsError` is raised.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=destination.parent, suffix=".tmp")
@@ -181,7 +216,7 @@ def write(
             if check.size != (rendered.target.width, rendered.target.height):
                 raise ImageError("the written image has the wrong size; it was not kept")
         stat = os.stat(source)
-        os.replace(tmp, destination)
+        rename_no_replace(tmp, destination)
         os.utime(destination, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     finally:
         tmp.unlink(missing_ok=True)

@@ -26,10 +26,10 @@ def _info(path: Path, attributes: int = 0x20) -> FileInfo:
 def test_sha256_matches_hashlib_on_a_multi_chunk_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(hashing, "CHUNK_SIZE", 7)  # force several reads
     data = bytes(range(256)) * 9
     target = tmp_path / "data.bin"
     target.write_bytes(data)
+    assert sha256(target, chunk_size=7) == hashlib.sha256(data).hexdigest()  # several reads
     assert sha256(target) == hashlib.sha256(data).hexdigest()
 
 
@@ -71,9 +71,9 @@ def test_group_exact_never_hashes_cloud_only_files(
     hashed: list[Path] = []
     real_sha = hashing.sha256
 
-    def tracking_sha(path: Path) -> str:
+    def tracking_sha(path: Path, chunk_size: int = hashing.CHUNK_SIZE) -> str:
         hashed.append(path)
-        return real_sha(path)
+        return real_sha(path, chunk_size)
 
     monkeypatch.setattr(hashing, "sha256", tracking_sha)
     infos = [_info(local_a), _info(local_b), _info(cloud, attributes=OFFLINE)]
@@ -92,7 +92,7 @@ def test_group_exact_reports_read_errors_without_stopping(
     a.write_bytes(b"SAME")
     b.write_bytes(b"SAME")
 
-    def broken(path: Path) -> str:
+    def broken(path: Path, chunk_size: int = 0) -> str:
         raise PermissionError(f"locked: {path.name}")
 
     monkeypatch.setattr(hashing, "sha256", broken)

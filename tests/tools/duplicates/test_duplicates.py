@@ -401,7 +401,7 @@ def test_capture_time_difference_blocks_a_visual_match(tmp_path: Path) -> None:
 def test_protected_root_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tree = tmp_path / "tree"
     _make_image_tree(tree)
-    monkeypatch.setattr(fs_module, "protected_reason", lambda _p: "Windows folder")
+    monkeypatch.setattr(fs_module, "protected_reason", lambda _p, *_a, **_k: "Windows folder")
     plan = TOOL.scan(DuplicatesOptions(roots=[tree], use_cache=False), _ctx(tmp_path, None))
     assert plan.roots == []
     assert plan.actions == []

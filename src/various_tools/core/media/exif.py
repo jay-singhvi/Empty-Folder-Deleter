@@ -21,6 +21,10 @@ from PIL import Image
 from various_tools.core.deps import run_tool
 from various_tools.core.media.imaging import IMAGE_EXTS, open_image
 from various_tools.core.onedrive import CloudOnlyFileError, ensure_on_device
+from various_tools.core.settings import (
+    DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
+    DEFAULT_MIN_PLAUSIBLE_YEAR,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +34,7 @@ TAG_DATETIME_ORIGINAL = 0x9003  # 36867
 TAG_DATETIME_DIGITIZED = 0x9004  # 36868
 TAG_MAKE = 0x010F
 TAG_MODEL = 0x0110
-DEFAULT_MIN_YEAR = 1990
+DEFAULT_MIN_YEAR = DEFAULT_MIN_PLAUSIBLE_YEAR
 
 
 @dataclass(frozen=True)
@@ -133,7 +137,9 @@ def _exif_from_image(img: Image.Image) -> ExifInfo:
     )
 
 
-def exiftool_capture_time(exiftool: Path, path: Path, timeout: float = 30) -> datetime | None:
+def exiftool_capture_time(
+    exiftool: Path, path: Path, timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S
+) -> datetime | None:
     """Capture time from ExifTool, for files Pillow cannot open (CR3). None when it has none."""
     try:
         result = run_tool(
@@ -170,6 +176,7 @@ def capture_time(
     exiftool: Path | None = None,
     min_year: int = DEFAULT_MIN_YEAR,
     now: datetime | None = None,
+    exiftool_timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
 ) -> datetime | None:
     """The plausible capture time of a photo: EXIF first, then ExifTool when it is available.
 
@@ -180,7 +187,7 @@ def capture_time(
     if is_plausible_date(info.capture_time, min_year=min_year, now=now):
         return info.capture_time
     if exiftool is not None:
-        fallback = exiftool_capture_time(exiftool, path)
+        fallback = exiftool_capture_time(exiftool, path, exiftool_timeout)
         if is_plausible_date(fallback, min_year=min_year, now=now):
             return fallback
     return None

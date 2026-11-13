@@ -174,10 +174,12 @@ def run_binary(args: list[str], timeout: float = 60) -> subprocess.CompletedProc
     )
 
 
-def probe_version(path: Path, version_args: tuple[str, ...]) -> str | None:
+def probe_version(
+    path: Path, version_args: tuple[str, ...], timeout: float = VERSION_TIMEOUT_S
+) -> str | None:
     """Run the program's version command. Returns the first output line, or None on failure."""
     try:
-        result = run_tool([str(path), *version_args], VERSION_TIMEOUT_S)
+        result = run_tool([str(path), *version_args], timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("Version probe failed for %s: %s", path, exc)
         return None
@@ -189,13 +191,13 @@ def probe_version(path: Path, version_args: tuple[str, ...]) -> str | None:
     return None
 
 
-def probe_ollama(url: str) -> str | None:
+def probe_ollama(url: str, timeout: float = OLLAMA_TIMEOUT_S) -> str | None:
     """GET ``/api/version`` on an Ollama server. Returns its version, or None if unreachable."""
     if not url.lower().startswith(("http://", "https://")):
         return None
     try:
         with urllib.request.urlopen(  # noqa: S310 - scheme checked above
-            f"{url.rstrip('/')}/api/version", timeout=OLLAMA_TIMEOUT_S
+            f"{url.rstrip('/')}/api/version", timeout=timeout
         ) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
@@ -214,6 +216,8 @@ class ExternalTools:
 
     ``overrides`` maps a tool name to a path (or, for ``ollama``, a URL). The probes are
     injectable so tests can avoid real programs. ``env`` defaults to ``os.environ``.
+    ``version_timeout`` and ``ollama_timeout`` (seconds) apply to the default probes and come
+    from the ``version_check_timeout_s`` and ``ollama_probe_timeout_s`` settings.
     """
 
     def __init__(
@@ -223,9 +227,23 @@ class ExternalTools:
         env: Mapping[str, str] | None = None,
         version_probe: VersionProbe = probe_version,
         ollama_probe: OllamaProbe = probe_ollama,
+        version_timeout: float = VERSION_TIMEOUT_S,
+        ollama_timeout: float = OLLAMA_TIMEOUT_S,
     ) -> None:
         self._overrides = dict(overrides or {})
         self._env = os.environ if env is None else env
+        if version_probe is probe_version and version_timeout != VERSION_TIMEOUT_S:
+
+            def _timed_version(path: Path, args: tuple[str, ...]) -> str | None:
+                return probe_version(path, args, version_timeout)
+
+            version_probe = _timed_version
+        if ollama_probe is probe_ollama and ollama_timeout != OLLAMA_TIMEOUT_S:
+
+            def _timed_ollama(url: str) -> str | None:
+                return probe_ollama(url, ollama_timeout)
+
+            ollama_probe = _timed_ollama
         self._version_probe = version_probe
         self._ollama_probe = ollama_probe
         self._cache: dict[str, ToolLocation] = {}

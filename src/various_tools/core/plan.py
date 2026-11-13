@@ -156,7 +156,7 @@ def _guard(action: PlannedAction, plan: Plan, ctx: RunContext) -> str | None:
             return "source is outside the selected folders"
         if any(_same(action.src, root) for root in plan.roots):
             return "the selected root folder is never changed"
-        reason = protected_reason(action.src)
+        reason = protected_reason(action.src, rules=settings.protected_paths())
         if reason and not settings.allow_protected_paths:
             return f"protected path ({reason})"
 
@@ -169,7 +169,7 @@ def _guard(action: PlannedAction, plan: Plan, ctx: RunContext) -> str | None:
     if kind in (ActionKind.MOVE, ActionKind.RENAME):
         if action.dst is None:
             return "no destination path"
-        reason = protected_reason(action.dst)
+        reason = protected_reason(action.dst, rules=settings.protected_paths())
         if reason and not settings.allow_protected_paths:
             return f"destination is a protected path ({reason})"
         if (

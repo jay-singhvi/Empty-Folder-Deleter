@@ -25,19 +25,34 @@ from various_tools.core.deps import run_binary, run_tool
 from various_tools.core.fs import rename_no_replace
 from various_tools.core.jsonutil import as_dict, as_list
 from various_tools.core.onedrive import ensure_on_device
+from various_tools.core.settings import (
+    DEFAULT_FFPROBE_TIMEOUT_S,
+    DEFAULT_FRAME_TIMEOUT_S,
+    DEFAULT_TRANSCODE_TIMEOUT_S,
+)
 
 log = logging.getLogger(__name__)
 
-PROBE_TIMEOUT_S = 30
-FRAME_TIMEOUT_S = 60
-TRANSCODE_TIMEOUT_S = 60 * 60
+# Defaults only. Tools pass the user's values from settings (``ffprobe_timeout_s`` and so on).
+PROBE_TIMEOUT_S: float = DEFAULT_FFPROBE_TIMEOUT_S
+FRAME_TIMEOUT_S: float = DEFAULT_FRAME_TIMEOUT_S
+TRANSCODE_TIMEOUT_S: float = DEFAULT_TRANSCODE_TIMEOUT_S
+# How a frame grab steps back when the video track ends before the container (legacy values).
+FRAME_RETRIES = 6
+FRAME_STEP_BACK = 0.8
 
 
 class MediaError(RuntimeError):
     """An ffmpeg or ffprobe call failed, or its output could not be used."""
 
 
-def ffprobe_json(ffprobe: Path, path: Path, entries: list[str] | None = None) -> dict[str, Any]:
+def ffprobe_json(
+    ffprobe: Path,
+    path: Path,
+    entries: list[str] | None = None,
+    *,
+    timeout: float = PROBE_TIMEOUT_S,
+) -> dict[str, Any]:
     """Run ffprobe and return its JSON. ``entries`` are passed to ``-show_entries`` when given."""
     ensure_on_device(path)
     args = [str(ffprobe), "-v", "error", "-print_format", "json"]
@@ -47,7 +62,7 @@ def ffprobe_json(ffprobe: Path, path: Path, entries: list[str] | None = None) ->
         args += ["-show_entries", ":".join(entries)]
     args.append(str(path))
     try:
-        result = run_tool(args, timeout=PROBE_TIMEOUT_S)
+        result = run_tool(args, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         log.warning("ffprobe timed out on %s", path)
         raise MediaError(f"ffprobe timed out on {path.name}") from exc
@@ -62,9 +77,9 @@ def ffprobe_json(ffprobe: Path, path: Path, entries: list[str] | None = None) ->
         raise MediaError(f"ffprobe returned invalid JSON for {path.name}") from exc
 
 
-def probe_duration(ffprobe: Path, path: Path) -> float:
+def probe_duration(ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOUT_S) -> float:
     """Container duration in seconds."""
-    data = ffprobe_json(ffprobe, path)
+    data = ffprobe_json(ffprobe, path, timeout=timeout)
     try:
         return float(as_dict(data.get("format"))["duration"])
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -89,9 +104,9 @@ def _rotation_degrees(stream: dict[str, Any]) -> int:
     return 0
 
 
-def display_size(ffprobe: Path, path: Path) -> tuple[int, int]:
+def display_size(ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOUT_S) -> tuple[int, int]:
     """Width and height as the viewer shows them: swapped for a 90 or 270 degree rotation."""
-    streams = as_list(ffprobe_json(ffprobe, path).get("streams"))
+    streams = as_list(ffprobe_json(ffprobe, path, timeout=timeout).get("streams"))
     if not streams:
         raise MediaError(f"no video stream in {path.name}")
     stream = as_dict(streams[0])
@@ -104,7 +119,9 @@ def display_size(ffprobe: Path, path: Path) -> tuple[int, int]:
     return width, height
 
 
-def creation_time(ffprobe: Path, path: Path) -> datetime | None:
+def creation_time(
+    ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOUT_S
+) -> datetime | None:
     """The container's ``creation_time`` as a naive local datetime, or None when missing.
 
     This is the video equivalent of EXIF DateTimeOriginal. Failures give None rather than an
@@ -112,7 +129,10 @@ def creation_time(ffprobe: Path, path: Path) -> datetime | None:
     """
     try:
         data = ffprobe_json(
-            ffprobe, path, entries=["format_tags=creation_time", "stream_tags=creation_time"]
+            ffprobe,
+            path,
+            entries=["format_tags=creation_time", "stream_tags=creation_time"],
+            timeout=timeout,
         )
     except MediaError as exc:
         log.warning("No creation time for %s: %s", path, exc)
@@ -136,17 +156,26 @@ def creation_time(ffprobe: Path, path: Path) -> datetime | None:
         return None
 
 
-def grab_frame(ffmpeg: Path, path: Path, seconds: float, width: int = 320) -> Image.Image:
+def grab_frame(
+    ffmpeg: Path,
+    path: Path,
+    seconds: float,
+    width: int = 320,
+    *,
+    timeout: float = FRAME_TIMEOUT_S,
+    retries: int = FRAME_RETRIES,
+    step_back: float = FRAME_STEP_BACK,
+) -> Image.Image:
     """One RGB frame near ``seconds``, scaled to ``width``.
 
     The video track can end a little before the audio, so an empty result steps back in time
-    (up to six times, each step ×0.8), as in find_duplicate_videos.
+    (up to ``retries`` times, each step x ``step_back``), as in find_duplicate_videos.
     """
     ensure_on_device(path)
     t = seconds
-    for _ in range(6):
+    for _ in range(max(1, retries)):
         try:
-            result = _run_ffmpeg_frame(ffmpeg, path, t, width)
+            result = _run_ffmpeg_frame(ffmpeg, path, t, width, timeout)
         except subprocess.TimeoutExpired as exc:
             raise MediaError(f"ffmpeg timed out grabbing a frame from {path.name}") from exc
         except (OSError, ValueError) as exc:
@@ -159,12 +188,12 @@ def grab_frame(ffmpeg: Path, path: Path, seconds: float, width: int = 320) -> Im
                     return img.convert("RGB")
             except (OSError, ValueError) as exc:
                 raise MediaError(f"ffmpeg gave an unreadable frame for {path.name}") from exc
-        t *= 0.8
+        t *= step_back
     raise MediaError(f"no video frame near {seconds:.2f}s in {path.name}")
 
 
 def _run_ffmpeg_frame(
-    ffmpeg: Path, path: Path, t: float, width: int
+    ffmpeg: Path, path: Path, t: float, width: int, timeout: float = FRAME_TIMEOUT_S
 ) -> subprocess.CompletedProcess[bytes]:
     return run_binary(
         [
@@ -186,11 +215,18 @@ def _run_ffmpeg_frame(
             "png",
             "-",
         ],
-        timeout=FRAME_TIMEOUT_S,
+        timeout=timeout,
     )
 
 
-def transcode(ffmpeg: Path, source: Path, destination: Path, output_args: list[str]) -> None:
+def transcode(
+    ffmpeg: Path,
+    source: Path,
+    destination: Path,
+    output_args: list[str],
+    *,
+    timeout: float = TRANSCODE_TIMEOUT_S,
+) -> None:
     """Encode ``source`` to ``destination`` with ``output_args`` (e.g. ``["-c:v", "libx264"]``).
 
     Writes to a temporary file in the destination folder and renames it at the end, so a failed
@@ -203,7 +239,7 @@ def transcode(ffmpeg: Path, source: Path, destination: Path, output_args: list[s
     tmp_path = Path(tmp_name)
     try:
         try:
-            result = _run_transcode(ffmpeg, source, tmp_path, output_args)
+            result = _run_transcode(ffmpeg, source, tmp_path, output_args, timeout)
         except subprocess.TimeoutExpired as exc:
             raise MediaError(f"transcode timed out for {source.name}") from exc
         if result.returncode != 0:
@@ -214,7 +250,11 @@ def transcode(ffmpeg: Path, source: Path, destination: Path, output_args: list[s
 
 
 def _run_transcode(
-    ffmpeg: Path, source: Path, tmp_path: Path, output_args: list[str]
+    ffmpeg: Path,
+    source: Path,
+    tmp_path: Path,
+    output_args: list[str],
+    timeout: float = TRANSCODE_TIMEOUT_S,
 ) -> subprocess.CompletedProcess[str]:
     return run_tool(
         [
@@ -228,5 +268,5 @@ def _run_transcode(
             *output_args,
             str(tmp_path),
         ],
-        timeout=TRANSCODE_TIMEOUT_S,
+        timeout=timeout,
     )

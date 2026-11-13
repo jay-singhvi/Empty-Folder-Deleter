@@ -185,7 +185,7 @@ def test_protected_paths_are_refused_by_default(
     assert fake_profile.is_dir()
 
     # A protected reason on a file inside the folders is refused unless the user allows it.
-    monkeypatch.setattr(plan_module, "protected_reason", lambda _p, env=None: "Windows folder")
+    monkeypatch.setattr(plan_module, "protected_reason", lambda _p, *_a, **_k: "Windows folder")
     plan2 = Plan(
         tool="t",
         roots=[fake_profile],

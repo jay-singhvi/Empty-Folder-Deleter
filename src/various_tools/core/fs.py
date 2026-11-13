@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
+import re
 import sys
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -215,35 +216,85 @@ def _norm(path: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
 
 
-def protected_reason(path: Path, env: Mapping[str, str] | None = None) -> str | None:
+# Folders that, with everything inside them, are protected targets (AGENTS.md rule 6) 🔒.
+# The user can edit the list in settings (``protected_folders``); this is the default.
+DEFAULT_PROTECTED_FOLDERS: tuple[str, ...] = (
+    "%SystemRoot%",
+    "%WINDIR%",
+    "%ProgramFiles%",
+    "%ProgramFiles(x86)%",
+    "%ProgramW6432%",
+)
+_FOLDER_LABELS = {
+    "%systemroot%": "Windows folder",
+    "%windir%": "Windows folder",
+    "%programfiles%": "Program Files",
+    "%programfiles(x86)%": "Program Files",
+    "%programw6432%": "Program Files",
+}
+_ENV_VAR = re.compile(r"%([^%]+)%")
+
+
+@dataclass(frozen=True)
+class ProtectedPaths:
+    """The protected-path rules 🔒. Built from settings by ``Settings.protected_paths()``.
+
+    ``allowed`` is the user's "allow protected folders" override; the checks below still report
+    the reason, and callers decide (``root_refusal`` and the apply engine honour ``allowed``).
+    """
+
+    folders: tuple[str, ...] = DEFAULT_PROTECTED_FOLDERS
+    drive_roots: bool = True
+    user_profile: bool = True
+    allowed: bool = False
+
+
+DEFAULT_PROTECTION = ProtectedPaths()
+
+
+def _expand(template: str, environ: Mapping[str, str]) -> str | None:
+    """``%VAR%`` expanded from ``environ`` (case-insensitively), or None if a variable is unset."""
+    lowered = {key.lower(): value for key, value in environ.items()}
+    missing = False
+
+    def sub(match: re.Match[str]) -> str:
+        nonlocal missing
+        value = lowered.get(match.group(1).lower())
+        if not value:
+            missing = True
+            return ""
+        return value
+
+    expanded = _ENV_VAR.sub(sub, template)
+    return None if missing or not expanded.strip() else expanded
+
+
+def protected_reason(
+    path: Path, env: Mapping[str, str] | None = None, rules: ProtectedPaths | None = None
+) -> str | None:
     """Why ``path`` is a protected target (AGENTS.md rule 6), or ``None`` if it is not.
 
-    Protected: drive roots, the user profile folder itself, the Windows folder and
-    Program Files (both bitnesses). Everything inside Windows and Program Files is protected.
+    Default rules: drive roots, the user profile folder itself, and everything inside the
+    Windows and Program Files folders. ``rules`` (from settings) can change the list.
     """
     environ = os.environ if env is None else env
+    active = rules or DEFAULT_PROTECTION
     target = _norm(path)
     anchor = _norm(Path(path).anchor or path)
-    if target == anchor:
+    if active.drive_roots and target == anchor:
         return "drive root"
 
     user_profile = environ.get("USERPROFILE")
-    if user_profile and target == _norm(user_profile):
+    if active.user_profile and user_profile and target == _norm(user_profile):
         return "user profile folder"
 
     def within(base: str) -> bool:
         return target == base or target.startswith(base + os.sep)
 
-    for key, label in (
-        ("SystemRoot", "Windows folder"),
-        ("WINDIR", "Windows folder"),
-        ("ProgramFiles", "Program Files"),
-        ("ProgramFiles(x86)", "Program Files"),
-        ("ProgramW6432", "Program Files"),
-    ):
-        value = environ.get(key)
+    for template in active.folders:
+        value = _expand(template, environ)
         if value and within(_norm(value)):
-            return label
+            return _FOLDER_LABELS.get(template.lower(), f"protected folder {template}")
     return None
 
 
@@ -288,12 +339,18 @@ def destination_refusal(dst: Path, stop: Path | None = None) -> str | None:
     return None
 
 
-def root_refusal(root: Path, allow_protected: bool = False) -> str | None:
+def root_refusal(root: Path, allow_protected: bool | ProtectedPaths = False) -> str | None:
     """Why ``root`` cannot be used as a target folder, or ``None``.
 
     Refuses a missing folder, a junction or symlink, and a protected path (AGENTS.md rules 4
-    and 6) unless ``allow_protected`` is set. Opens no file and lists nothing.
+    and 6) unless protected paths are allowed. Pass ``ctx.settings.protected_paths()`` so the
+    user's protected-folder list is used; a plain bool keeps the default list. Opens no file.
     """
+    rules = (
+        allow_protected
+        if isinstance(allow_protected, ProtectedPaths)
+        else ProtectedPaths(allowed=allow_protected)
+    )
     if not root.is_dir():
         return f"Not a folder: {root}"
     try:
@@ -304,7 +361,7 @@ def root_refusal(root: Path, allow_protected: bool = False) -> str | None:
         return f"Could not read the folder: {exc.strerror or exc}"
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
         return f"Junction or symlink, not followed: {root}"
-    reason = protected_reason(root)
-    if reason and not allow_protected:
+    reason = protected_reason(root, rules=rules)
+    if reason and not rules.allowed:
         return f"Protected folder refused ({reason}): {root}"
     return None

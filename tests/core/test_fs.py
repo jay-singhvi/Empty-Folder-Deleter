@@ -187,7 +187,7 @@ def test_root_refusal_rejects_missing_and_protected_folders(
 
     assert fs.root_refusal(tmp_path) is None
     assert "Not a folder" in (fs.root_refusal(tmp_path / "missing") or "")
-    monkeypatch.setattr(fs, "protected_reason", lambda _p: "Windows folder")
+    monkeypatch.setattr(fs, "protected_reason", lambda _p, *_a, **_k: "Windows folder")
     assert "Protected folder refused" in (fs.root_refusal(tmp_path) or "")
     assert fs.root_refusal(tmp_path, allow_protected=True) is None
 

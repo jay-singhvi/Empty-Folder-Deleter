@@ -27,16 +27,21 @@ from various_tools.core.onedrive import (
     is_on_device,
     status_from_attributes,
 )
+from various_tools.core.settings import DEFAULT_HASH_CHUNK_KB
 
-CHUNK_SIZE = 1 << 20
+# Default read size; tools pass the user's ``hash_chunk_kb`` setting.
+CHUNK_SIZE = DEFAULT_HASH_CHUNK_KB * 1024
 
 
-def sha256(path: Path) -> str:
-    """Streaming SHA-256 of a file's contents. Raises :class:`CloudOnlyFileError` if cloud-only."""
+def sha256(path: Path, chunk_size: int = CHUNK_SIZE) -> str:
+    """Streaming SHA-256 of a file's contents. Raises :class:`CloudOnlyFileError` if cloud-only.
+
+    ``chunk_size`` (bytes per read) changes speed and memory use only, never the digest.
+    """
     ensure_on_device(path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
+        for chunk in iter(lambda: handle.read(max(1, chunk_size)), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -54,7 +59,7 @@ class ExactGroups:
     errors: list[tuple[Path, str]] = field(default_factory=list[tuple[Path, str]])
 
 
-def group_exact(files: Iterable[FileInfo]) -> ExactGroups:
+def group_exact(files: Iterable[FileInfo], chunk_size: int = CHUNK_SIZE) -> ExactGroups:
     """Find files with identical contents: bucket by size, then hash only the buckets with 2+.
 
     A file in a bucket is hashed only when it is on this device. Cloud-only files are reported
@@ -74,7 +79,7 @@ def group_exact(files: Iterable[FileInfo]) -> ExactGroups:
                 result.skipped_cloud_only.append(info.path)
                 continue
             try:
-                digest = sha256(info.path)
+                digest = sha256(info.path, chunk_size)
             except CloudOnlyFileError:
                 result.skipped_cloud_only.append(info.path)
             except OSError as exc:

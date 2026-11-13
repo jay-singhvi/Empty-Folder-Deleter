@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-various-tools = "various_tools.cli.main:app"
+various-tools = "various_tools.cli.main:main"
 various-tools-gui = "various_tools.gui.app:main"
 
 # Every tool registers itself here (plan §3.3). A new tool is one more line.

@@ -13,14 +13,20 @@ This is the Various Tools version of the original Empty Folder Deleter.
 
 ## Options
 
+Nothing is a fixed constant: every value below has a default and a hint in the app. Options marked
+*advanced* are behind the "Advanced" switch.
+
 | Option | Default | What it does |
 |---|---|---|
-| Folders | (none) | The folders to scan. The folder itself is never removed. |
-| Treat as empty | `desktop.ini`, `Thumbs.db`, `.DS_Store` | Junk files that do not count as content. They are removed with their folder. Names match without regard to case. |
-| Exclude | `.git`, `node_modules` | Entries that count as content and are never touched. A folder that holds one stays. |
-| Minimum age (days) | 0 | Folders changed more recently than this stay. |
-| Skip hidden and system folders | on | Hidden or system folders stay, and so do their parents. |
-| Delete mode | Recycle Bin | `trash` sends items to the Recycle Bin. `permanent` deletes them, but only when permanent delete is also turned on in Settings. |
+| Folders to scan | (none) | The folders to scan. The folder itself is never removed. |
+| Junk files that count as empty | `desktop.ini`, `Thumbs.db`, `.DS_Store` | Exact file names that do not count as content. They are removed with their folder. Names match without regard to case. |
+| Never touch (advanced) | `.git`, `node_modules` | Entries that count as content and are never touched. A folder that holds one stays. |
+| Minimum age in days (advanced) | 0 (0 to 36500) | Folders changed more recently than this stay. |
+| Keep hidden and system folders (advanced) | on | Hidden or system folders stay, and so do their parents. |
+| Delete mode (advanced, 🔒 locked) | `trash` (Recycle Bin) | `trash` sends items to the Recycle Bin. `permanent` erases them, but it also needs the app setting `delete_mode = permanent`, asks for confirmation, and cannot be undone. |
+
+Protected folders (the Windows folder, Program Files, drive roots, your profile folder) come from
+the app settings, where the list can be changed.
 
 ## Safety
 

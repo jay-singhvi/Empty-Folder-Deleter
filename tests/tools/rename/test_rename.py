@@ -357,7 +357,7 @@ def test_video_capture_falls_back_to_ffprobe(
     monkeypatch.setattr(
         rename_tool.ffmpeg,
         "creation_time",
-        lambda _ffprobe, _path: datetime(2019, 5, 6, 7, 8, 9),
+        lambda _ffprobe, _path, **_kw: datetime(2019, 5, 6, 7, 8, 9),
     )
     plan = TOOL.scan(
         RenameOptions(

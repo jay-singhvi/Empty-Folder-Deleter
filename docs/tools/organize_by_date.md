@@ -42,19 +42,31 @@ If none of them gives a plausible date, the file goes to the **Unknown Date** fo
 
 ## Options
 
+Nothing is a fixed constant: every value below has a default and a hint in the app. Options marked
+*advanced* are behind the "Advanced" switch. An option left empty uses the matching app setting.
+
 | Option | Default | What it does |
 |---|---|---|
-| Folders | (required) | Folders to organize. |
-| Recursive | off | Also organize subfolders. Off, as in the legacy script. |
-| Destination | `OneDrive\Pictures\Camera Roll` | Where the year folders are created. |
+| Folders to organize | (required) | Folders to organize. |
+| Include subfolders | off | Also organize subfolders. Off, as in the legacy script. |
+| Skip dot-files (advanced) | on | Ignore files whose name starts with a dot. |
+| Photo file types (advanced) | jpg, jpeg, png, heic, heif, tif, tiff, bmp, webp | Extensions read for their EXIF date. Typed with or without the dot, stored in lower case. |
+| RAW file types (advanced) | cr3 | Extensions of RAW photos, dated with ExifTool. |
+| Video file types (advanced) | mp4, mov, m4v, 3gp, avi, mkv | Extensions dated with ffprobe. |
+| Destination folder | OneDrive folder from Settings + the sub-path below | Where the year folders are created. |
+| Default destination sub-path (advanced) | `Pictures/Camera Roll` | Used only when no destination is chosen. A relative path inside OneDrive, without `..`. |
 | Folder template | `{year}/{year} - {month:02d}` | Only `{year}` and `{month}` may be used. The template must stay inside the destination. |
-| Unknown-date folder | `Unknown Date` | Holds files with no usable date. |
-| Date sources (advanced) | EXIF, video, ExifTool, modified | The order to try. Remove "modified" and undated files go to the unknown folder. |
-| Minimum plausible year (advanced) | 1990 | Dates before this are treated as wrong (for example a camera clock reset to 1970). |
-| Workers (advanced) | 1 | How many files are read at once while scanning. |
-| Skip already processed | off | Skips files an earlier run already moved, before reading them. |
+| Unknown-date folder name | the Settings value (`Unknown Date`) | Holds files with no usable date. |
+| Name clash suffix (advanced) | `_dup` | Added, with a number, to a new file whose name is taken (`IMG_dup1.jpg`). Existing files are never replaced. |
+| Date sources, in order (advanced) | EXIF, video, ExifTool, modified | The order to try. Remove "modified" and undated files go to the unknown folder. |
+| Earliest believable year (advanced) | the Settings value (1990) | Dates before this are treated as wrong (for example a camera clock reset to 1970). 1990 is a hand-tuned default: change it only if you know why. |
+| Worker threads (advanced) | the Settings value (CPU cores) | How many files are read at once while scanning. 1 to 256. |
+| Skip already processed files | off | Skips files an earlier run already moved, before reading them. |
 | Retry errors only | off | Scans only the files whose last run failed. |
-| Catalog file (advanced) | in your user data folder | The SQLite catalog. |
+| Catalog file (advanced) | `catalog.sqlite` in the app data folder (Settings) | The SQLite catalog. |
+
+The ffprobe and ExifTool timeouts come from the app settings. The date rules (capture date first,
+modified time only when plausible, cloud-only files never read or moved) are fixed and not options.
 
 ## The media catalog
 

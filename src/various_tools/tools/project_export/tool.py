@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
@@ -36,7 +36,7 @@ from various_tools.core.fs import (
 )
 from various_tools.core.onedrive import is_on_device, status_from_attributes
 from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
-from various_tools.tools.base import ToolOptions
+from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.project_export.source import file_text
 
 DEFAULT_EXCLUDE_GLOBS = (".git", ".venv", "__pycache__", "node_modules", "dist", "build")
@@ -62,53 +62,200 @@ LANGUAGE_BY_SUFFIX = {
 }
 
 
+_BAD_NAME_CHARS = frozenset('<>:"/\\|?*')
+_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)", re.IGNORECASE)
+
+
+def _name_problem(name: str) -> str | None:
+    """Why ``name`` cannot be the stem of an output file name on Windows, or None."""
+    if not name.strip() or name in (".", ".."):
+        return "must not be empty"
+    if any(ch in _BAD_NAME_CHARS or ord(ch) < 32 for ch in name):
+        return "must be a plain file name, without folders or characters Windows does not allow"
+    if name.endswith((" ", ".")):
+        return "must not end with a space or a dot"
+    if _RESERVED_NAME.match(name):
+        return "is a reserved Windows name"
+    return None
+
+
 class ProjectExportOptions(ToolOptions):
-    root: Path = Field(json_schema_extra={"widget": "folder", "group": "Source"})
+    root: Path = Field(
+        title="Folder to export",
+        description=(
+            "The folder whose files are exported. It is never written to, and a drive root or "
+            "protected folder is refused."
+        ),
+        json_schema_extra={"widget": "folder", "group": "Source"},
+    )
     include_globs: list[str] = Field(
         default_factory=list,
+        title="Only include",
+        description=(
+            "When not empty, only files whose name or relative path matches one of these "
+            "patterns (for example *.py or src/*) are exported. Empty includes everything."
+        ),
         json_schema_extra={"widget": "glob_list", "group": "Source", "advanced": True},
     )
     exclude_globs: list[str] = Field(
         default_factory=lambda: list(DEFAULT_EXCLUDE_GLOBS),
+        title="Leave out",
+        description=(
+            "Files and folders whose name or relative path matches one of these patterns are "
+            "left out, with everything inside them. Default: .git, .venv, __pycache__, "
+            "node_modules, dist, build."
+        ),
         json_schema_extra={"widget": "glob_list", "group": "Source", "advanced": True},
     )
     exts: list[str] = Field(
         default_factory=list,
+        title="File types",
+        description=(
+            "When not empty, only files with these extensions are exported, for example py or "
+            ".ipynb (the dot is optional). Empty includes every file type."
+        ),
         json_schema_extra={"widget": "ext_list", "group": "Source"},
     )
     respect_gitignore: bool = Field(
         default=True,
+        title="Respect .gitignore",
+        description=(
+            "Leave out files that a .gitignore in the folder or its subfolders ignores. "
+            "On by default."
+        ),
         json_schema_extra={"group": "Source", "advanced": True},
     )
     mode: Literal["tree", "contents", "both"] = Field(
         default="both",
+        title="What to export",
+        description=(
+            "tree writes only the file list as an indented tree, contents writes only the file "
+            "text, both writes the tree and then the contents."
+        ),
         json_schema_extra={"group": "Output"},
     )
     output_format: Literal["txt", "md"] = Field(
         default="txt",
+        title="Output format",
+        description=(
+            "txt uses separator lines, like the original scripts. md writes headings and fenced "
+            "code blocks for Markdown viewers."
+        ),
         json_schema_extra={"group": "Output"},
     )
     output_path: Path | None = Field(
         default=None,
+        title="Output file",
+        description=(
+            "Where the export is written. Empty writes the output name below, with the format's "
+            "extension, into the exported folder. An existing file is never overwritten."
+        ),
         json_schema_extra={"widget": "file", "group": "Output"},
+    )
+    output_name: str = Field(
+        default=DEFAULT_OUTPUT_NAME,
+        min_length=1,
+        title="Output file name",
+        description=(
+            "Name, without extension, of the export file when no output file is chosen. A "
+            "plain file name: no folders. Default: Project-File-Content."
+        ),
+        json_schema_extra={"group": "Output"},
+    )
+    separator: str = Field(
+        default=SEPARATOR,
+        min_length=1,
+        max_length=200,
+        title="Separator line",
+        description=(
+            "The line printed above and below each folder, file and tree heading in txt "
+            "exports. One line of text. Default: 50 equals signs. Not used in md exports."
+        ),
+        json_schema_extra={"group": "Output", "advanced": True},
+    )
+    language_by_suffix: dict[str, str] = Field(
+        default_factory=lambda: dict(LANGUAGE_BY_SUFFIX),
+        title="Code block languages",
+        description=(
+            "For md exports: the language written after each code fence, by file extension "
+            "(for example .py = python), so viewers colour the code. Files with other "
+            "extensions get a plain block."
+        ),
+        json_schema_extra={"group": "Output", "advanced": True},
+    )
+    chars_per_token: int = Field(
+        default=CHARS_PER_TOKEN,
+        ge=1,
+        le=100,
+        title="Characters per token",
+        description=(
+            "Only for the size estimate in the preview: how many characters count as one AI "
+            "token. About 4 suits English text and code. It never changes the export."
+        ),
+        json_schema_extra={"group": "Output", "advanced": True},
     )
     strip_comments: bool = Field(
         default=True,
+        title="Remove Python comments",
+        description=(
+            "Remove comments from Python files and notebook code cells. String literals are "
+            "kept, including triple-quoted strings and a # inside a string."
+        ),
         json_schema_extra={"group": "Content"},
     )
     include_markdown_cells: bool = Field(
         default=True,
+        title="Include notebook text cells",
+        description="Include the Markdown (text) cells of Jupyter notebooks in the export.",
         json_schema_extra={"group": "Content", "advanced": True},
     )
     include_outputs: bool = Field(
         default=False,
+        title="Include notebook outputs",
+        description=(
+            "Include printed output and results of notebook cells. They can contain secrets, so "
+            "this is off by default."
+        ),
         json_schema_extra={"group": "Content", "advanced": True},
     )
     max_file_kb: int | None = Field(
         default=None,
         ge=1,
+        le=1_048_576,
+        title="Largest file (KB)",
+        description=(
+            "Files larger than this many kilobytes are skipped and listed in the preview. "
+            "Empty means no limit."
+        ),
         json_schema_extra={"group": "Content", "advanced": True},
     )
+
+    @field_validator("output_name")
+    @classmethod
+    def _plain_output_name(cls, value: str) -> str:
+        problem = _name_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
+    @field_validator("separator")
+    @classmethod
+    def _one_line_separator(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("must be a single line")
+        return value
+
+    @field_validator("language_by_suffix")
+    @classmethod
+    def _clean_languages(cls, value: dict[str, str]) -> dict[str, str]:
+        cleaned: dict[str, str] = {}
+        for suffix, language in value.items():
+            key = "." + suffix.strip().lower().lstrip(".")
+            name = language.strip()
+            if key == "." or any(c.isspace() or c == "`" for c in name):
+                raise ValueError(f"{suffix!r}: needs an extension and a one-word language name")
+            cleaned[key] = name
+        return cleaned
 
 
 @dataclass(frozen=True)
@@ -125,11 +272,11 @@ def _output_path(opts: ProjectExportOptions) -> Path:
     if opts.output_path is not None:
         return Path(os.path.abspath(opts.output_path))
     extension = "md" if opts.output_format == "md" else "txt"
-    return Path(os.path.abspath(Path(opts.root) / f"{DEFAULT_OUTPUT_NAME}.{extension}"))
+    return Path(os.path.abspath(Path(opts.root) / f"{opts.output_name}.{extension}"))
 
 
 def _output_refusal(output: Path, ctx: RunContext) -> str | None:
-    reason = protected_reason(output)
+    reason = protected_reason(output, rules=ctx.settings.protected_paths())
     if reason and not ctx.settings.allow_protected_paths:
         return f"Output path is a protected location ({reason}): {output}"
     if output.is_dir():
@@ -234,12 +381,13 @@ def _tree_lines(rels: list[Path]) -> list[str]:
 def _render_txt(root: Path, opts: ProjectExportOptions, entries: list[_Entry]) -> str:
     """The original script's layout: a separator block before each folder and each file."""
     abs_root = os.path.abspath(root)
+    sep = opts.separator
     parts: list[str] = []
     if opts.mode in ("tree", "both"):
         tree = "\n".join(_tree_lines([e.rel for e in entries]))
-        parts.append(f"{SEPARATOR}\nProject tree: {abs_root}\n{SEPARATOR}\n{tree}\n")
+        parts.append(f"{sep}\nProject tree: {abs_root}\n{sep}\n{tree}\n")
     if opts.mode in ("contents", "both"):
-        parts.append(f"\n{SEPARATOR}\nDirectory: {abs_root}\n{SEPARATOR}\n")
+        parts.append(f"\n{sep}\nDirectory: {abs_root}\n{sep}\n")
         shown: set[tuple[str, ...]] = set()
         for entry in entries:
             for depth in range(len(entry.rel.parts) - 1):
@@ -247,9 +395,9 @@ def _render_txt(root: Path, opts: ProjectExportOptions, entries: list[_Entry]) -
                 if folder not in shown:
                     shown.add(folder)
                     folder_path = os.path.abspath(root.joinpath(*folder))
-                    parts.append(f"\n{SEPARATOR}\nDirectory: {folder_path}\n{SEPARATOR}\n")
+                    parts.append(f"\n{sep}\nDirectory: {folder_path}\n{sep}\n")
             file_path = os.path.abspath(root / entry.rel)
-            parts.append(f"\n{SEPARATOR}\nFile: {file_path}\n{SEPARATOR}\n")
+            parts.append(f"\n{sep}\nFile: {file_path}\n{sep}\n")
             parts.append(entry.text)
             parts.append("\n\n")
     return "".join(parts)
@@ -271,7 +419,7 @@ def _render_md(root: Path, opts: ProjectExportOptions, entries: list[_Entry]) ->
         for entry in entries:
             body = entry.text if entry.text.endswith("\n") else entry.text + "\n"
             fence = _fence(body)
-            language = LANGUAGE_BY_SUFFIX.get(entry.rel.suffix.lower(), "")
+            language = opts.language_by_suffix.get(entry.rel.suffix.lower(), "")
             parts.append(f"\n### {entry.rel.as_posix()}\n\n{fence}{language}\n{body}{fence}\n")
     return "".join(parts)
 
@@ -295,7 +443,7 @@ class ProjectExport:
         "Write a folder's file list and file contents to one text file, for example to give an "
         "AI assistant the context of a project. Comments can be stripped from Python files."
     )
-    category = "Developer"
+    category: Category = "Developer"
     Options = ProjectExportOptions
 
     def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:
@@ -303,7 +451,7 @@ class ProjectExport:
             raise TypeError("ProjectExport.scan needs ProjectExportOptions")
         plan = Plan(tool=self.id, roots=[], options_json=opts.model_dump_json())
         root = Path(os.path.abspath(opts.root))
-        refusal = root_refusal(root, ctx.settings.allow_protected_paths)
+        refusal = root_refusal(root, ctx.settings.protected_paths())
         if refusal is not None:
             plan.notes.append(refusal)
             plan.notes.append("Nothing to export.")
@@ -317,7 +465,7 @@ class ProjectExport:
         plan.roots = [root]
         entries = _gather(root, opts, output, ctx, plan.notes)
         text = _render(root, opts, entries)
-        tokens = len(text) // CHARS_PER_TOKEN
+        tokens = len(text) // opts.chars_per_token
         plan.actions = [
             PlannedAction(
                 kind=ActionKind.WRITE,
@@ -338,7 +486,7 @@ class ProjectExport:
             assert action.dst is not None
             opts = ProjectExportOptions.model_validate_json(plan.options_json)
             root = Path(os.path.abspath(opts.root))
-            refusal = root_refusal(root, ctx.settings.allow_protected_paths) or _output_refusal(
+            refusal = root_refusal(root, ctx.settings.protected_paths()) or _output_refusal(
                 action.dst, ctx
             )
             if refusal is not None:

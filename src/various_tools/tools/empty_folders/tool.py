@@ -38,7 +38,7 @@ from various_tools.core.plan import (
     RunResult,
     apply_plan,
 )
-from various_tools.tools.base import ToolOptions
+from various_tools.tools.base import Category, ToolOptions
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
 FILE_ATTRIBUTE_SYSTEM = 0x04
@@ -52,28 +52,61 @@ JUNK_REASON = "junk file in a folder that will be empty"
 class EmptyFoldersOptions(ToolOptions):
     roots: list[Path] = Field(
         default_factory=list,
+        title="Folders to scan",
+        description=(
+            "The folders to look in. The folder you choose is never removed, even when it is "
+            "empty; only the empty folders inside it are."
+        ),
         json_schema_extra={"widget": "folders", "group": "Folders"},
     )
     treat_as_empty: list[str] = Field(
         default_factory=lambda: list(DEFAULT_TREAT_AS_EMPTY),
+        title="Junk files that count as empty",
+        description=(
+            "Exact file names that do not count as content: a folder holding only these is "
+            "empty, and they are removed with it. Matched without regard to letter case. "
+            "Default: desktop.ini, Thumbs.db, .DS_Store."
+        ),
         json_schema_extra={"widget": "glob_list", "group": "Rules"},
     )
     exclude_globs: list[str] = Field(
         default_factory=lambda: list(DEFAULT_EXCLUDE_GLOBS),
+        title="Never touch",
+        description=(
+            "Names or relative paths (patterns allowed) that are left alone and count as "
+            "content, so a folder that holds one stays. Default: .git, node_modules."
+        ),
         json_schema_extra={"widget": "glob_list", "group": "Rules", "advanced": True},
     )
     min_age_days: int = Field(
         default=0,
         ge=0,
+        le=36500,
+        title="Minimum age (days)",
+        description=(
+            "Folders changed more recently than this many days ago are kept. 0 means any age "
+            "may be removed."
+        ),
         json_schema_extra={"group": "Rules", "advanced": True},
     )
     skip_hidden_system: bool = Field(
         default=True,
+        title="Keep hidden and system folders",
+        description=(
+            "Folders marked hidden or system by Windows are kept, and so are the folders that "
+            "contain them. On by default, because they are often created by programs."
+        ),
         json_schema_extra={"group": "Rules", "advanced": True},
     )
     delete_mode: Literal["trash", "permanent"] = Field(
         default="trash",
-        json_schema_extra={"group": "Delete"},
+        title="Delete mode",
+        description=(
+            "🔒 trash sends removed items to the Recycle Bin, where they can be "
+            "restored by hand. permanent erases them for good: it also needs the app setting "
+            "delete_mode = permanent, asks for confirmation, and cannot be undone."
+        ),
+        json_schema_extra={"group": "Delete", "advanced": True, "locked": True},
     )
 
 
@@ -189,7 +222,7 @@ def _usable_roots(options: EmptyFoldersOptions, ctx: RunContext, notes: list[str
         if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
             notes.append(f"Junction or symlink, not followed: {path}")
             continue
-        reason = protected_reason(path)
+        reason = protected_reason(path, rules=ctx.settings.protected_paths())
         if reason and not ctx.settings.allow_protected_paths:
             notes.append(f"Protected folder refused ({reason}): {path}")
             continue
@@ -230,7 +263,7 @@ class EmptyFolders:
         "Find folders that will be empty after their empty subfolders are removed, and "
         "remove them to the Recycle Bin."
     )
-    category = "Clean up"
+    category: Category = "Clean up"
     Options = EmptyFoldersOptions
 
     def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:

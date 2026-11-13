@@ -14,32 +14,56 @@ import string
 from datetime import datetime
 from typing import Literal
 
+from various_tools.core.settings import DEFAULT_MIN_PLAUSIBLE_YEAR
+
 CaseMode = Literal["keep", "lower", "upper"]
 
 # The placeholders a template may use. ``time`` needs a time of day, which not every date has.
 TEMPLATE_FIELDS = frozenset({"date", "time", "counter", "ext", "name"})
 
-_FILENAME_DATE = re.compile(r"(?<!\d)(\d{4})(\d{2})(\d{2})(?:[_-]?(\d{2})(\d{2})(\d{2}))?(?!\d)")
+# Finds ``YYYYMMDD``, optionally followed by ``HHMMSS``, and ignores digits that belong to a
+# longer number. It is the default of the "filename date pattern" option. A replacement needs
+# three groups (year, month, day), or six when it also finds a time (hour, minute, second).
+FILENAME_DATE_PATTERN = r"(?<!\d)(\d{4})(\d{2})(\d{2})(?:[_-]?(\d{2})(\d{2})(\d{2}))?(?!\d)"
+_FILENAME_DATE = re.compile(FILENAME_DATE_PATTERN)
 _INVALID_CHARS = frozenset('<>:"/\\|?*')
 _RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)", re.IGNORECASE)
 MAX_NAME_LENGTH = 255
 
 
-def date_from_filename(name: str, min_year: int = 1990) -> tuple[datetime, bool] | None:
-    """The first valid ``YYYYMMDD`` (optionally followed by ``HHMMSS``) in ``name``.
+def filename_pattern_problem(pattern: str) -> str | None:
+    """Why a filename date pattern cannot be used, or None. It must compile and have the groups
+    that :func:`date_from_filename` reads: 3 (year, month, day) or 6 (and hour, minute, second)."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return f"The filename date pattern is not a valid regular expression: {exc}"
+    if compiled.groups not in (3, 6):
+        return (
+            "The filename date pattern needs 3 groups (year, month, day), "
+            "or 6 with hour, minute and second."
+        )
+    return None
 
-    Returns ``(when, has_time)``, or None when the name holds no plausible date. Digits that are
-    part of a longer number are not used.
+
+def date_from_filename(
+    name: str, min_year: int = DEFAULT_MIN_PLAUSIBLE_YEAR, pattern: str | None = None
+) -> tuple[datetime, bool] | None:
+    """The first valid date in ``name``: ``YYYYMMDD``, optionally followed by ``HHMMSS``.
+
+    ``pattern`` replaces the default regular expression (see :func:`filename_pattern_problem`).
+    Returns ``(when, has_time)``, or None when the name holds no plausible date. With the default
+    pattern, digits that are part of a longer number are not used.
     """
-    for match in _FILENAME_DATE.finditer(name):
-        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        has_time = match.group(4) is not None
-        hour = int(match.group(4)) if has_time else 0
-        minute = int(match.group(5)) if has_time else 0
-        second = int(match.group(6)) if has_time else 0
+    regex = _FILENAME_DATE if pattern is None else re.compile(pattern)
+    for match in regex.finditer(name):
+        groups: list[str | None] = list(match.groups())
+        has_time = len(groups) >= 6 and groups[3] is not None
         try:
+            year, month, day = int(groups[0] or ""), int(groups[1] or ""), int(groups[2] or "")
+            hour, minute, second = (int(g or "") for g in groups[3:6]) if has_time else (0, 0, 0)
             when = datetime(year, month, day, hour, minute, second)
-        except ValueError:
+        except ValueError, TypeError:
             continue
         if when.year >= min_year:
             return when, has_time

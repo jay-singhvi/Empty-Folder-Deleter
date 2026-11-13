@@ -47,11 +47,13 @@ from various_tools.core.plan import (
     RunResult,
     apply_plan,
 )
-from various_tools.tools.base import ToolOptions
+from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.rename.naming import (
+    FILENAME_DATE_PATTERN,
     CaseMode,
     apply_case,
     date_from_filename,
+    filename_pattern_problem,
     name_problem,
     render_name,
     template_fields,
@@ -72,39 +74,110 @@ PresetName = Literal["custom", "snapchat", "whatsapp", "screenshot"]
 class RenameOptions(ToolOptions):
     roots: list[Path] = Field(
         default_factory=list,
+        title="Folders",
+        description=(
+            "The folders whose files are renamed. The folders themselves are never renamed, "
+            "and a drive root or protected folder is refused."
+        ),
         json_schema_extra={"widget": "folders", "group": "Files"},
     )
     recursive: bool = Field(
         default=False,
+        title="Include subfolders",
+        description=(
+            "Also rename matching files inside subfolders. Off by default, as in the original "
+            "Snapchat script."
+        ),
         json_schema_extra={"group": "Files", "advanced": True},
     )
     preset: PresetName = Field(
         default="custom",
+        title="Preset",
+        description=(
+            "A ready-made rule set for Snapchat, WhatsApp or screenshot files. It fills in the "
+            "match, name template, date source, counter and case; anything you set yourself "
+            "wins. Custom starts empty."
+        ),
         json_schema_extra={"group": "Match"},
     )
     match: str | None = Field(
         default=None,
+        title="Match",
+        description=(
+            "Which file names to rename: a glob such as IMG_*.jpg, or a regular expression when "
+            "the match mode is regex. Empty uses the preset's pattern."
+        ),
         json_schema_extra={"group": "Match"},
     )
     match_mode: MatchMode | None = Field(
         default=None,
+        title="Match mode",
+        description=(
+            "glob matches simple patterns with * and ?; regex matches a regular expression. "
+            "Empty uses the preset's mode, or glob when you typed your own match."
+        ),
         json_schema_extra={"group": "Match", "advanced": True},
     )
     template: str | None = Field(
         default=None,
+        title="Name template",
+        description=(
+            "The new name. Placeholders: {date:%Y%m%d}, {time:%H_%M} (needs a time of day), "
+            "{counter:03}, {name} (the old name without extension) and {ext} (required, keeps "
+            "the file type). Empty uses the preset's template."
+        ),
         json_schema_extra={"widget": "template", "group": "Name"},
     )
     date_source: DateSource | None = Field(
         default=None,
+        title="Date source",
+        description=(
+            "Where each file's date comes from: capture (EXIF, then ExifTool, then ffprobe), "
+            "modified, created, or filename (a date inside the old name). Empty uses the "
+            "preset's source, or modified."
+        ),
         json_schema_extra={"group": "Name"},
     )
     counter_scope: CounterScope | None = Field(
         default=None,
+        title="Counter restarts",
+        description=(
+            "When the {counter} number starts again at 1: every minute, every day, or never "
+            "(one count across the whole batch). Empty uses the preset's choice, or per-minute."
+        ),
         json_schema_extra={"group": "Name"},
     )
     case: CaseMode | None = Field(
         default=None,
+        title="Extension case",
+        description=(
+            "Letter case of the file extension: keep, lower or upper. The rest of the name is "
+            "never changed. Empty uses the preset's choice, or keep."
+        ),
         json_schema_extra={"group": "Name", "advanced": True},
+    )
+    min_plausible_year: int | None = Field(
+        default=None,
+        ge=1900,
+        le=9999,
+        title="Earliest believable year",
+        description=(
+            "Capture dates and dates found in file names before this year, or in the future, "
+            "are treated as wrong. Empty uses the Settings value. 1990 is a hand-tuned "
+            "default: change it only if you know why."
+        ),
+        json_schema_extra={"group": "Dates", "advanced": True},
+    )
+    filename_date_pattern: str = Field(
+        default=FILENAME_DATE_PATTERN,
+        min_length=1,
+        title="Filename date pattern",
+        description=(
+            "Regular expression that finds a date in a file name when the date source is "
+            "filename. Needs 3 groups (year, month, day), or 6 with hour, minute and second. "
+            "Default: YYYYMMDD with an optional HHMMSS, ignoring longer numbers."
+        ),
+        json_schema_extra={"group": "Dates", "advanced": True},
     )
 
 
@@ -142,6 +215,10 @@ def resolve_spec(opts: RenameOptions) -> tuple[RenameSpec | None, str | None]:
             re.compile(spec.match, re.IGNORECASE)
         except re.error as exc:
             return None, f"The match pattern is not a valid regular expression: {exc}"
+    if spec.date_source == "filename":
+        pattern_problem = filename_pattern_problem(opts.filename_date_pattern)
+        if pattern_problem is not None:
+            return None, pattern_problem
     problem = template_problem(spec.template)
     if problem is not None:
         return None, problem
@@ -157,6 +234,22 @@ def resolve_spec(opts: RenameOptions) -> tuple[RenameSpec | None, str | None]:
     except (KeyError, ValueError, TypeError, IndexError, AttributeError) as exc:
         return None, f"The name template cannot be used: {exc}"
     return spec, None
+
+
+@dataclass(frozen=True)
+class _DateRules:
+    """How a date is read: the plausible-year floor and the filename date pattern."""
+
+    min_year: int
+    filename_pattern: str
+
+
+def _date_rules(opts: RenameOptions, ctx: RunContext) -> _DateRules:
+    year = opts.min_plausible_year
+    return _DateRules(
+        min_year=year if year is not None else ctx.settings.min_plausible_year,
+        filename_pattern=opts.filename_date_pattern,
+    )
 
 
 @dataclass(frozen=True)
@@ -200,26 +293,34 @@ def _cloud_only(info: FileInfo) -> bool:
     return not is_on_device(status_from_attributes(info.attributes))
 
 
-def _capture(info: FileInfo, ctx: RunContext) -> datetime | None:
+def _capture(info: FileInfo, ctx: RunContext, min_year: int) -> datetime | None:
     """EXIF, then ExifTool, then ffprobe for videos. Only called for files on the device."""
-    min_year = ctx.settings.min_plausible_year
     try:
-        when = capture_time(info.path, exiftool=ctx.deps.exiftool(), min_year=min_year)
+        when = capture_time(
+            info.path,
+            exiftool=ctx.deps.exiftool(),
+            min_year=min_year,
+            exiftool_timeout=ctx.settings.exiftool_read_timeout_s,
+        )
     except OSError, CloudOnlyFileError:
         when = None
     if when is None:
         ffprobe = ctx.deps.ffprobe()
         if ffprobe is not None:
-            video_time = ffmpeg.creation_time(ffprobe, info.path)
+            video_time = ffmpeg.creation_time(
+                ffprobe, info.path, timeout=ctx.settings.ffprobe_timeout_s
+            )
             if is_plausible_date(video_time, min_year=min_year):
                 when = video_time
     return when
 
 
-def _when(info: FileInfo, spec: RenameSpec, ctx: RunContext) -> tuple[datetime, bool] | str:
+def _when(
+    info: FileInfo, spec: RenameSpec, ctx: RunContext, rules: _DateRules
+) -> tuple[datetime, bool] | str:
     """The date for a file as ``(when, has_time)``, or the reason it has none."""
     if spec.date_source == "filename":
-        found = date_from_filename(info.path.name, ctx.settings.min_plausible_year)
+        found = date_from_filename(info.path.name, rules.min_year, rules.filename_pattern)
         return found if found is not None else "no date in the file name"
     if spec.date_source == "modified":
         return datetime.fromtimestamp(info.mtime), True
@@ -232,12 +333,16 @@ def _when(info: FileInfo, spec: RenameSpec, ctx: RunContext) -> tuple[datetime, 
     # capture: the file's contents are read, so cloud-only files are never touched.
     if _cloud_only(info):
         return "cloud-only, not read"
-    when = _capture(info, ctx)
+    when = _capture(info, ctx, rules.min_year)
     return (when, True) if when is not None else "no capture date"
 
 
 def _dated(
-    infos: list[FileInfo], spec: RenameSpec, ctx: RunContext, notes: list[str]
+    infos: list[FileInfo],
+    spec: RenameSpec,
+    ctx: RunContext,
+    rules: _DateRules,
+    notes: list[str],
 ) -> list[_Dated]:
     """Date every file. Files without a usable date are listed in ``notes`` and left out."""
     uses_time = "time" in template_fields(spec.template)
@@ -246,7 +351,7 @@ def _dated(
     for index, info in enumerate(infos, start=1):
         ctx.check_cancelled()
         ctx.report(index - 1, total, f"Dating {info.path.name}")
-        result = _when(info, spec, ctx)
+        result = _when(info, spec, ctx, rules)
         if isinstance(result, str):
             notes.append(f"skipped: {result}: {info.path}")
             continue
@@ -337,7 +442,7 @@ def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
     refused = [
         root
         for root in plan.roots
-        if root_refusal(root, ctx.settings.allow_protected_paths) is not None
+        if root_refusal(root, ctx.settings.protected_paths()) is not None
     ]
     claimed: set[tuple[str, str]] = set()
     kept: list[PlannedAction] = []
@@ -404,7 +509,7 @@ class Rename:
         "time, or from a date in the name. Built-in presets cover Snapchat, WhatsApp and "
         "screenshot files."
     )
-    category = "Organize"
+    category: Category = "Organize"
     Options = RenameOptions
 
     def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:
@@ -422,7 +527,7 @@ class Rename:
         roots: list[Path] = []
         for raw in opts.roots:
             root = Path(os.path.abspath(raw))
-            refusal = root_refusal(root, ctx.settings.allow_protected_paths)
+            refusal = root_refusal(root, ctx.settings.protected_paths())
             if refusal is None:
                 roots.append(root)
             else:
@@ -433,7 +538,7 @@ class Rename:
         plan.roots = roots
 
         infos = _matching(roots, spec, opts.recursive)
-        dated = _dated(infos, spec, ctx, plan.notes)
+        dated = _dated(infos, spec, ctx, _date_rules(opts, ctx), plan.notes)
         actions = _actions(dated, spec, plan.notes)
         plan.actions = actions
         renamed = sum(1 for a in actions if a.selected)

@@ -25,6 +25,10 @@ from various_tools.core.media.exif import (
 )
 from various_tools.core.media.ffmpeg import creation_time
 from various_tools.core.onedrive import CloudOnlyFileError
+from various_tools.core.settings import (
+    DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
+    DEFAULT_FFPROBE_TIMEOUT_S,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +45,8 @@ LABELS: dict[str, str] = {
 UNKNOWN_LABEL = "Date Modified (implausible - unknown date)"
 NO_DATE_LABEL = "No usable date from the chosen sources"
 
-# The legacy script's lists. CR3 is RAW: Pillow cannot read its EXIF, so ExifTool is used.
+# The legacy script's lists, and the defaults of the tool's file-type options.
+# CR3 is RAW: Pillow cannot read its EXIF, so ExifTool is used.
 PHOTO_EXTS = frozenset(
     {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".bmp", ".webp"}
 )
@@ -83,16 +88,22 @@ def read_capture_date(
     now: datetime,
     ffprobe: Path | None,
     exiftool: Path | None,
+    photo_exts: frozenset[str] = PHOTO_EXTS,
+    raw_exts: frozenset[str] = RAW_EXTS,
+    video_exts: frozenset[str] = VIDEO_EXTS,
+    ffprobe_timeout: float = DEFAULT_FFPROBE_TIMEOUT_S,
+    exiftool_timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
 ) -> Reading:
     """Work out the date of one file on this device, using the sources in ``priority`` order.
 
     ``modified`` comes from the directory listing, so the file is not opened for it. Photos are
     read for their EXIF even when EXIF is not first, because the catalog keeps the camera and the
-    size.
+    size. The extension sets, and the timeouts for ffprobe and ExifTool, default to the legacy
+    values and are passed by the tool from its options and the app settings.
     """
     suffix = path.suffix.lower()
     exif: ExifInfo | None = None
-    if suffix in PHOTO_EXTS:
+    if suffix in photo_exts:
         try:
             exif = read_exif(path)
         except CloudOnlyFileError:
@@ -108,13 +119,21 @@ def read_capture_date(
             if exif is not None and plausible(exif.capture_time):
                 return Reading(exif.capture_time, LABELS[step], exif)
         elif step == "video_tag":
-            if suffix in VIDEO_EXTS and ffprobe is not None:
-                taken = _safe_date("Video metadata", path, lambda: creation_time(ffprobe, path))
+            if suffix in video_exts and ffprobe is not None:
+                taken = _safe_date(
+                    "Video metadata",
+                    path,
+                    lambda: creation_time(ffprobe, path, timeout=ffprobe_timeout),
+                )
                 if plausible(taken):
                     return Reading(taken, LABELS[step], exif)
         elif step == "exiftool":
-            if suffix in RAW_EXTS and exiftool is not None:
-                taken = _safe_date("ExifTool", path, lambda: exiftool_capture_time(exiftool, path))
+            if suffix in raw_exts and exiftool is not None:
+                taken = _safe_date(
+                    "ExifTool",
+                    path,
+                    lambda: exiftool_capture_time(exiftool, path, exiftool_timeout),
+                )
                 if plausible(taken):
                     return Reading(taken, LABELS[step], exif)
         elif step == "modified" and plausible(modified):

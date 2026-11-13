@@ -24,16 +24,24 @@ Any option you set overrides the preset. Choose **Custom** to write your own mat
 
 ## Options
 
+Nothing is a fixed constant: every value below has a default and a hint in the app. Options marked
+*advanced* are behind the "Advanced" switch. The built-in presets above are the ready-made choices.
+
 | Option | Default | What it does |
 |---|---|---|
 | Folders | (required) | Folders whose files are renamed. A drive root or a protected folder is refused. |
-| Recursive | off | Also renames files in subfolders. Off, as in the original script. |
+| Include subfolders (advanced) | off | Also renames files in subfolders. Off, as in the original script. |
 | Preset | Custom | A starting point for the match, template, date source, counter and case. |
 | Match | (from preset) | Which file names to rename: a glob such as `IMG_*.jpg`, or a regular expression when the match mode is regex. Matching ignores letter case. |
+| Match mode (advanced) | glob, or the preset's | `glob` or `regex`. |
 | Name template | (from preset) | The new name. Placeholders: `{date:%Y%m%d}`, `{time:%H_%M}` (needs a time of day), `{counter:03}`, `{name}` (the original name without its extension) and `{ext}` (the extension, required so the file keeps its type). |
-| Date source | modified time | `capture`: EXIF, then ExifTool, then ffprobe for videos. `modified` and `created` come from the file system. `filename`: a `YYYYMMDD` and an optional `HHMMSS` in the name. |
-| Counter | per minute | The number restarts for each minute, each day, or runs across the whole batch. |
-| Case | keep | The letter case of the extension: keep, lower or upper. The rest of the name is never changed. |
+| Date source | modified time | `capture`: EXIF, then ExifTool, then ffprobe for videos. `modified` and `created` come from the file system. `filename`: a date in the name. |
+| Counter restarts | per minute | The number restarts for each minute, each day, or runs across the whole batch. |
+| Extension case (advanced) | keep | The letter case of the extension: keep, lower or upper. The rest of the name is never changed. |
+| Earliest believable year (advanced) | the app setting (1990) | Capture dates and dates in names before this year, or in the future, are treated as wrong. 1990 is a hand-tuned default. 1900 to 9999. |
+| Filename date pattern (advanced) | `YYYYMMDD` with an optional `HHMMSS` | The regular expression that finds a date in a name when the date source is `filename`. It must compile and have 3 groups (year, month, day) or 6 (and hour, minute, second). |
+
+The ExifTool and ffprobe timeouts used for the `capture` date source come from the app settings.
 
 ## Safety
 

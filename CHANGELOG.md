@@ -12,13 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   duplicates, media_resize and organize_by_date. Behavior is unchanged. Test added.
 - Fixed a stale docstring in `tools/__init__.py`.
 
-#### Still open (owner decisions)
-- Dropped options: `overwrite`, `cloud_only` ask/download, `also_resize`, Excel export/import.
-
 #### Accepted by the owner (2026-11-13)
 - Undo of trash, delete and convert actions stays as it is: the journal records them and undo lists
   them for manual restore. No code change.
 - The real-CR3 end-to-end test is skipped for now (no sample file).
+- The dropped options (`overwrite`, `cloud_only` ask/download, `also_resize`, Excel export/import)
+  are deferred. They stay out of the tools until the owner asks for them.
 
 ### Phase 3.6: `organize_by_date` tool (2026-11-12)
 

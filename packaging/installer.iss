@@ -38,9 +38,9 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 AppUpdatesURL={#AppURL}/releases
-VersionInfoVersion={#AppVersion}
+; VersionInfoVersion is left out: it must be numeric, and a version such as 1.2.0rc1 is not.
+VersionInfoProductTextVersion={#AppVersion}
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes

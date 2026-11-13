@@ -4,6 +4,26 @@ Various Tools is a collection of Windows utilities for tidying up files and medi
 
 This repository currently ships the original **Empty Folder Deleter** app. It is the first tool, and it is being rewritten as part of Various Tools. The description below covers that current app.
 
+## Tools
+
+Each tool has a page in [docs/tools/](docs/tools/) with its options and safety rules. Every tool previews first and changes nothing until you apply.
+
+| Tool id | Category | What it does |
+|---|---|---|
+| `empty_folders` | Clean up | Remove folders that are empty, or hold only junk files. |
+| `disk_usage` | Clean up | List the largest files and folders, with type and age filters. Files can be sent to the Recycle Bin (none are selected by default). |
+| `temp_cleaner` | Clean up | Remove old files from temp folders (`%TEMP%` by default). Browser caches are listed but never touched. |
+| `duplicates` | Clean up | Find identical pictures and videos, and the same picture or footage in another file. |
+| `media_resize` | Media | Reduce the resolution of pictures and videos. |
+| `media_convert` | Media | Convert HEIC and WebP to JPG or PNG, and MOV to MP4. Originals are kept by default. |
+| `metadata_strip` | Media | Remove GPS or all metadata before sharing, into a new folder by default. |
+| `corrupt_media` | Media | Find pictures and videos that fail to open or decode, and quarantine or trash them. |
+| `organize_by_date` | Organize | Move photos and videos into year and month folders by capture date. |
+| `sort_by_type` | Organize | Move files into subfolders by type, using editable rules such as `*.pdf=Documents/PDF`. |
+| `rename` | Organize | Give a batch of files one name pattern, dated from their capture, modified or created time. |
+| `project_export` | Developer | Write a folder's file list and contents to one text file, for example for an AI assistant. |
+| `checksum` | Developer | Create or verify SHA-256 manifests (`sha256sum` format), for example to check a backup. |
+
 ## Command line: `various-tools`
 
 Every tool is available from the command line. The flags are generated from each tool's options, so the CLI, the GUI and the docs always agree. Run the commands with `uv run various-tools ...` from a source checkout (after `uv sync`), or `various-tools ...` once installed.

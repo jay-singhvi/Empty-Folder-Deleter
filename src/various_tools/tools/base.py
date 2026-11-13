@@ -17,6 +17,7 @@ Options conventions (every tool, owner requirement "nothing is constant"):
 from __future__ import annotations
 
 import logging
+import pkgutil
 from importlib.metadata import EntryPoint, entry_points
 from typing import Literal, Protocol, get_args
 
@@ -75,13 +76,33 @@ def _load(entry: EntryPoint) -> Tool | None:
     return tool
 
 
+def _builtin_entry_points() -> list[EntryPoint]:
+    """Entry points for the tool packages shipped inside ``various_tools.tools``.
+
+    Used only when no entry point is registered, which happens in a frozen (PyInstaller) build
+    that did not copy the package metadata. Each sub-package is expected to export ``TOOL``.
+    """
+    from various_tools import tools as package
+
+    return [
+        EntryPoint(
+            name=info.name, value=f"{package.__name__}.{info.name}:TOOL", group=ENTRY_POINT_GROUP
+        )
+        for info in pkgutil.iter_modules(package.__path__)
+        if info.ispkg
+    ]
+
+
 def discover() -> dict[str, Tool]:
     """Every tool registered in the entry-point group, keyed by tool id and sorted by id.
 
-    A tool that fails to import or does not meet the contract is logged and skipped.
+    A tool that fails to import or does not meet the contract is logged and skipped. When the
+    group is empty (a frozen build without package metadata), the built-in tool packages are
+    loaded instead.
     """
     found: dict[str, Tool] = {}
-    for entry in entry_points(group=ENTRY_POINT_GROUP):
+    entries = list(entry_points(group=ENTRY_POINT_GROUP)) or _builtin_entry_points()
+    for entry in entries:
         tool = _load(entry)
         if tool is None:
             continue

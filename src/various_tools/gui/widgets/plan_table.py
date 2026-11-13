@@ -464,9 +464,17 @@ class PlanTable(QWidget):
     def plan(self) -> Plan | None:
         return self._model.plan
 
-    def refresh(self) -> None:
-        """Re-read the plan after an outside change, keeping expansion, sort and filters."""
-        self._load(self._model.plan, self._model.tool_id, self._model.sizes(), keep=True)
+    def refresh(self, sizes: Sequence[int | None] | None = None) -> None:
+        """Re-read the plan after an outside change, keeping expansion, sort and filters.
+
+        ``sizes`` replaces the known sizes (for example after a keeper change swapped a source).
+        """
+        known = list(sizes) if sizes is not None else self._model.sizes()
+        self._load(self._model.plan, self._model.tool_id, known, keep=True)
+
+    def sizes(self) -> list[int | None]:
+        """The size in bytes of each plan action, as given to :meth:`set_plan`."""
+        return self._model.sizes()
 
     def current_group_id(self) -> str | None:
         node = self._current_node()

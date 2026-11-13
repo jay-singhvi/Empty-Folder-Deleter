@@ -60,6 +60,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest-cov>=7.1.0",
     "types-openpyxl>=3.1.5.20261017",
+    "pyinstaller>=6.22.3",
 ]
 
 [tool.uv]

@@ -5,6 +5,135 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Phase 4: CLI (2026-11-13)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 4. Usage and the legacy-script mapping table
+are in `README.md` ("Command line").
+
+#### Added
+- `various-tools list`, `<tool> scan [PATHS] [opts] [--preset P] [--json] [--save-plan FILE]`,
+  `<tool> apply [--plan FILE | opts] [--yes]`, `history [RUN_ID]`, `undo RUN_ID`, `doctor`,
+  `presets list|save|delete`, `config show|get|set|unset`, `duplicates explain A B`, and the
+  global one-off options `--config`, `--exiftool`, `--ffmpeg`, `--ffprobe`, `--ollama-url`.
+- Tool flags are generated from each options model (`core/schema.py: describe()`), with the field
+  title, description, default, bounds and 🔒 marker as help text. Advanced fields are in an
+  "Advanced" help panel. No per-tool CLI code except `duplicates explain`.
+- `core/presets.py: PresetStore` (JSON in the app data folder), shared with the Stage 2 GUI.
+- Rich progress on stderr; Ctrl+C cancels the run cleanly (exit 130).
+- Tests under `tests/cli/` for every command, plus `tests/core/test_schema.py` and
+  `test_presets.py`.
+
+#### Decisions
+- The script entry point is now `various_tools.cli.main:main`, which makes stdout/stderr tolerant
+  of the console encoding (Rich tables and 🔒 crashed when piped on cp1252). `app` is still
+  exported.
+- Typer only (this Typer vendors click). Tool commands get a signature built from `describe()`.
+  Every generated flag defaults to "not given", so only typed flags override preset values.
+- Positional PATHS fill the tool's first folder field. A field whose name clashes with a CLI flag
+  (`preset`, `json`, `plan`, `yes`, ...) becomes `--opt-<name>`; rename's `preset` is
+  `--opt-preset`.
+- `apply` always asks for confirmation unless `--yes`, and asks a second "PERMANENT DELETE"
+  question when a selected action is a permanent delete. With no input (EOF) and no `--yes` it
+  refuses. `--plan` cannot be mixed with option flags.
+- `config set` asks before moving a 🔒 setting away from its default. A settings file that cannot
+  be parsed is never overwritten. A corrupt presets file is copied to `presets.json.corrupt`
+  before a later save replaces it.
+- Exit codes: 0 ok, 1 failed/refused/partial, 2 usage or validation, 130 cancelled.
+
+### Nothing is constant: every value configurable, with hints (2026-11-13)
+
+Owner requirement: whatever was constant or hardcoded becomes a default value with a hint saying
+what it is for and what it does.
+
+#### Added
+- **Hint convention** (documented in `core/settings.py` and `tools/base.py`): every settings and
+  options field has a `title` and a `description` (units, what the default means); numbers have
+  `ge`/`le` bounds; fixed choices are `Literal` (dropdowns); `json_schema_extra` keeps `group`,
+  `advanced`, `widget`, `depends_on`, plus `locked: True` for 🔒 values. A field whose app-wide
+  default is a setting is `X | None = None` ("empty uses the setting").
+- `tests/tools/test_option_hints.py` fails when any registered tool's option or any setting lacks a
+  title, description, group or bounds, or a 🔒 field is not advanced or does not say so.
+- **New settings:** `data_folder`, `cache_folder`, `protected_folders`, `protect_drive_roots`,
+  `protect_user_profile`, `cloud_only_files`, `hash_chunk_kb`, and timeouts
+  `version_check_timeout_s`, `ollama_probe_timeout_s`, `ffprobe_timeout_s`,
+  `frame_grab_timeout_s`, `transcode_timeout_s`, `exiftool_read_timeout_s`,
+  `exiftool_write_timeout_s`, `ollama_tags_timeout_s`, `ollama_chat_timeout_s`. Helpers:
+  `Settings.protected_paths()`, `resolved_data_folder()`, `resolved_cache_folder()`,
+  `journal_path()`, `presets_path()`.
+- `core/context.py`: `make_context()` and `make_deps()` build a run context from settings (saved
+  program paths, one-off paths, timeouts, journal).
+- `core/fs.py`: `ProtectedPaths` and `DEFAULT_PROTECTED_FOLDERS`; `protected_reason(..., rules=)`
+  and `root_refusal(root, ctx.settings.protected_paths())`.
+- **New tool options** (defaults are the old values; see each `docs/tools/<tool>.md`):
+  - `duplicates`: `image_extensions`, `video_extensions`, `visual_skip_extensions`, `burst_name`,
+    `copy_mark`, `verify_borderline_block`, `thumb_size`, `phash_size`, `video_phash_size`,
+    `sharpness_px`, `frame_width`, `frame_retries`, `frame_step_back`, `ollama_prompt`,
+    `ollama_image_px`, `ollama_jpeg_quality`.
+  - `media_resize`: `suffix_tag`, `video_crf`, `video_preset`, `image_extensions`,
+    `video_extensions`, `optimize_output`, `resample`, `estimate_compression`, `extras_scan_kb`;
+    `output_folder_name` empty uses `settings.default_output_folder`.
+  - `organize_by_date`: `dest_subfolder`, `photo_exts`, `raw_exts`, `video_exts`,
+    `skip_dot_files`, `clash_suffix`; `unknown_folder`, `min_plausible_year`, `workers` and
+    `catalog_path` empty use the settings / data folder.
+  - `rename`: `min_plausible_year` (empty uses the setting), `filename_date_pattern`.
+  - `project_export`: `output_name`, `separator`, `chars_per_token`, `language_by_suffix`.
+  - `empty_folders`: hints and bounds only.
+
+#### Changed
+- 🔒 values are now configurable, with the locked value as the default, under Advanced, marked
+  `locked`, and with a description saying what changing them risks: the `duplicates` thresholds
+  (unchanged values), `media_resize` `never_upscale` (now a `bool`, default True), delete mode
+  (trash), protected paths (default list unchanged), and the cloud-only rule.
+- `tools/base.py`: `category` is `Literal["Clean up", "Media", "Organize", "Developer"]`, and
+  `discover()` logs and skips a tool whose entry point fails to load or breaks the contract, or
+  whose id is taken, instead of failing for every tool.
+- `duplicates`: the cache folder comes from settings (the `CACHE_DIR` global is gone); the image
+  cache file and name include the hash parameters, so changing them never reuses stale hashes;
+  missing-program messages use `core/deps.install_hint()`.
+- Core media, hashing and `deps` take timeouts and the read size as parameters; their defaults
+  are the old constants, and tools pass the settings values.
+- `save_settings()` writes only values that differ from the defaults.
+- `organize_by_date` scans with `settings.workers` threads when `workers` is empty (it was 1). The
+  plan is the same for any worker count (tested).
+
+#### Decisions (not covered by the plan, safer option picked)
+- **Cloud-only rule:** exposed as `cloud_only_files: Literal["skip"]`, a one-choice dropdown. Any
+  download choice stays deferred (owner-accepted deferral) until a journaled download action
+  exists.
+- **Rules that are not values stay code:** never deleting the selected root, never following
+  junctions or symlinks out of the root, journaling every action, and legacy date rules 1–4.
+- `media_resize` with `never_upscale=False`: `fit_box` scales up or down to fit, and the "both
+  dimensions exceed" rule applies only when it is True. Side modes set the side exactly.
+  `percent` now allows up to 400, but values over 100 need `never_upscale=False`.
+- `duplicates` threshold upper bounds were widened so larger hash grids stay usable (for example
+  `phash_max` up to 1024). Defaults are unchanged.
+- Validation keeps each tool's style: `organize_by_date` and `rename` report a bad value as a plan
+  note; `project_export`, `duplicates` and `media_resize` reject it in the options model.
+- Timeout defaults live in `core/settings.py` (not `core/media`), so reading settings never
+  imports Pillow.
+
+#### Kept internal (implementation details, one-line reasons)
+- SQL schemas and cache/plan format versions (`journal.SCHEMA`, catalog `COLUMNS`/`SCHEMA`,
+  `PLAN_FORMAT`, cache versions): storage format, not behaviour.
+- Windows attribute bitmasks (`core/fs.py`, `core/onedrive.py`, `empty_folders`), `MAX_PATH`,
+  invalid file-name characters, reserved names and the 255-character name limit: Windows rules.
+- EXIF tag numbers, `EXTRAS_MARKERS` (motion-photo byte signatures), `MP4_FAMILY`: file-format
+  facts.
+- `core/deps.py` `TOOL_SPECS` (program names, version flags, env-variable names, winget ids,
+  known install folders): identify the programs; the user overrides with a saved path or env var.
+- `duplicates` `BLOCK_PX = 8` (part of what the tuned `pixel_block_max` means), Ollama
+  `temperature 0` / `num_predict 16` and the YES parsing (keep the check deterministic).
+- `media_resize` codec `libx264` and `-c:a copy` (other codecs need container checks and other
+  CRF scales; possible follow-up), `PRESET_BOXES` and `MODE_LABELS` (dropdown choices).
+- Template syntax (`rename` `TEMPLATE_FIELDS`, `organize_by_date` `ALLOWED_TEMPLATE_FIELDS`),
+  built-in rename presets (a dropdown), reason and message strings, and file names inside the app
+  data folder (`journal.sqlite`, `presets.json`, `catalog.sqlite`; the folder is configurable).
+
+#### Tests
+- Hint coverage over every field (above); settings round-trip and 🔒 defaults; protected-path
+  rules from settings in `fs` and the apply engine; discovery isolation; timeouts and read sizes
+  reaching core calls; per-tool tests that each new option changes behaviour. 1372 tests pass.
+
 ### Review fixes 2 (2026-11-13)
 
 #### Fixed (safety)

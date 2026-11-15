@@ -230,9 +230,10 @@ def check_empty_folders(env: Env) -> str:
 
     undo = env.cli("undo", str(run_id), "--yes")
     text = " ".join((undo.stdout + undo.stderr).split())
-    assert undo.returncode == 1 and "cannot be undone" in text, describe(undo)
-    assert snapshot() == after, "undo of a trash run changed the disk"
-    return f"run {run_id}: 6 empty folders to the Recycle Bin, undo correctly refused"
+    # Undo restores the folders from the Recycle Bin (they were recycled a moment ago).
+    assert undo.returncode == 0 and "undone" in text, describe(undo)
+    assert snapshot() == before, f"undo did not restore the tree: {snapshot()}"
+    return f"run {run_id}: 6 empty folders to the Recycle Bin, undo restored them"
 
 
 def check_rename_undo(env: Env) -> str:
@@ -325,7 +326,7 @@ def main() -> int:
         check("CLI version", lambda: check_cli_version(env))
         check("CLI list shows all 13 tools", lambda: check_cli_list(env))
         check("CLI doctor runs", lambda: check_doctor(env))
-        check("empty_folders: scan, apply, undo refused", lambda: check_empty_folders(env))
+        check("empty_folders: scan, apply, undo restores", lambda: check_empty_folders(env))
         check("rename: scan, apply, undo restores names", lambda: check_rename_undo(env))
         check("duplicates: Pillow, HEIF, imagehash, openpyxl", lambda: check_media_imports(env))
 

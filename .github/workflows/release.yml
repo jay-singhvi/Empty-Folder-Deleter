@@ -53,10 +53,9 @@ jobs:
       - name: Build the app (PyInstaller one-dir) and the portable zip
         run: uv run python packaging/build.py
 
+      # No QT_QPA_PLATFORM here: the smoke test checks that a real window appears.
       - name: Smoke-test the frozen build
         run: uv run python packaging/smoke_test.py
-        env:
-          QT_QPA_PLATFORM: offscreen
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y

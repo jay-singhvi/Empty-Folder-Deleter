@@ -18,7 +18,7 @@ from pathlib import Path
 
 import shiboken6
 from pydantic import ValidationError
-from PySide6.QtCore import QEventLoop, Qt
+from PySide6.QtCore import QEventLoop, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from various_tools.core.deps import (
+    DEFAULT_OLLAMA_URL,
     TOOL_SPECS,
     ToolLocation,
     ToolSource,
@@ -157,10 +158,21 @@ class ToolRow(QFrame):
         self.test_button.setToolTip("Check that it runs and show its version.")
         self.detect_button.setToolTip("Forget what was found and search again.")
         self.reset_button.setToolTip("Remove the saved path and go back to finding it by itself.")
-        if tool == "ollama":
+        # Ollama is a server: an address field (the "Ollama address" setting) instead of Browse.
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText(DEFAULT_OLLAMA_URL)
+        self.url_edit.setToolTip("The Ollama server address (the same setting as in the form).")
+        self.save_url_button = QPushButton("Save address")
+        self.save_url_button.setToolTip("Save this address, then ask the server for its version.")
+        is_ollama = tool == "ollama"
+        self.url_edit.setVisible(is_ollama)
+        self.save_url_button.setVisible(is_ollama)
+        if is_ollama:
             self.browse_button.setVisible(False)
             self.browse_button.setToolTip("")
-            self.test_button.setToolTip("Ask the Ollama server at the address in the settings.")
+            self.location_edit.setVisible(False)
+            self.test_button.setToolTip("Ask the Ollama server at the address in the field.")
+            self.reset_button.setToolTip(f"Go back to the default address, {DEFAULT_OLLAMA_URL}.")
 
         self.hint_edit = QLineEdit(install_hint(tool))
         self.hint_edit.setReadOnly(True)
@@ -187,9 +199,14 @@ class ToolRow(QFrame):
         hint.addWidget(self.hint_edit, 1)
         hint.addWidget(self.copy_button)
 
+        address = QHBoxLayout()
+        address.addWidget(self.url_edit, 1)
+        address.addWidget(self.save_url_button)
+
         layout = QVBoxLayout(self)
         layout.addLayout(head)
         layout.addWidget(self.location_edit)
+        layout.addLayout(address)
         layout.addWidget(self.version_label)
         layout.addWidget(self.message_label)
         layout.addLayout(buttons)
@@ -206,6 +223,8 @@ class ToolRow(QFrame):
         self.status_label.setText(f'<span style="color:{_STATUS_COLOURS[status]}">{status}</span>')
         self.location_edit.setText(shown)
         self.location_edit.setCursorPosition(0)
+        if self.tool == "ollama" and not self.url_edit.isModified():
+            self.url_edit.setText(shown)
         self.version_label.setText(f"Version: {location.version}" if location.version else "")
         self.source_label.setText(f"Found by: {location.source}" if status == "found" else "")
         self.message_label.setText("; ".join(location.problems))
@@ -218,8 +237,12 @@ class ToolRow(QFrame):
 class ExternalToolsPanel(QGroupBox):
     """Status, path, version and source of every external program, with the buttons to fix them.
 
-    The panel looks again each time it is shown, and after every change it makes itself.
+    The panel looks again each time it is shown, and after every change it makes itself. The
+    Ollama row edits the "Ollama address" setting (``ollama_url``, the same one the Settings form
+    shows) and emits ``settingsSaved`` so the form can show the new value.
     """
+
+    settingsSaved = Signal()
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__("External programs", parent)
@@ -229,13 +252,29 @@ class ExternalToolsPanel(QGroupBox):
         layout = QVBoxLayout(self)
         for tool in TOOL_SPECS:
             row = ToolRow(tool, self)
-            row.reset_button.setEnabled(tool in state.settings.external_tools)
+            row.reset_button.setEnabled(self.has_override(tool))
             self.rows[tool] = row
             layout.addWidget(row)
             row.browse_button.clicked.connect(lambda _=False, t=tool: self.browse(t))
             row.test_button.clicked.connect(lambda _=False, t=tool: self.test(t))
             row.detect_button.clicked.connect(lambda _=False: self.auto_detect())
             row.reset_button.clicked.connect(lambda _=False, t=tool: self.reset(t))
+        ollama = self.rows.get("ollama")
+        if ollama is not None:
+            ollama.url_edit.setText(state.settings.ollama_url)
+            ollama.save_url_button.clicked.connect(
+                lambda _=False, r=ollama: self.set_ollama_url(r.url_edit.text())
+            )
+            ollama.url_edit.returnPressed.connect(
+                lambda r=ollama: self.set_ollama_url(r.url_edit.text())
+            )
+
+    def has_override(self, tool: str) -> bool:
+        """Whether Reset has anything to undo for this row."""
+        settings = self._state.settings
+        if tool == "ollama":
+            return settings.ollama_url != DEFAULT_OLLAMA_URL or tool in settings.external_tools
+        return tool in settings.external_tools
 
     # ----- looking up ------------------------------------------------------------------------
 
@@ -267,11 +306,11 @@ class ExternalToolsPanel(QGroupBox):
             if row is None or not isinstance(location, ToolLocation):
                 continue
             if tool == "ollama":
-                shown = location.url if location.valid and location.url else settings.ollama_url
+                shown = settings.ollama_url  # the setting the field edits
             else:
                 saved = settings.external_tools.get(tool, "")
                 shown = str(location.path) if location.valid and location.path else saved
-            row.set_location(location, shown, has_override=tool in settings.external_tools)
+            row.set_location(location, shown, has_override=self.has_override(tool))
 
     def _refresh_failed(self, exc: BaseException) -> None:
         self._refreshing = False
@@ -319,12 +358,7 @@ class ExternalToolsPanel(QGroupBox):
             overrides.pop(tool, None)
         else:
             overrides[tool] = path
-        try:
-            self._state.update_settings(external_tools=overrides)
-        except (ValidationError, OSError) as exc:
-            row.show_message(f"Could not save the setting: {exc}")
-            return False
-        return True
+        return self._save(row, external_tools=overrides)
 
     def test(self, tool: str) -> Worker:
         """Re-check the current program (or the saved Ollama address) and show the result."""
@@ -333,9 +367,11 @@ class ExternalToolsPanel(QGroupBox):
         deps = self._state.deps
         row.show_message("Testing...")
 
+        url = row.url_edit.text().strip() or settings.ollama_url
+
         def job(_worker: Worker) -> CheckResult:
             if tool == "ollama":
-                return check_ollama(settings.ollama_url, settings.ollama_probe_timeout_s)
+                return check_ollama(url, settings.ollama_probe_timeout_s)
             location = deps.resolve(tool)
             if not location.valid or location.path is None:
                 return CheckResult(False, None, f"{display_name(tool)} was not found.")
@@ -357,14 +393,69 @@ class ExternalToolsPanel(QGroupBox):
         return self.refresh()
 
     def reset(self, tool: str) -> Worker | None:
-        """Remove the saved path so the program is found automatically again."""
+        """Remove the saved path so the program is found automatically again.
+
+        For Ollama: back to the default address, and any saved address override is dropped.
+        """
         row = self.rows[tool]
-        if tool not in self._state.settings.external_tools:
+        if not self.has_override(tool):
             return None
-        if not self._save_override(tool, None, row):
+        if tool == "ollama":
+            overrides = dict(self._state.settings.external_tools)
+            overrides.pop(tool, None)
+            if not self._save(row, ollama_url=DEFAULT_OLLAMA_URL, external_tools=overrides):
+                return None
+            row.url_edit.setText(DEFAULT_OLLAMA_URL)
+            row.url_edit.setModified(False)
+            row.show_message(f"Back to the default address, {DEFAULT_OLLAMA_URL}.")
+        elif not self._save_override(tool, None, row):
             return None
         self._state.redetect()
         return self.refresh()
+
+    def set_ollama_url(self, url: str) -> Worker | None:
+        """Save the Ollama address (the ``ollama_url`` setting), then ask the server in a worker.
+
+        An address that does not answer is still saved (the server may just be off); the row
+        says so. Only an address that is not a web address is refused.
+        """
+        row = self.rows["ollama"]
+        cleaned = url.strip().rstrip("/")
+        if not cleaned.lower().startswith(("http://", "https://")):
+            row.show_message("Not saved: the address must start with http:// or https://.")
+            return None
+        if not self._save(row, ollama_url=cleaned):
+            return None
+        row.url_edit.setText(cleaned)
+        row.url_edit.setModified(False)
+        row.reset_button.setEnabled(self.has_override("ollama"))
+        row.show_message("Saved. Asking the server...")
+        self._state.redetect()
+        timeout = self._state.settings.ollama_probe_timeout_s
+        return _start(
+            lambda _worker: check_ollama(cleaned, timeout),
+            lambda result: self._ollama_checked(result),
+            lambda exc: self._failed("ollama", exc),
+        )
+
+    def _ollama_checked(self, result: object) -> None:
+        if not shiboken6.isValid(self) or not isinstance(result, CheckResult):
+            return
+        row = self.rows["ollama"]
+        if result.ok:
+            row.show_message(f"Saved. {result.message}")
+        else:
+            row.show_message(f"Saved, but {result.message} Start Ollama, or check the address.")
+        self.refresh()
+
+    def _save(self, row: ToolRow, **changes: object) -> bool:
+        try:
+            self._state.update_settings(**changes)
+        except (ValidationError, OSError) as exc:
+            row.show_message(f"Could not save the setting: {exc}")
+            return False
+        self.settingsSaved.emit()
+        return True
 
 
 def locate_program(parent: QWidget, state: AppState, tool: str, *, path: str | None = None) -> bool:

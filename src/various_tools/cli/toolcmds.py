@@ -1,19 +1,26 @@
 """Tool sub-commands, generated from each tool's options model (plan §3.3 and Phase 4).
 
-For every discovered tool this builds ``<tool> scan``, ``<tool> apply`` and
-``presets save <tool>``. The flags come from :func:`various_tools.core.schema.describe`, so a new
-tool or a new option field needs no CLI code. Hand-written flags exist only for the shared
-``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--select-all``, ``--export``
-and ``--export-format``.
+For every discovered tool this builds ``<tool> scan``, ``<tool> apply``, one
+``<tool> <extra-id> PATH`` per item of the tool's optional ``extras`` and ``presets save <tool>``.
+The flags come from :func:`various_tools.core.schema.describe`, so a new tool or a new option
+field needs no CLI code. Hand-written flags exist only for the shared
+``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--select-all``, ``--export``,
+``--export-format``, ``--force``, ``--allow-locked`` and the one-off program flags
+(``--exiftool``, ``--ffmpeg``, ``--ffprobe``, ``--ollama-url``; plan §3.5).
 
 How values travel: every generated flag defaults to ``None`` meaning "not given". Only the flags
 the user typed are collected as overrides, and they are applied on top of the preset (if any) and
 validated by the tool's own options model. Flag values are text, converted by ``parse_value``.
+
+🔒 Locked options (tuned thresholds and safety values): when the final options differ from a
+locked default, whether typed or loaded from a preset, the command lists them and asks. ``--yes``
+never answers that question; only ``--allow-locked`` does. With nobody to answer, it refuses.
 """
 
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +30,7 @@ import typer
 from pydantic import ValidationError
 from rich.markup import escape
 
+from various_tools.cli import clipboard
 from various_tools.cli.export_cmd import (
     check_export_target,
     export_plan_file,
@@ -35,15 +43,18 @@ from various_tools.cli.state import (
     EXIT_FAILED,
     CliState,
     confirm,
+    err,
     fail,
     get_state,
     note,
     out,
     usage_error,
 )
-from various_tools.core.plan import Plan, RunResult
+from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.schema import FieldSpec, describe, format_value, parse_value
 from various_tools.tools.base import Tool, ToolOptions
+
+log = logging.getLogger(__name__)
 
 # Flag names the CLI itself uses. A tool option with one of these names becomes ``--opt-<name>``.
 RESERVED_FLAGS = frozenset(
@@ -56,6 +67,8 @@ RESERVED_FLAGS = frozenset(
         "select-all",
         "export",
         "export-format",
+        "force",
+        "allow-locked",
         "config",
         "exiftool",
         "ffmpeg",
@@ -64,6 +77,8 @@ RESERVED_FLAGS = frozenset(
         "help",
     }
 )
+# Kinds that change files inside the plan's roots. A plan with any of them must name its roots.
+ROOTED_KINDS = frozenset({ActionKind.MOVE, ActionKind.RENAME, ActionKind.TRASH, ActionKind.DELETE})
 FOLDER_WIDGETS = ("folders", "folder")
 _P = inspect.Parameter
 
@@ -272,7 +287,87 @@ def _read_plan(path: str, tool: Tool) -> Plan:
         usage_error(f"{path} is not a usable plan: {exc}")
     if plan.tool != tool.id:
         usage_error(f"{path} is a plan for {plan.tool!r}, not {tool.id!r}.")
+    if not plan.roots and any(a.kind in ROOTED_KINDS for a in plan.actions):
+        usage_error(
+            f"{path} has no 'roots'. A plan that moves, renames or deletes files must list the "
+            "folders it may change, so nothing outside them is touched. Scan again and save the "
+            "plan with --save-plan, or add the folders to 'roots'."
+        )
     return plan
+
+
+# ----- locked (🔒) options -------------------------------------------------------------------
+
+
+def _same_value(value: Any, default: Any) -> bool:
+    if value == default:
+        return True
+    return format_value(value) == format_value(default)  # list vs tuple, Path vs str
+
+
+def locked_changes(
+    specs: list[FieldSpec], values: Mapping[str, Any]
+) -> list[tuple[FieldSpec, Any]]:
+    """The locked fields whose value in ``values`` differs from the tuned default."""
+    return [
+        (spec, values[spec.name])
+        for spec in specs
+        if spec.locked and spec.name in values and not _same_value(values[spec.name], spec.default)
+    ]
+
+
+def option_values(opts: ToolOptions, specs: list[FieldSpec]) -> dict[str, Any]:
+    return {spec.name: getattr(opts, spec.name) for spec in specs if hasattr(opts, spec.name)}
+
+
+def confirm_locked(changes: list[tuple[FieldSpec, Any]], *, allow: bool) -> None:
+    """List changed locked values and ask before going on. ``--yes`` never answers this.
+
+    ``allow`` (``--allow-locked``) goes ahead without asking. With nobody to answer, refuse.
+    """
+    if not changes:
+        return
+    console = err()
+    console.print("[bold yellow]\U0001f512 Locked values differ from their tuned defaults:[/]")
+    for spec, value in changes:
+        console.print(
+            f"  {escape(flag_for(spec.name))} ({escape(spec.title)}): "
+            f"{escape(format_value(value))} (default: {escape(format_value(spec.default))})"
+        )
+    if allow:
+        note("Going ahead with them because of --allow-locked.")
+        return
+    try:
+        accepted = typer.confirm("Use these locked values?", default=False, err=True)
+    except typer.Abort:
+        fail(
+            "refusing to use changed locked values without confirmation because input is not "
+            "interactive. Add --allow-locked if you really mean them (--yes is not enough)."
+        )
+    if not accepted:
+        note("Nothing was changed. Drop those flags (or the preset) to use the tuned defaults.")
+        raise typer.Exit(EXIT_FAILED)
+
+
+# ----- after apply ----------------------------------------------------------------------------
+
+
+def copy_result_to_clipboard(plan: Plan, result: RunResult) -> None:
+    """``copy_to_clipboard``: put the file the run wrote on the clipboard (not a huge one)."""
+    if not clipboard.wants_clipboard(plan):
+        return
+    written = clipboard.written_file(result)
+    if written is None:
+        note("Nothing was copied to the clipboard: the run wrote no file.")
+        return
+    read = clipboard.read_for_clipboard(written)
+    if read.text is None:
+        note(read.message)
+        return
+    if clipboard.set_clipboard_text(read.text):
+        note(read.message)
+    else:
+        note(f"Could not copy {written.name} to the clipboard. The file is at {written}")
 
 
 # ----- generated commands -------------------------------------------------------------------
@@ -302,12 +397,66 @@ def _preset_param(extra: str) -> inspect.Parameter:
     )
 
 
+def _allow_locked_param() -> inspect.Parameter:
+    return _param(
+        "allow_locked",
+        Annotated[
+            bool,
+            typer.Option(
+                "--allow-locked",
+                help=(
+                    "Accept 🔒 locked options that differ from their tuned defaults without "
+                    "asking. --yes does not do this."
+                ),
+            ),
+        ],
+        False,
+    )
+
+
+_PROGRAM_FLAGS = (
+    ("one_exiftool", "--exiftool", "PATH", "Use this ExifTool for this run only (not saved)."),
+    ("one_ffmpeg", "--ffmpeg", "PATH", "Use this ffmpeg for this run only (not saved)."),
+    ("one_ffprobe", "--ffprobe", "PATH", "Use this ffprobe for this run only (not saved)."),
+    ("one_ollama_url", "--ollama-url", "URL", "Use this Ollama address for this run only."),
+)
+
+
+def program_params() -> list[inspect.Parameter]:
+    """``--exiftool PATH`` and friends on a command (plan §3.5: any command accepts them)."""
+    return [
+        _param(
+            name,
+            Annotated[
+                str | None,
+                typer.Option(
+                    flag, metavar=metavar, help=help_, rich_help_panel="External programs"
+                ),
+            ],
+        )
+        for name, flag, metavar, help_ in _PROGRAM_FLAGS
+    ]
+
+
+def state_with_programs(state: CliState, kw: Mapping[str, Any]) -> CliState:
+    """The run's state with the command's one-off program flags on top of the global ones."""
+    return state.with_programs(
+        exiftool=kw.get("one_exiftool"),
+        ffmpeg=kw.get("one_ffmpeg"),
+        ffprobe=kw.get("one_ffprobe"),
+        ollama_url=kw.get("one_ollama_url"),
+    )
+
+
 def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> Callable[..., None]:
+    specs = [f.spec for f in flags]
+
     def scan(**kw: Any) -> None:
-        state = get_state(kw["ctx"])
-        check_export_target(kw["export"], kw["export_format"])
+        state = state_with_programs(get_state(kw["ctx"]), kw)
+        check_export_target(kw["export"], kw["export_format"], force=kw["force"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
+        confirm_locked(locked_changes(specs, option_values(opts, specs)), allow=kw["allow_locked"])
         plan = run_job(
             state, lambda ctx: tool.scan(opts, ctx), label="Scanning", with_journal=False
         ).unwrap()
@@ -349,6 +498,8 @@ def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> C
             ],
         ),
         *_export_params(),
+        _allow_locked_param(),
+        *program_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(scan, params)
@@ -378,6 +529,14 @@ def _export_params() -> list[inspect.Parameter]:
                 ),
             ],
         ),
+        _param(
+            "force",
+            Annotated[
+                bool,
+                typer.Option("--force", help="Overwrite the --export file if it already exists."),
+            ],
+            False,
+        ),
     ]
 
 
@@ -398,10 +557,12 @@ def _apply_exit_code(result: RunResult, selected: int) -> int:
 
 
 def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> Callable[..., None]:
+    specs = [f.spec for f in flags]
+
     def apply(**kw: Any) -> None:
-        state = get_state(kw["ctx"])
+        state = state_with_programs(get_state(kw["ctx"]), kw)
         yes: bool = kw["yes"]
-        check_export_target(kw["export"], kw["export_format"])
+        check_export_target(kw["export"], kw["export_format"], force=kw["force"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         if kw["plan"]:
             if overrides or kw["preset"]:
@@ -412,6 +573,9 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             plan = _read_plan(kw["plan"], tool)
         else:
             opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
+            confirm_locked(
+                locked_changes(specs, option_values(opts, specs)), allow=kw["allow_locked"]
+            )
             plan = run_job(
                 state, lambda ctx: tool.scan(opts, ctx), label="Scanning", with_journal=False
             ).unwrap()
@@ -460,6 +624,7 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
                 export_result_file(
                     plan, outcome.value, kw["export"], kw["export_format"], tool.name
                 )
+            copy_result_to_clipboard(plan, outcome.value)
         if outcome.cancelled:
             note("Cancelled.")
             raise typer.Exit(EXIT_CANCELLED)
@@ -505,6 +670,8 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             False,
         ),
         *_export_params(),
+        _allow_locked_param(),
+        *program_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(apply, params)
@@ -513,6 +680,8 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
 def _save_preset_command(
     tool: Tool, flags: list[Flag], folders: FieldSpec | None
 ) -> Callable[..., None]:
+    specs = [f.spec for f in flags]
+
     def save(**kw: Any) -> None:
         state = get_state(kw["ctx"])
         name: str = kw["name"].strip()
@@ -536,6 +705,8 @@ def _save_preset_command(
                 stored, incomplete = values, True
             else:
                 usage_error(validation_messages(exc, flags, folders))
+        checked = values if incomplete else option_values(stored, specs)
+        confirm_locked(locked_changes(specs, checked), allow=kw["allow_locked"])
         store.save(tool.id, name, stored)
         console = out()
         console.print(
@@ -554,13 +725,62 @@ def _save_preset_command(
         ),
         *_paths_param(tool, folders),
         _preset_param("Start from this preset, then apply the flags you give."),
+        _allow_locked_param(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(save, params)
 
 
+RESERVED_SUBCOMMANDS = frozenset({"scan", "apply", "explain"})
+
+
+def _extra_command(extra: Any) -> Callable[..., None]:
+    """``<tool> <extra-id> PATH``: run one of the tool's extras (``tool.extras``)."""
+
+    def run_extra(**kw: Any) -> None:
+        state = state_with_programs(get_state(kw["ctx"]), kw)
+        target = Path(kw["path"])
+        outcome = run_job(
+            state,
+            lambda ctx: str(extra.run(target, ctx)),
+            label=str(extra.label),
+            with_journal=False,
+        )
+        if isinstance(outcome.error, ValueError):
+            fail(str(outcome.error))
+        out().print(escape(outcome.unwrap()))
+
+    verb = "Where to write" if extra.path_kind == "save_file" else "The file to read"
+    params = [
+        _required("ctx", typer.Context),
+        _required(
+            "path",
+            Annotated[str, typer.Argument(metavar="PATH", help=escape(f"{verb}."))],
+        ),
+        *program_params(),
+    ]
+    return _install(run_extra, params)
+
+
+def add_extra_commands(app: typer.Typer, tool: Tool) -> list[str]:
+    """One sub-command per item of the tool's optional ``extras``. Returns their names.
+
+    An extra whose id is not usable as a command name, or clashes with a built-in sub-command,
+    is skipped (and logged), so a tool cannot hide ``scan`` or ``apply``.
+    """
+    added: list[str] = []
+    for extra in tuple(getattr(tool, "extras", ()) or ()):
+        name = str(getattr(extra, "id", ""))
+        if not name or name in RESERVED_SUBCOMMANDS or name in added or " " in name:
+            log.error("Skipping extra %r of %s: not a usable command name", name, tool.id)
+            continue
+        app.command(name, help=escape(f"{extra.label}. {extra.description}"))(_extra_command(extra))
+        added.append(name)
+    return added
+
+
 def build_tool_app(tool: Tool) -> typer.Typer:
-    """The ``<tool>`` command group with ``scan`` and ``apply``."""
+    """The ``<tool>`` command group with ``scan``, ``apply`` and the tool's extras."""
     specs = describe(tool.Options)
     flags = make_flags(specs)
     folders = folder_spec(specs)
@@ -584,6 +804,7 @@ def build_tool_app(tool: Tool) -> typer.Typer:
             "Give --plan FILE, or the same options as scan."
         ),
     )(_apply_command(tool, flags, folders))
+    add_extra_commands(app, tool)
     return app
 
 

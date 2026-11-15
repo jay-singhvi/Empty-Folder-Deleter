@@ -2,7 +2,8 @@
 
 Both widgets accept folders (or, for a file picker, files) dragged in from Explorer. The drop
 logic lives in ``accept_mime`` so tests can call it with a hand-built ``QMimeData`` instead of
-synthesizing real drag events.
+synthesizing real drag events. Dragging over a picker never touches the disk (a network path
+could block); only the drop checks that the paths are folders or files.
 
 ``changed`` is emitted when the person edits, browses, drops or removes something. Setting the
 value from code (``set_text`` / ``set_paths``) never emits it.
@@ -35,6 +36,12 @@ def local_paths(mime: QMimeData) -> list[str]:
     if not mime.hasUrls():
         return []
     return [url.toLocalFile() for url in mime.urls() if url.isLocalFile() and url.toLocalFile()]
+
+
+def drag_has_local_paths(mime: QMimeData) -> bool:
+    """Whether a drag carries local paths. Looks at the URLs only, never at the disk, so a
+    drag over a slow network path cannot freeze the window. The drop does the real check."""
+    return bool(local_paths(mime))
 
 
 def _path_key(path: str) -> str:
@@ -113,7 +120,8 @@ class PathEdit(QWidget):
             self.changed.emit()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 (Qt name)
-        if self._matching(event.mimeData()):
+        # No disk access here (it could block on a network path): local paths are enough.
+        if drag_has_local_paths(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -201,7 +209,8 @@ class PathListEdit(QWidget):
         return added
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 (Qt name)
-        if self._folders(event.mimeData()):
+        # No disk access here (it could block on a network path); the drop checks the folders.
+        if drag_has_local_paths(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()

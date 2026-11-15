@@ -44,7 +44,14 @@ def _names(folder: Path) -> list[str]:
 def _save_empty_plan(cli: Cli, tree: Path, *extra: str) -> Path:
     plan = cli.work / "plan.json"
     scan = cli.run(
-        "empty_folders", "scan", str(tree), "--delete-mode", "permanent", "--save-plan", str(plan)
+        "empty_folders",
+        "scan",
+        str(tree),
+        "--delete-mode",
+        "permanent",
+        "--allow-locked",  # delete_mode is a locked (safety) option
+        "--save-plan",
+        str(plan),
     )
     assert scan.exit_code == 0, scan.output
     return plan

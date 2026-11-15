@@ -9,7 +9,7 @@ import os
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from PySide6.QtGui import QPalette
@@ -75,11 +75,25 @@ def first_run_id(history: HistoryPage) -> int:
     return int(history.runs_view.item(0, 0).text())
 
 
+@pytest.fixture
+def settle(qtbot: QtBot) -> Callable[[HistoryPage], None]:
+    """History reads the journal in workers: wait until it has shown what it read."""
+
+    def _settle(history: HistoryPage) -> None:
+        qtbot.waitUntil(lambda: not history.loading, timeout=20000)
+
+    return _settle
+
+
+Settle = Callable[[HistoryPage], None]
+
+
 # ----- history --------------------------------------------------------------------------------
 
 
-def test_empty_history_shows_the_hint(window: MainWindow) -> None:
+def test_empty_history_shows_the_hint(window: MainWindow, settle: Settle) -> None:
     history = window.history_page
+    settle(history)
     assert history.empty_label.text() == NO_HISTORY_TEXT
     assert not history.empty_label.isHidden()
     assert history.runs_view.rowCount() == 0
@@ -88,28 +102,39 @@ def test_empty_history_shows_the_hint(window: MainWindow) -> None:
     assert history.export_selected("x.csv") is None
 
 
-def test_history_lists_the_applied_run(window: MainWindow, renamed: tuple[Path, list[str]]) -> None:
+def test_history_lists_the_applied_run(
+    window: MainWindow, renamed: tuple[Path, list[str]], settle: Settle
+) -> None:
     history = window.history_page
+    settle(history)
     assert history.empty_label.isHidden()
     assert history.runs_view.rowCount() == 1
     assert history.runs_view.item(0, 4).text() == "done"
     assert history.runs_view.item(0, 5).text() == "2"
     run_id = first_run_id(history)
     history.select_run(run_id)
+    settle(history)
     assert history.actions_view.rowCount() == 2
     assert history.actions_view.item(0, 1).text() == "rename"
     assert history.undo_button.isEnabled() and history.export_button.isEnabled()
     assert f"Run {run_id}" in history.summary_label.text()
+    assert "2 action(s): 2 done" in history.summary_label.text()
 
 
 def test_undo_through_the_history_page_restores_the_files(
-    qtbot: QtBot, window: MainWindow, dialogs: Dialogs, renamed: tuple[Path, list[str]]
+    qtbot: QtBot,
+    window: MainWindow,
+    dialogs: Dialogs,
+    renamed: tuple[Path, list[str]],
+    settle: Settle,
 ) -> None:
     root, original = renamed
     assert names(root) != original
     history = window.history_page
+    settle(history)
     run_id = first_run_id(history)
     history.select_run(run_id)
+    settle(history)
     with qtbot.waitSignal(history.runUndone, timeout=20000) as undone:
         assert history.undo_selected() is not None
     assert undone.args == [run_id]
@@ -117,32 +142,39 @@ def test_undo_through_the_history_page_restores_the_files(
     assert len(dialogs.confirms) == 1 and "2 move or rename" in dialogs.confirms[0][1]
     assert dialogs.informs[-1][0].startswith("Undo run")
     assert "2 action(s) were put back" in dialogs.informs[-1][1]
+    settle(history)
     assert history.runs_view.item(0, 4).text() == "undone"
     history.select_run(run_id)
+    settle(history)
     assert not history.undo_button.isEnabled()
     assert history.undo_selected() is None
 
 
 def test_declined_undo_does_nothing(
-    window: MainWindow, dialogs: Dialogs, renamed: tuple[Path, list[str]]
+    window: MainWindow, dialogs: Dialogs, renamed: tuple[Path, list[str]], settle: Settle
 ) -> None:
     root, original = renamed
     after_apply = names(root)
     history = window.history_page
+    settle(history)
     history.select_run(first_run_id(history))
+    settle(history)
     dialogs.default = False
     assert history.undo_selected() is None
+    assert len(dialogs.confirms) == 1, "it was asked"
     assert names(root) == after_apply != original
     assert history.runs_view.item(0, 4).text() == "done"
     assert dialogs.informs == []
 
 
-def test_a_trash_run_cannot_be_undone_from_history(
+def test_a_trash_run_can_be_undone_from_history(
     window: MainWindow,
     open_tool: OpenTool,
     scan: PageStep,
     apply: PageStep,
     tmp_path: Path,
+    settle: Settle,
+    dialogs: Dialogs,
 ) -> None:
     folder = tmp_path / "e"
     (folder / "x").mkdir(parents=True)
@@ -150,11 +182,84 @@ def test_a_trash_run_cannot_be_undone_from_history(
     scan(page)
     apply(page)
     history = window.history_page
+    settle(history)
     history.select_run(first_run_id(history))
+    settle(history)
     assert history.actions_view.rowCount() == 1
+    # The shared rule: a done trash row can be restored from the Recycle Bin, so both pages
+    # offer Undo.
+    assert history.undo_button.isEnabled()
+    assert not page.undo_button.isHidden() and page.undo_button.isEnabled()
+    assert history.export_button.isEnabled()
+    dialogs.default = False
+    assert history.undo_selected() is None
+    assert "Recycle Bin" in dialogs.confirms[-1][1]
+
+
+def test_a_permanent_delete_run_cannot_be_undone_anywhere(
+    make_state: Callable[..., AppState],
+    make_window: Callable[..., MainWindow],
+    dialogs: Dialogs,
+    tmp_path: Path,
+    scan: PageStep,
+    apply: PageStep,
+    settle: Settle,
+) -> None:
+    state = make_state(delete_mode="permanent")
+    window = make_window(state)
+    folder = tmp_path / "perm"
+    (folder / "gone").mkdir(parents=True)
+    page = window.open_tool("empty_folders", str(folder))
+    assert page is not None
+    dialogs.attach(page)
+    page.form.update_values({"delete_mode": "permanent"})
+    scan(page)
+    apply(page)  # both confirmations answered yes
+    assert not (folder / "gone").exists()
+    assert page.undo_button.isHidden()
+    assert page.undo_last() is None
+    history = window.history_page
+    settle(history)
+    history.select_run(first_run_id(history))
+    settle(history)
     assert not history.undo_button.isEnabled()
     assert history.undo_selected() is None
-    assert history.export_button.isEnabled()
+
+
+def test_history_pages_through_a_long_run(
+    window: MainWindow, gui_state: AppState, settle: Settle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core.journal import Journal
+    from various_tools.gui import history_page as history_module
+
+    monkeypatch.setattr(history_module, "PAGE_SIZE", 3)
+    with Journal(gui_state.settings.journal_path()) as journal:
+        run_id = journal.start_run("rename", "{}")
+        for seq in range(1, 8):
+            action_id = journal.record_action(run_id, seq, "rename", None, None, f"r{seq}")
+            journal.set_action(action_id, "done")
+        journal.finish_run(run_id, "done")
+    history = window.history_page
+    history.reload()
+    settle(history)
+    assert history.runs_view.item(0, 5).text() == "7"  # the count comes from COUNT, not rows
+    history.select_run(run_id)
+    settle(history)
+    assert history.actions_shown == 3
+    assert history.actions_view.rowCount() == 3
+    assert "Showing the first 3" in history.summary_label.text()
+    assert not history.more_button.isHidden()
+    assert history.load_more() is not None
+    settle(history)
+    assert history.actions_shown == 6
+    history.load_more()
+    settle(history)
+    assert history.actions_shown == 7
+    assert history.more_button.isHidden()
+    assert history.load_more() is None
+    assert [history.actions_view.item(r, 0).text() for r in range(7)] == [
+        str(n) for n in range(1, 8)
+    ]
 
 
 def test_export_selected_writes_a_file(
@@ -163,9 +268,12 @@ def test_export_selected_writes_a_file(
     dialogs: Dialogs,
     renamed: tuple[Path, list[str]],
     tmp_path: Path,
+    settle: Settle,
 ) -> None:
     history = window.history_page
+    settle(history)
     history.select_run(first_run_id(history))
+    settle(history)
     target = tmp_path / "run.csv"
     assert history.export_selected(str(target)) is not None
     qtbot.waitUntil(lambda: bool(dialogs.informs), timeout=20000)
@@ -180,22 +288,62 @@ def test_export_selected_failure_is_reported(
     dialogs: Dialogs,
     renamed: tuple[Path, list[str]],
     tmp_path: Path,
+    settle: Settle,
 ) -> None:
     history = window.history_page
+    settle(history)
     history.select_run(first_run_id(history))
+    settle(history)
     assert history.export_selected(str(tmp_path / "run.unknown")) is not None
     qtbot.waitUntil(lambda: bool(dialogs.informs), timeout=20000)
     assert dialogs.informs[-1][0] == "Export failed"
 
 
 def test_history_reload_keeps_the_selection(
-    window: MainWindow, renamed: tuple[Path, list[str]]
+    window: MainWindow, renamed: tuple[Path, list[str]], settle: Settle
 ) -> None:
     history = window.history_page
+    settle(history)
     history.select_run(first_run_id(history))
     history.reload()
+    settle(history)
     assert history.undo_button.isEnabled()
     assert history.actions_view.rowCount() == 2
+
+
+def test_history_never_reads_the_journal_on_the_ui_thread(
+    window: MainWindow,
+    renamed: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    settle: Settle,
+) -> None:
+    import threading
+
+    from various_tools.core import journal as journal_module
+
+    ui_thread = threading.get_ident()
+    seen: list[int] = []
+    real_runs = journal_module.Journal.runs
+    real_actions = journal_module.Journal.actions
+
+    def runs_spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(threading.get_ident())
+        return real_runs(self, *args, **kwargs)
+
+    def actions_spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(threading.get_ident())
+        return real_actions(self, *args, **kwargs)
+
+    monkeypatch.setattr(journal_module.Journal, "runs", runs_spy)
+    monkeypatch.setattr(journal_module.Journal, "actions", actions_spy)
+    history = window.history_page
+    settle(history)
+    history.reload()
+    settle(history)
+    history.select_run(first_run_id(history))
+    settle(history)
+    assert history.actions_view.rowCount() == 2
+    assert len(seen) >= 2 and ui_thread not in seen
 
 
 def test_undo_summary_text() -> None:

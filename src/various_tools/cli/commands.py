@@ -24,7 +24,7 @@ from various_tools.cli.state import (
 )
 from various_tools.core.context import make_deps
 from various_tools.core.deps import TOOL_SPECS, ToolLocation
-from various_tools.core.journal import REVERSIBLE_KINDS, Journal, undo_run
+from various_tools.core.journal import UNDOABLE_KINDS, Journal, undo_run
 from various_tools.tools.base import Tool
 
 
@@ -75,7 +75,7 @@ def history(
             if not runs:
                 console.print("No history yet: nothing has been applied.")
                 return
-            counts = {run.id: len(journal.actions(run.id)) for run in runs}
+            counts = {run.id: journal.action_count(run.id) for run in runs}  # no rows loaded
             console.print(runs_table(runs, counts))
             console.print("Show a run with: various-tools history RUN_ID")
             return
@@ -95,7 +95,8 @@ def undo(
     run_id: Annotated[int, typer.Argument(metavar="RUN_ID", help="The run to undo.")],
     yes: Annotated[bool, typer.Option("--yes", help="Do not ask for confirmation.")] = False,
 ) -> None:
-    """Undo a run: move and rename actions are put back. Deleted items stay in the Recycle Bin."""
+    """Undo a run: moves and renames are put back, Recycle Bin items are restored while they are
+    still there, and unchanged written files are recycled. Permanent deletes cannot be undone."""
     state = get_state(ctx)
     journal = _open_journal(state)
     if journal is None:
@@ -105,21 +106,21 @@ def undo(
         if run is None:
             fail(f"No run with id {run_id}. List runs with: various-tools history")
         done = [a for a in journal.actions(run_id) if a.status == "done"]
-        reversible = [a for a in done if a.kind in REVERSIBLE_KINDS]
+        reversible = [a for a in done if a.kind in UNDOABLE_KINDS]
         console = out()
         console.print(
             f"Run [bold]{run.id}[/bold] ({escape(run.tool)}, {run.status}): "
-            f"{len(reversible)} action(s) can be moved back, "
-            f"{len(done) - len(reversible)} cannot be undone here (restore deleted items from "
-            "the Recycle Bin)."
+            f"{len(reversible)} action(s) can be undone, "
+            f"{len(done) - len(reversible)} cannot (permanent deletes). Items in the Recycle Bin "
+            "are restored only while they are still there."
         )
-        if not reversible:
+        if not reversible or run.status == "undone":
             fail("Nothing to undo in this run.")
         if not confirm(f"Undo run {run_id}?", yes=yes):
             note("Nothing was changed.")
             raise typer.Exit(EXIT_FAILED)
-        report = undo_run(journal, run_id)
-        console.print(f"Run {run_id} {report.status}: {report.reverted} action(s) moved back.")
+        report = undo_run(journal, run_id, protection=state.settings().protected_paths())
+        console.print(f"Run {run_id} {report.status}: {report.reverted} action(s) undone.")
         for label, items in (("Skipped", report.skipped), ("Failed", report.failed)):
             if items:
                 console.print(f"[bold]{label}[/bold]")
@@ -129,9 +130,52 @@ def undo(
             raise typer.Exit(EXIT_FAILED)
 
 
-def doctor(ctx: typer.Context) -> None:
+_PROGRAMS_PANEL = "External programs"
+
+
+def doctor(
+    ctx: typer.Context,
+    exiftool: Annotated[
+        str | None,
+        typer.Option(
+            "--exiftool",
+            metavar="PATH",
+            help="Check this ExifTool instead (not saved).",
+            rich_help_panel=_PROGRAMS_PANEL,
+        ),
+    ] = None,
+    ffmpeg: Annotated[
+        str | None,
+        typer.Option(
+            "--ffmpeg",
+            metavar="PATH",
+            help="Check this ffmpeg instead (not saved).",
+            rich_help_panel=_PROGRAMS_PANEL,
+        ),
+    ] = None,
+    ffprobe: Annotated[
+        str | None,
+        typer.Option(
+            "--ffprobe",
+            metavar="PATH",
+            help="Check this ffprobe instead (not saved).",
+            rich_help_panel=_PROGRAMS_PANEL,
+        ),
+    ] = None,
+    ollama_url: Annotated[
+        str | None,
+        typer.Option(
+            "--ollama-url",
+            metavar="URL",
+            help="Check this Ollama address instead (not saved).",
+            rich_help_panel=_PROGRAMS_PANEL,
+        ),
+    ] = None,
+) -> None:
     """Check the external programs (ffmpeg, ffprobe, ExifTool, Ollama) and how each was found."""
-    state = get_state(ctx)
+    state = get_state(ctx).with_programs(
+        exiftool=exiftool, ffmpeg=ffmpeg, ffprobe=ffprobe, ollama_url=ollama_url
+    )
     settings = state.settings()
     deps = make_deps(settings, state.one_off)
     locations: list[ToolLocation] = []

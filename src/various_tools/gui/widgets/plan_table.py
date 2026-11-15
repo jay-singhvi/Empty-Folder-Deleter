@@ -1,7 +1,14 @@
 """The plan table: every planned action with a check box, grouped, sortable and filterable.
 
-Duplicate plans group their actions under a "Keeps <name>" row. Other plans with a ``group_id``
-show the id; plans without groups are a flat list. Toggling a check box sets
+Two views, switched by the person for any plan (the tool page picks the first one from the tool's
+optional ``plan_view`` attribute):
+
+* **Grouped**: duplicate plans group their actions under a "Keeps <name>" row. Other plans with a
+  ``group_id`` show the id; plans without groups are a flat list.
+* **Folder tree**: the folders under each plan root, with every action at its path. A folder row's
+  tri-state check box covers everything inside it (plan 3.1).
+
+Toggling a check box sets
 ``PlannedAction.selected`` (a per-tool hook may do more, see ``SELECTION_HOOKS``). The table
 never touches the disk: sizes are computed by the caller in a worker and passed in.
 """
@@ -9,12 +16,13 @@ never touches the disk: sizes are computed by the caller in a worker and passed 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
     QAbstractItemModel,
+    QItemSelectionModel,
     QModelIndex,
     QObject,
     QPersistentModelIndex,
@@ -58,10 +66,20 @@ def _empty_folders_hook(plan: Plan, action: PlannedAction, checked: bool) -> Non
 SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
 
 
-class Node:
-    """One row: a group (``action`` is None) or one planned action."""
+GROUPED = "grouped"
+FOLDER_TREE = "tree"
+VIEW_LABELS: dict[str, str] = {GROUPED: "Grouped", FOLDER_TREE: "Folder tree"}
 
-    __slots__ = ("action", "children", "index", "label", "parent", "row")
+
+class Node:
+    """One row: a group or folder (``action`` is None) or one planned action.
+
+    In the folder tree an action whose path is a folder can have children too, and ``path`` is
+    the folder or file the row stands for. ``key`` identifies a row with children across
+    reloads, so expanded rows stay expanded.
+    """
+
+    __slots__ = ("action", "children", "index", "key", "label", "parent", "path", "row")
 
     def __init__(
         self,
@@ -69,13 +87,40 @@ class Node:
         action: PlannedAction | None = None,
         index: int = -1,
         label: str = "",
+        path: Path | None = None,
     ) -> None:
         self.parent = parent
         self.action = action
         self.index = index  # position in plan.actions
-        self.label = label  # a group's id
+        self.label = label  # a group's id, or a tree row's display name
+        self.path = path  # folder tree only
+        self.key = f"g:{label}" if path is None else f"p:{_path_key(path)}"
         self.children: list[Node] = []
         self.row = 0
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path))).casefold()
+
+
+def _action_path(action: PlannedAction) -> Path | None:
+    return action.src if action.src is not None else action.dst
+
+
+def _walk(nodes: Sequence[Node]) -> list[Node]:
+    """Every node in ``nodes`` and below them, parents before children."""
+    result: list[Node] = []
+    stack = list(reversed(nodes))
+    while stack:
+        node = stack.pop()
+        result.append(node)
+        stack.extend(reversed(node.children))
+    return result
+
+
+def _subtree_actions(node: Node) -> list[Node]:
+    """The action rows at and below ``node``."""
+    return [n for n in _walk([node]) if n.action is not None]
 
 
 def _name(path: Path | None) -> str:
@@ -86,6 +131,12 @@ def _name(path: Path | None) -> str:
 
 def _dash(text: str) -> str:
     return text or EM_DASH
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    """``path`` is ``root`` or inside it (compared as Windows compares names)."""
+    key, base = _path_key(path), _path_key(root)
+    return key == base or key.startswith(base.rstrip("\\/") + os.sep)
 
 
 class PlanModel(QAbstractItemModel):
@@ -101,24 +152,51 @@ class PlanModel(QAbstractItemModel):
         self.top: list[Node] = []
         self._by_index: list[Node] = []
         self._rename_layout = False
+        self._editable = True
+        self._mode = GROUPED
         self._columns = ["Kind", "Source", "Destination", "Reason", "Size"]
 
     # ----- loading ------------------------------------------------------------------
 
-    def load(self, plan: Plan | None, tool_id: str, sizes: Sequence[int | None] | None) -> None:
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def load(
+        self,
+        plan: Plan | None,
+        tool_id: str,
+        sizes: Sequence[int | None] | None,
+        mode: str | None = None,
+    ) -> None:
         self.beginResetModel()
         self._plan = plan
         self._tool_id = tool_id
+        if mode is not None:
+            self._mode = mode
         actions = plan.actions if plan is not None else []
         self._sizes = list(sizes)[: len(actions)] if sizes is not None else []
         self._sizes += [None] * (len(actions) - len(self._sizes))
-        self._rename_layout = bool(actions) and all(a.kind is ActionKind.RENAME for a in actions)
-        if self._rename_layout:
+        self._rename_layout = (
+            self._mode == GROUPED
+            and bool(actions)
+            and all(a.kind is ActionKind.RENAME for a in actions)
+        )
+        if self._mode == FOLDER_TREE:
+            self._columns = ["Name", "Kind", "Destination", "Reason", "Size"]
+        elif self._rename_layout:
             self._columns = ["Kind", "Folder", "Old name", "New name", "Reason", "Size"]
         else:
             self._columns = ["Kind", "Source", "Destination", "Reason", "Size"]
         self.top = []
         self._by_index = []
+        if self._mode == FOLDER_TREE and plan is not None:
+            self._build_tree(plan)
+        else:
+            self._build_groups(actions)
+        self.endResetModel()
+
+    def _build_groups(self, actions: Sequence[PlannedAction]) -> None:
         groups: dict[str, Node] = {}
         for i, action in enumerate(actions):
             if action.group_id is None:
@@ -136,11 +214,86 @@ class PlanModel(QAbstractItemModel):
                 node.row = len(group.children)
                 group.children.append(node)
             self._by_index.append(node)
-        self.endResetModel()
+
+    def _build_tree(self, plan: Plan) -> None:
+        """Folders under each plan root as rows, actions at their paths (plan 3.1).
+
+        An action whose path is a folder of other actions holds them as children. An action
+        with no path, or outside every root, is a row at the top level.
+        """
+        roots = list(plan.roots)
+        root_keys = {_path_key(r): r for r in roots}
+        holders: dict[str, Node] = {}  # path key -> the row that holds that folder's children
+        nodes: list[Node] = []
+        for i, action in enumerate(plan.actions):
+            path = _action_path(action)
+            node = Node(None, action, i, _name(path), path)
+            nodes.append(node)
+            if path is not None:
+                holders.setdefault(_path_key(path), node)
+        self._by_index = nodes
+        top_roots: dict[str, Node] = {}
+        loose: list[Node] = []
+
+        def inside_root(path: Path) -> bool:
+            return any(_is_under(path, root) for root in roots)
+
+        def holder(folder: Path) -> Node | None:
+            key = _path_key(folder)
+            found = holders.get(key)
+            if found is not None:
+                return found
+            if key in root_keys:
+                node = Node(None, None, -1, str(root_keys[key]), root_keys[key])
+                top_roots[key] = node
+            elif inside_root(folder) and folder.parent != folder:
+                node = Node(None, None, -1, _name(folder), folder)
+                parent = holder(folder.parent)
+                if parent is None:
+                    return None
+                node.parent = parent
+                parent.children.append(node)
+            else:
+                return None
+            holders[key] = node
+            return node
+
+        for node in nodes:
+            path = node.path
+            parent: Node | None = None
+            if path is not None and inside_root(path) and _path_key(path) not in root_keys:
+                parent = holder(path.parent)
+            if parent is None or parent is node:
+                loose.append(node)
+                continue
+            node.parent = parent
+            parent.children.append(node)
+
+        ordered_roots = [top_roots[k] for k in (_path_key(r) for r in roots) if k in top_roots]
+        self.top = ordered_roots + loose
+        for row, node in enumerate(self.top):
+            node.row = row
+            node.parent = None
+        for node in _walk(self.top):
+            node.children.sort(key=lambda n: (not n.children, n.label.casefold(), n.index))
+            for row, child in enumerate(node.children):
+                child.row = row
 
     @property
     def plan(self) -> Plan | None:
         return self._plan
+
+    @property
+    def editable(self) -> bool:
+        return self._editable
+
+    def set_editable(self, editable: bool) -> None:
+        """Allow or forbid check-box changes (forbidden while an apply runs)."""
+        if editable == self._editable:
+            return
+        self._editable = editable
+        if self.top:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.top) - 1, 0))
 
     @property
     def tool_id(self) -> str:
@@ -168,17 +321,24 @@ class PlanModel(QAbstractItemModel):
         return list(seen)
 
     def group_label(self, node: Node) -> str:
+        if node.path is not None:
+            return node.label
         plan_tool = self._plan.tool if self._plan is not None else ""
         if self._tool_id == "duplicates" or plan_tool == "duplicates":
             return f"Keeps {_name(Path(node.label))}"
         return node.label
 
+    def all_nodes(self) -> list[Node]:
+        return _walk(self.top)
+
     # ----- sizes and totals -------------------------------------------------------------
 
     def size_of(self, node: Node) -> int | None:
-        if node.action is not None:
+        if node.action is not None and not node.children:
             return self._sizes[node.index]
-        values = [s for s in (self._sizes[c.index] for c in node.children) if s is not None]
+        values = [
+            s for s in (self._sizes[n.index] for n in _subtree_actions(node)) if s is not None
+        ]
         return sum(values) if values else None
 
     def sizes(self) -> list[int | None]:
@@ -198,19 +358,26 @@ class PlanModel(QAbstractItemModel):
     # ----- check states -----------------------------------------------------------------
 
     def _group_state(self, node: Node) -> Qt.CheckState:
-        selected = sum(1 for c in node.children if c.action is not None and c.action.selected)
+        """A row with children: checked, unchecked or partly, from every action below it."""
+        actions = [n.action for n in _subtree_actions(node) if n.action is not None]
+        selected = sum(1 for a in actions if a.selected)
         if selected == 0:
             return Qt.CheckState.Unchecked
-        if selected == len(node.children):
+        if selected == len(actions):
             return Qt.CheckState.Checked
         return Qt.CheckState.PartiallyChecked
 
     def set_node_checked(self, node: Node, checked: bool) -> None:
-        """Check or uncheck one row (a group sets all of its actions), as a user click does."""
+        """Check or uncheck one row, as a user click does. A group or folder row sets every
+        action below it (and its own action, in the folder tree). Each action goes through the
+        tool's selection hook, the same in both views.
+
+        Does nothing while the table is not editable.
+        """
         plan = self._plan
-        if plan is None:
+        if plan is None or not self._editable:
             return
-        targets = [node] if node.action is not None else list(node.children)
+        targets = _subtree_actions(node)
         hook = SELECTION_HOOKS.get(self._tool_id)
         for target in targets:
             action = target.action
@@ -229,10 +396,10 @@ class PlanModel(QAbstractItemModel):
             return
         roles = [Qt.ItemDataRole.CheckStateRole]
         self.dataChanged.emit(self.index(0, 0), self.index(len(self.top) - 1, 0), roles)
-        for group in self.top:
-            if group.action is None and group.children:
-                parent = self.index(group.row, 0)
-                last = len(group.children) - 1
+        for owner in _walk(self.top):
+            if owner.children:
+                parent = self.index_of(owner)
+                last = len(owner.children) - 1
                 self.dataChanged.emit(self.index(0, 0, parent), self.index(last, 0, parent), roles)
 
     # ----- QAbstractItemModel -------------------------------------------------------------
@@ -279,13 +446,21 @@ class PlanModel(QAbstractItemModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if index.column() == 0:
+        if index.column() == 0 and self._editable:
             flags |= Qt.ItemFlag.ItemIsUserCheckable
         return flags
 
     def _cells(self, node: Node) -> list[str]:
-        """Display text for the columns between Kind and Size."""
+        """Display text for the columns between the first one and Size."""
         action = node.action
+        if self._mode == FOLDER_TREE:
+            if action is None:
+                return ["", f"{len(_subtree_actions(node))} items", ""]
+            return [
+                str(action.kind),
+                _dash(str(action.dst) if action.dst is not None else ""),
+                action.reason,
+            ]
         if action is None:
             count = f"{len(node.children)} items"
             if self._rename_layout:
@@ -307,9 +482,11 @@ class PlanModel(QAbstractItemModel):
 
     def _tooltip(self, node: Node, column: int) -> str | None:
         action = node.action
+        name = self._columns[column]
+        if name == "Name":
+            return str(node.path) if node.path is not None else None
         if action is None:
             return node.label if column == 0 else None
-        name = self._columns[column]
         if name == "Folder":
             return str(action.src.parent) if action.src is not None else None
         if name in ("Source", "Old name"):
@@ -328,28 +505,26 @@ class PlanModel(QAbstractItemModel):
         action = node.action
         last = len(self._columns) - 1
         if role == Qt.ItemDataRole.CheckStateRole and column == 0:
-            if action is None:
+            if action is None or node.children:
                 return self._group_state(node)
             return Qt.CheckState.Checked if action.selected else Qt.CheckState.Unchecked
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip(node, column)
-        if role == Qt.ItemDataRole.DisplayRole:
-            if column == 0:
-                return str(action.kind) if action is not None else self.group_label(node)
-            if column == last:
-                return human_size(self.size_of(node))
-            return self._cells(node)[column - 1]
-        if role == SORT_ROLE:
+        if role in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
             if column == last:
                 size = self.size_of(node)
-                return -1 if size is None else size
+                if role == SORT_ROLE:
+                    return -1 if size is None else size
+                return human_size(size)
             if column == 0:
-                return str(action.kind) if action is not None else self.group_label(node)
+                if self._mode == FOLDER_TREE or action is None:
+                    return self.group_label(node)
+                return str(action.kind)
             return self._cells(node)[column - 1]
         return None
 
     def setData(self, index: AnyIndex, value: Any, role: int = 2) -> bool:  # type: ignore[override]
-        if role != Qt.ItemDataRole.CheckStateRole or index.column() != 0:
+        if role != Qt.ItemDataRole.CheckStateRole or index.column() != 0 or not self._editable:
             return False
         node = self.node_at(index)
         if node is None:
@@ -391,7 +566,10 @@ class _PlanProxy(QSortFilterProxyModel):
             return False
         if not self._text:
             return True
-        group = self._model.group_label(node.parent) if node.parent is not None else ""
+        parent = node.parent
+        group = (
+            self._model.group_label(parent) if parent is not None and parent.path is None else ""
+        )
         haystack = " ".join(
             (str(action.src or ""), str(action.dst or ""), action.reason, group)
         ).casefold()
@@ -422,6 +600,13 @@ class PlanTable(QWidget):
         self.filter_edit.setClearButtonEnabled(True)
         self.kind_combo = QComboBox()
         self.kind_combo.addItem(ALL_KINDS)
+        self.view_combo = QComboBox()
+        for mode, label in VIEW_LABELS.items():
+            self.view_combo.addItem(label, mode)
+        self.view_combo.setToolTip(
+            "Grouped: one row per group. Folder tree: the folders the actions are in, with "
+            "check boxes that cover everything inside a folder."
+        )
         self.totals_label = QLabel("No plan")
 
         self.view = QTreeView()
@@ -439,6 +624,8 @@ class PlanTable(QWidget):
         top = QHBoxLayout()
         top.addWidget(self.filter_edit, 1)
         top.addWidget(self.kind_combo)
+        top.addWidget(QLabel("View:"))
+        top.addWidget(self.view_combo)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top)
@@ -447,6 +634,7 @@ class PlanTable(QWidget):
 
         self.filter_edit.textChanged.connect(self._filters_changed)
         self.kind_combo.currentIndexChanged.connect(self._filters_changed)
+        self.view_combo.currentIndexChanged.connect(self._view_chosen)
         self._model.checksChanged.connect(self._on_checks_changed)
         selection = self.view.selectionModel()
         selection.currentChanged.connect(self._on_current_changed)
@@ -482,12 +670,77 @@ class PlanTable(QWidget):
         node = self._current_node()
         if node is None:
             return None
-        return node.label if node.action is None else node.action.group_id
+        if node.action is None:
+            return None if node.path is not None else node.label  # a folder is no group
+        return node.action.group_id
+
+    def view_mode(self) -> str:
+        """``GROUPED`` or ``FOLDER_TREE``."""
+        return self._model.mode
+
+    def set_view_mode(self, mode: str) -> None:
+        """Show the plan grouped or as a folder tree. The plan and its checks stay as they are."""
+        if mode not in VIEW_LABELS:
+            raise ValueError(f"unknown plan view {mode!r}")
+        index = self.view_combo.findData(mode)
+        if self.view_combo.currentIndex() != index:
+            self.view_combo.blockSignals(True)
+            self.view_combo.setCurrentIndex(index)
+            self.view_combo.blockSignals(False)
+        if mode == self._model.mode:
+            return
+        self._load(
+            self._model.plan, self._model.tool_id, self._model.sizes(), keep=False, mode=mode
+        )
+
+    def select_actions(self, indices: Iterable[int]) -> int:
+        """Select the rows of these plan actions (opening their folders) and scroll to the
+        first. Rows hidden by the filter are skipped. Returns how many rows were selected."""
+        selection = self.view.selectionModel()
+        selection.clearSelection()
+        first: QModelIndex | None = None
+        count = 0
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        for action_index in indices:
+            node = self._model.node_for_action(action_index)
+            if node is None:
+                continue
+            proxy_index = self._proxy.mapFromSource(self._model.index_of(node))
+            if not proxy_index.isValid():
+                continue
+            parent = proxy_index.parent()
+            while parent.isValid():
+                self.view.setExpanded(parent, True)
+                parent = parent.parent()
+            selection.select(proxy_index, flags)
+            count += 1
+            if first is None:
+                first = proxy_index
+        if first is not None:
+            selection.setCurrentIndex(first, QItemSelectionModel.SelectionFlag.NoUpdate)
+            self.view.scrollTo(first)
+        return count
+
+    def selected_action_indices(self) -> list[int]:
+        """The plan positions of the action rows that are selected (highlighted) in the view."""
+        result: list[int] = []
+        for proxy_index in self.view.selectionModel().selectedRows(0):
+            node = self._model.node_at(self._proxy.mapToSource(proxy_index))
+            if node is not None and node.action is not None:
+                result.append(node.index)
+        return result
 
     def set_action_checked(self, index: int, checked: bool) -> None:
         node = self._model.node_for_action(index)
         if node is not None:
             self._model.set_node_checked(node, checked)
+
+    def editable(self) -> bool:
+        return self._model.editable
+
+    def set_editable(self, editable: bool) -> None:
+        """Allow or forbid changing the check boxes (the tool page forbids it while busy)."""
+        self._model.set_editable(editable)
 
     def totals_text(self) -> str:
         return self._model.totals_text()
@@ -497,18 +750,25 @@ class PlanTable(QWidget):
     def _current_node(self) -> Node | None:
         return self._model.node_at(self._proxy.mapToSource(self.view.currentIndex()))
 
+    def _parents(self) -> list[Node]:
+        """Every row that has children (groups, folders, folder actions)."""
+        return [n for n in self._model.all_nodes() if n.children]
+
     def _expanded_groups(self) -> tuple[set[str], set[str]]:
-        """Group ids that are expanded, and every group id currently in the model."""
+        """Keys of the rows that are expanded, and of every row with children in the model."""
         expanded: set[str] = set()
         known: set[str] = set()
-        for group in self._model.top:
-            if group.action is not None:
-                continue
-            known.add(group.label)
+        for group in self._parents():
+            known.add(group.key)
             proxy_index = self._proxy.mapFromSource(self._model.index_of(group))
             if proxy_index.isValid() and self.view.isExpanded(proxy_index):
-                expanded.add(group.label)
+                expanded.add(group.key)
         return expanded, known
+
+    def _view_chosen(self, index: int) -> None:
+        mode = self.view_combo.itemData(index)
+        if isinstance(mode, str):
+            self.set_view_mode(mode)
 
     def _load(
         self,
@@ -517,6 +777,7 @@ class PlanTable(QWidget):
         sizes: Sequence[int | None] | None,
         *,
         keep: bool,
+        mode: str | None = None,
     ) -> None:
         expanded: set[str] = set()
         known: set[str] = set()
@@ -527,7 +788,7 @@ class PlanTable(QWidget):
             current_action = node.action if node is not None else None
         self.view.setUpdatesEnabled(False)
         try:
-            self._model.load(plan, tool_id, sizes)
+            self._model.load(plan, tool_id, sizes, mode)
             self._sync_kinds()
             self._proxy.set_filters(self.filter_edit.text(), self._kind_filter())
             self._restore_view(keep, expanded, known, current_action)
@@ -546,19 +807,17 @@ class PlanTable(QWidget):
         known: set[str],
         current_action: PlannedAction | None,
     ) -> None:
-        groups = [n for n in self._model.top if n.action is None]
+        groups = self._parents()
         auto_open = len(groups) <= self.MAX_AUTO_EXPAND_GROUPS
         for group in groups:
             proxy_index = self._proxy.mapFromSource(self._model.index_of(group))
             if not proxy_index.isValid():
                 continue
             if keep:
-                # Open groups stay open. A group id we have not seen (a keeper that just
-                # changed) opens too.
-                self.view.setExpanded(
-                    proxy_index, group.label in expanded or group.label not in known
-                )
-            elif auto_open:
+                # Open rows stay open. A row we have not seen (a keeper that just changed)
+                # opens too.
+                self.view.setExpanded(proxy_index, group.key in expanded or group.key not in known)
+            elif auto_open or (group.parent is None and self._model.mode == FOLDER_TREE):
                 self.view.setExpanded(proxy_index, True)
         plan = self._model.plan
         if current_action is not None and plan is not None:
@@ -578,6 +837,9 @@ class PlanTable(QWidget):
         self.view.setColumnWidth(0, 190)
         self.view.setColumnWidth(last, 90)
         self.view.setColumnWidth(last - 1, 280)
+        if self._model.mode == FOLDER_TREE:
+            self.view.setColumnWidth(0, 340)
+            self.view.setColumnWidth(1, 80)
 
     def _sync_kinds(self) -> None:
         previous = self.kind_combo.currentText()

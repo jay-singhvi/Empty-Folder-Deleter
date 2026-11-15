@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, cast
 
 import typer
@@ -22,6 +23,7 @@ from various_tools.cli.state import (
     EXIT_FAILED,
     CliState,
     confirm,
+    err,
     fail,
     get_state,
     note,
@@ -29,7 +31,7 @@ from various_tools.cli.state import (
     read_settings_file,
     usage_error,
 )
-from various_tools.core.deps import TOOL_SPECS
+from various_tools.core.deps import TOOL_SPECS, install_hint, probe_ollama, probe_version
 from various_tools.core.schema import FieldSpec, describe, format_value, parse_value
 from various_tools.core.settings import Settings, save_settings
 
@@ -112,6 +114,41 @@ def _current(settings: Settings, key: Key) -> Any:
 
 def _shown(value: Any) -> str:
     return format_value(value)
+
+
+def _check_program(program: str, path: str, timeout: float) -> str:
+    """Plan §3.5: a program path is saved only after its version command works. Returns it."""
+    if not path:
+        usage_error(
+            f"Give the path of {program}. To go back to finding it by itself, run: "
+            f"various-tools config unset external_tools.{program}.path"
+        )
+    exe = Path(path)
+    try:
+        is_file = exe.is_file()
+    except OSError:
+        is_file = False
+    if not is_file:
+        fail(f"Not saved: there is no file at {path}.")
+    version = probe_version(exe, TOOL_SPECS[program].version_args, timeout)
+    if version is None:
+        fail(
+            f"Not saved: {path} did not report a version, so it does not look like a working "
+            f"{program}. Install it with: {install_hint(program)}"
+        )
+    return version
+
+
+def _probe_ollama(url: str, timeout: float) -> None:
+    """Ask the Ollama server for its version. An unreachable server only warns: it may be off."""
+    version = probe_ollama(url, timeout)
+    if version is None:
+        err().print(
+            f"[bold yellow]warning:[/bold yellow] Ollama did not answer at {escape(url)}. "
+            "Saved anyway; start Ollama (or fix the address) before using the model check."
+        )
+    else:
+        note(f"Ollama {version} answered at {url}.")
 
 
 @config_app.command("show")
@@ -199,6 +236,14 @@ def set_(
         table[resolved.program] = cleaned
         raw[_TOOLS_FIELD] = table
     candidate = _validate_only(raw)
+    if resolved.program is not None and resolved.program != "ollama":
+        given = str(_current(candidate, resolved) or "")
+        version = _check_program(resolved.program, given, candidate.version_check_timeout_s)
+        note(f"{resolved.program} works: {version}")
+    elif resolved.program == "ollama" or resolved.field == "ollama_url":
+        url = _current(candidate, resolved)
+        if url:
+            _probe_ollama(str(url), candidate.ollama_probe_timeout_s)
     changes_default = _current(candidate, resolved) != _current(Settings(), resolved)
     if (
         spec.locked

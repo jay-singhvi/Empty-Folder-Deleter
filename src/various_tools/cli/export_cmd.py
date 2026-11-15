@@ -7,6 +7,7 @@ run. The format comes from the file suffix, or from ``--format``. The same write
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated
@@ -20,8 +21,10 @@ from various_tools.core.plan import Plan, RunResult
 from various_tools.tools.base import Tool
 
 
-def check_export_target(target: str | None, fmt: str | None) -> None:
-    """Fail early (exit 2) on a bad ``--export`` name or format, before any scan or apply runs."""
+def check_export_target(target: str | None, fmt: str | None, *, force: bool = False) -> None:
+    """Fail early, before any scan or apply runs: exit 2 on a bad ``--export`` name or format,
+    exit 1 when the file already exists and ``--force`` was not given (nothing is overwritten
+    without asking for it)."""
     if target is None:
         if fmt:
             usage_error("--export-format needs --export FILE.")
@@ -30,6 +33,8 @@ def check_export_target(target: str | None, fmt: str | None) -> None:
         report.format_for(Path(target), fmt)
     except ValueError as exc:
         usage_error(str(exc))
+    if not force and os.path.lexists(target):
+        fail(f"{target} already exists. Add --force to overwrite it, or choose another name.")
 
 
 def _write_failed(exc: OSError) -> None:
@@ -97,11 +102,14 @@ def make_export_command(tools: Mapping[str, Tool]):
             bool,
             typer.Option("--no-thumbnails", help="Leave the previews out of the HTML report."),
         ] = False,
+        force: Annotated[
+            bool, typer.Option("--force", help="Overwrite OUTPUT if it already exists.")
+        ] = False,
     ) -> None:
         """Export a saved plan or a run from the history to CSV, Excel, HTML or text."""
         if (plan_file is None) == (run_id is None):
             usage_error("Give exactly one of --plan FILE or --run RUN_ID.")
-        check_export_target(output, fmt)
+        check_export_target(output, fmt, force=force)
         target = Path(output)
         try:
             if plan_file is not None:

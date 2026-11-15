@@ -4,6 +4,7 @@ also under ``tmp_path``, so the journal and the presets never touch the real use
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,9 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from various_tools.cli.main import app
+from various_tools.core import journal as journal_module
+from various_tools.core import plan as plan_module
+from various_tools.core import recycle as recycle_module
 
 
 @dataclass
@@ -53,6 +57,26 @@ class Cli:
     @property
     def presets(self) -> Path:
         return self.state / "presets.json"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_recycle_bin(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Apply and undo never reach the real Recycle Bin: trashing is a plain delete inside the
+    temp folder, and undo finds no bin folder to restore from."""
+    calls: list[str] = []
+
+    def fake_send2trash(path: object) -> None:
+        text = str(path)
+        calls.append(text)
+        if os.path.isdir(text):
+            os.rmdir(text)
+        else:
+            os.remove(text)
+
+    monkeypatch.setattr(plan_module, "send2trash", fake_send2trash)
+    monkeypatch.setattr(journal_module, "send2trash", fake_send2trash)
+    monkeypatch.setattr(recycle_module, "current_user_bin", lambda _original: None)
+    return calls
 
 
 @pytest.fixture

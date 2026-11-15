@@ -5,7 +5,9 @@ adds its commands. Everything else is a fixed command: ``list``, ``history``, ``
 ``config``, ``presets``, ``export``, ``version`` and ``duplicates explain``.
 
 Global options go before the command: ``various-tools --config FILE --exiftool PATH ... <command>``.
-They apply to that run only, and nothing given on the command line is saved to the settings.
+The program flags (``--exiftool``, ``--ffmpeg``, ``--ffprobe``, ``--ollama-url``) are also accepted
+after every ``TOOL scan``, ``TOOL apply`` and ``doctor``, where they win over the global ones. They
+apply to that run only, and nothing given on the command line is saved to the settings.
 
 Exit codes: 0 done, 1 failure, refusal, partial apply or declined confirmation, 2 usage or
 validation error, 130 cancelled with Ctrl+C.
@@ -21,9 +23,11 @@ import typer
 
 from various_tools.cli.commands import doctor, history, make_list_command, undo, version
 from various_tools.cli.config_cmd import config_app
+from various_tools.cli.download_cmd import download
 from various_tools.cli.explain_cmd import explain_command
 from various_tools.cli.export_cmd import make_export_command
 from various_tools.cli.presets_cmd import build_presets_app
+from various_tools.cli.schedule_cmd import build_schedule_app
 from various_tools.cli.state import CONFIG_ENV_VAR, CliState
 from various_tools.cli.toolcmds import build_tool_app
 from various_tools.core.settings import default_settings_path
@@ -107,8 +111,10 @@ def build_app() -> typer.Typer:
     app.command("undo")(undo)
     app.command("doctor")(doctor)
     app.command("export")(make_export_command(tools))
+    app.command("download")(download)
     app.add_typer(config_app, name="config")
     app.add_typer(build_presets_app(tools), name="presets")
+    app.add_typer(build_schedule_app(tools), name="schedule")
     app.command("version")(version)
     for tool in tools.values():
         tool_app = build_tool_app(tool)

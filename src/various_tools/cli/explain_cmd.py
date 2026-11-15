@@ -8,15 +8,24 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.table import Table
 from rich.text import Text
 
 from various_tools.cli.state import EXIT_FAILED, fail, out
+from various_tools.core.onedrive import CloudOnlyFileError, SyncStatus, get_sync_status
 from various_tools.tools.duplicates.explain import explain
 from various_tools.tools.duplicates.images import ImageRules
+
+
+def _cloud_only(path: Path) -> NoReturn:
+    fail(
+        f"skipped: cloud-only: {path}. It was not opened or downloaded. Make it available on "
+        "this device in OneDrive first (Always keep on this device), then try again.",
+        EXIT_FAILED,
+    )
 
 
 def explain_command(
@@ -53,8 +62,14 @@ def explain_command(
         "pixel_block_max": pixel_block_max,
     }
     rules = replace(ImageRules(), **{k: v for k, v in given.items() if v is not None})
+    # Rule 3: a cloud-only OneDrive file is never opened, so nothing is downloaded.
+    for path in (a, b):
+        if get_sync_status(path) is SyncStatus.CLOUD_ONLY:
+            _cloud_only(path)
     try:
         report = explain(a, b, rules)
+    except CloudOnlyFileError as exc:
+        _cloud_only(exc.path)
     except (ValueError, OSError) as exc:
         fail(str(exc), EXIT_FAILED)
     console = out()

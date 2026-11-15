@@ -2,18 +2,25 @@
 
 Tool pages are created the first time they are opened, so start-up stays quick however many
 tools are registered. History and Settings are always at the bottom of the sidebar.
+
+Closing: no worker may outlive the window. While an apply or an undo runs, closing asks "A run is
+in progress. Stop it and close?". On yes every job is told to stop and the window stays open
+(disabled) until the last worker has finished, then closes; on no everything keeps running.
+Scans and other read-only jobs are cancelled and waited for without a question.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QTreeWidget,
@@ -29,6 +36,7 @@ from various_tools.gui.settings_page import SettingsPage
 from various_tools.gui.state import AppState
 from various_tools.gui.tool_page import ToolPage
 from various_tools.gui.widgets.log_panel import LogBridge, LogPanel
+from various_tools.gui.workers import active_workers, cancel_all
 from various_tools.tools.base import CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -37,6 +45,22 @@ APP_TITLE = "Various Tools"
 HISTORY_ID = "__history__"
 SETTINGS_ID = "__settings__"
 _PAGE_ROLE = Qt.ItemDataRole.UserRole
+CLOSE_QUESTION = "A run is in progress. Stop it and close?"
+CLOSE_POLL_MS = 100
+
+
+def _default_confirm(parent: QWidget) -> Callable[[str, str], bool]:
+    def confirm(title: str, text: str) -> bool:
+        answer = QMessageBox.question(
+            parent,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    return confirm
 
 
 class MainWindow(QMainWindow):
@@ -51,6 +75,13 @@ class MainWindow(QMainWindow):
         self.state = state
         self.setWindowTitle(f"{APP_TITLE} {__version__}")
         self.resize(1200, 820)
+        # Tests replace this so no message box opens.
+        self.confirm: Callable[[str, str], bool] = _default_confirm(self)
+        self.inform: Callable[[str, str], None] = lambda _title, _text: None
+        self.closing = False  # a close was confirmed; waiting for the workers to finish
+        self._close_timer = QTimer(self)
+        self._close_timer.setInterval(CLOSE_POLL_MS)
+        self._close_timer.timeout.connect(self._close_when_idle)
 
         # ----- sidebar ---------------------------------------------------------------------
         self.search_edit = QLineEdit()
@@ -103,7 +134,7 @@ class MainWindow(QMainWindow):
 
         self.search_edit.textChanged.connect(self.filter_tools)
         self.sidebar.currentItemChanged.connect(self._item_changed)
-        self.history_page.runUndone.connect(lambda _run: None)
+        self.history_page.runUndone.connect(self._run_undone)
         self.statusBar().showMessage("Ready")
 
     # ----- sidebar ----------------------------------------------------------------------------
@@ -187,6 +218,7 @@ class MainWindow(QMainWindow):
         if page is None:
             page = ToolPage(self.state, self.state.tools[tool_id])
             page.runApplied.connect(lambda _run: self.history_page.reload())
+            page.runUndone.connect(self._run_undone)
             page.busyChanged.connect(self._busy_changed)
             self.stack.addWidget(page)
             self.tool_pages[tool_id] = page
@@ -222,10 +254,56 @@ class MainWindow(QMainWindow):
         return page
 
     def _busy_changed(self, busy: bool) -> None:
-        self.statusBar().showMessage("Working…" if busy else "Ready")
+        if not self.closing:
+            self.statusBar().showMessage("Working…" if busy else "Ready")
+
+    def _run_undone(self, run_id: int) -> None:
+        """After any undo (History or a tool page), every page shows the run's new state."""
+        if self.closing:
+            return
+        self.history_page.reload()
+        for page in self.tool_pages.values():
+            page.refresh_undo(run_id)
+
+    # ----- closing ----------------------------------------------------------------------------
+
+    def run_in_progress(self) -> bool:
+        """An apply or an undo is running (a job that changes files and the journal)."""
+        return any(worker.writes for worker in active_workers())
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not active_workers():
+            self._really_close(event)
+            return
+        event.ignore()
+        if self.closing:
+            return  # already stopping; the window closes when the last worker is done
+        if self.run_in_progress() and not self.confirm("Close Various Tools", CLOSE_QUESTION):
+            return  # keep running
+        self._stop_everything()
+
+    def _stop_everything(self) -> None:
+        self.closing = True
         for page in self.tool_pages.values():
             page.shutdown()
+        self.history_page.shutdown()
+        cancel_all()
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(False)
+        self.statusBar().showMessage(
+            "Stopping: the window closes as soon as the current step has finished…"
+        )
+        self._close_timer.start()
+
+    def _close_when_idle(self) -> None:
+        if active_workers():
+            cancel_all()  # a job started by a late signal stops too
+            return
+        self._close_timer.stop()
+        self.close()
+
+    def _really_close(self, event: QCloseEvent) -> None:
+        self._close_timer.stop()
         logging.getLogger("various_tools").removeHandler(self.log_bridge)
         super().closeEvent(event)

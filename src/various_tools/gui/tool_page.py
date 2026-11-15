@@ -4,13 +4,29 @@ Everything here is generic. The page is built from the tool's options model thro
 :class:`~various_tools.gui.widgets.schema_form.SchemaForm`. The only per-tool touches are the
 duplicates compare view (``COMPARE_TOOLS``) and the rename live preview (``LIVE_PREVIEW_TOOLS``).
 
+Optional tool attributes (capabilities, read with ``getattr``; no tool id is ever checked):
+
+* ``plan_view = "tree"``: the plan opens in the folder-tree view (the person can switch);
+* ``size_tree(plan)``: a "Size map" tab next to the plan, a treemap of that tree;
+* ``extras``: :class:`~various_tools.tools.base.ToolExtra` items, one button each, run on a file
+  the person picks, in a worker with a normal run context.
+
+A plan whose scan skipped cloud-only files (``Plan.cloud_only``) gets a banner with "Download
+these N files…", which asks first and downloads in a cancellable worker.
+
 Safety (AGENTS.md): Scan never changes the disk. Apply is a separate button that always asks for
 confirmation, and asks a second time when a selected action is a permanent delete. Every apply
 runs through the tool's ``apply()``, which journals each action, so History can undo it.
+
+Apply works on a copy of the plan taken before the confirmation, so nothing the person does while
+it runs (check boxes, Select all, "Keep this one") can change what the worker is doing. While an
+apply is being confirmed or runs, plan editing is switched off, the compare dialog is closed, and
+no scan (not even the rename live preview) can start.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from collections import Counter
@@ -18,8 +34,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import shiboken6
 from pydantic import ValidationError
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -33,17 +51,27 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from various_tools.cli.clipboard import (
+    ClipboardText,
+    read_for_clipboard,
+    wants_clipboard,
+    written_file,
+)
+from various_tools.core import onedrive
 from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
 from various_tools.gui.state import AppState
-from various_tools.gui.widgets.plan_table import PlanTable
+from various_tools.gui.undo_rules import UndoInfo, read_undo_info
+from various_tools.gui.widgets.plan_table import FOLDER_TREE, PlanTable
 from various_tools.gui.widgets.schema_form import SchemaForm
+from various_tools.gui.widgets.size_map import SizeMapView, actions_under
 from various_tools.gui.workers import Worker, tool_worker
 from various_tools.tools.base import Tool, ToolOptions
 
@@ -58,6 +86,7 @@ Confirm = Callable[[str, str], bool]
 Inform = Callable[[str, str], None]
 AskText = Callable[[str, str, str], str | None]
 ChooseExport = Callable[[], tuple[str, str] | None]
+ChooseExtraPath = Callable[[Any], str | None]  # a tool extra -> the chosen file, or None
 
 
 def missing_programs(notes: list[str]) -> list[str]:
@@ -86,6 +115,12 @@ def apply_summary(plan: Plan, permanent_delete: bool) -> str:
         lines.append("Some items will be PERMANENTLY deleted. You will be asked again.")
     lines.append("Moves and renames can be undone from History.")
     return "\n".join(lines)
+
+
+def undo_info_from_result(result: RunResult) -> UndoInfo:
+    """What the undo rule needs, straight from an apply's outcomes (no journal read)."""
+    done = Counter(o.kind for o in result.outcomes if o.status == "done")
+    return UndoInfo(result.run_id, result.status, dict(done))
 
 
 def result_summary(result: RunResult) -> str:
@@ -124,6 +159,18 @@ def _default_ask_text(parent: QWidget) -> AskText:
     return ask
 
 
+def _default_choose_extra_path(parent: QWidget) -> ChooseExtraPath:
+    def choose(extra: Any) -> str | None:
+        title = str(extra.label)
+        if extra.path_kind == "save_file":
+            path, _ = QFileDialog.getSaveFileName(parent, title, "", extra.file_filter)
+        else:
+            path, _ = QFileDialog.getOpenFileName(parent, title, "", extra.file_filter)
+        return path or None
+
+    return choose
+
+
 def _default_choose_export(parent: QWidget) -> ChooseExport:
     def choose() -> tuple[str, str] | None:
         from various_tools.core.report import EXPORT_FILTER
@@ -135,28 +182,36 @@ def _default_choose_export(parent: QWidget) -> ChooseExport:
 
 
 class ToolPage(QWidget):
-    """The page for one tool. Emits ``runApplied(run_id)`` after an apply was journaled."""
+    """The page for one tool. Emits ``runApplied(run_id)`` after an apply was journaled and
+    ``runUndone(run_id)`` after this page undid a run."""
 
     runApplied = Signal(int)
+    runUndone = Signal(int)
     busyChanged = Signal(bool)
+    clipboardCopied = Signal(str)
 
     def __init__(self, state: AppState, tool: Tool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
         self.tool = tool
         self.plan: Plan | None = None
+        self.applied_plan: Plan | None = None  # the copy the last apply worked on
         self.result: RunResult | None = None
         self.last_run_id: int | None = None
+        self.undo_info: UndoInfo | None = None  # whether last_run_id can still be undone
         self.worker: Worker | None = None
         self.compare_dialog: QWidget | None = None
         self._applied = False
         self._live = False  # the running job is a live-preview scan; the form stays editable
+        self._apply_pending = False  # the Apply confirmation is open
+        self._closing = False  # the window is closing: no new jobs, no message boxes
 
         # Hooks that tests replace so no modal dialog blocks.
         self.confirm: Confirm = _default_confirm(self)
         self.inform: Inform = _default_inform(self)
         self.ask_text: AskText = _default_ask_text(self)
         self.choose_export: ChooseExport = _default_choose_export(self)
+        self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
 
         # ----- header and presets ------------------------------------------------------
         title = QLabel(f"<h2>{tool.name}</h2>")
@@ -174,7 +229,9 @@ class ToolPage(QWidget):
         presets_row.addWidget(self.delete_preset_button)
 
         # ----- options form ------------------------------------------------------------
-        self.form = SchemaForm(tool.Options, self._initial_values())
+        self.form = SchemaForm(
+            tool.Options, self._initial_values(), load_choices=self._choices_worker
+        )
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
         form_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -235,12 +292,52 @@ class ToolPage(QWidget):
         self.locate_buttons: dict[str, QPushButton] = {}
         self.missing_banner.setVisible(False)
 
+        # ----- cloud-only banner (AGENTS.md rule 3: download only when asked) -----------
+        self.cloud_banner = QFrame()
+        self.cloud_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        cloud_layout = QHBoxLayout(self.cloud_banner)
+        self.cloud_label = QLabel()
+        self.cloud_label.setWordWrap(True)
+        self.download_button = QPushButton("Download these files…")
+        self.download_button.setToolTip(
+            "Ask OneDrive to download the skipped files to this device, so the next scan can "
+            "read them. Asks first."
+        )
+        cloud_layout.addWidget(self.cloud_label, 1)
+        cloud_layout.addWidget(self.download_button)
+        self.cloud_banner.setVisible(False)
+
+        # ----- tool extras (for example catalog export and import) ----------------------
+        self.extras: tuple[Any, ...] = tuple(getattr(tool, "extras", ()) or ())
+        self.extra_buttons: dict[str, QPushButton] = {}
+        extras_row = QHBoxLayout()
+        for extra in self.extras:
+            button = QPushButton(f"{extra.label}…")
+            button.setToolTip(extra.description)
+            button.clicked.connect(lambda _c=False, e=extra: self.run_extra(e))
+            extras_row.addWidget(button)
+            self.extra_buttons[extra.id] = button
+        extras_row.addStretch(1)
+
         # ----- results -----------------------------------------------------------------
         self.notes_view = QPlainTextEdit()
         self.notes_view.setReadOnly(True)
         self.notes_view.setMaximumHeight(90)
         self.notes_view.setPlaceholderText("Scan notes appear here.")
         self.table = PlanTable()
+        if getattr(tool, "plan_view", None) == FOLDER_TREE:
+            self.table.set_view_mode(FOLDER_TREE)
+        # A tool that can build a size tree from its plan gets a "Size map" tab (plan 7.1).
+        self.size_map: SizeMapView | None = None
+        results: QWidget = self.table
+        if callable(getattr(tool, "size_tree", None)):
+            self.size_map = SizeMapView()
+            self.results_tabs = QTabWidget()
+            self.results_tabs.addTab(self.table, "Plan")
+            self.results_tabs.addTab(self.size_map, "Size map")
+            self.size_map.folderChosen.connect(self._size_map_chose)
+            self.size_map.tickRequested.connect(self.tick_folder)
+            results = self.results_tabs
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
@@ -253,11 +350,14 @@ class ToolPage(QWidget):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.addLayout(buttons)
+        if self.extras:
+            bottom_layout.addLayout(extras_row)
         bottom_layout.addWidget(self.progress_bar)
         bottom_layout.addWidget(self.status_label)
         bottom_layout.addWidget(self.missing_banner)
+        bottom_layout.addWidget(self.cloud_banner)
         bottom_layout.addWidget(self.notes_view)
-        bottom_layout.addWidget(self.table, 1)
+        bottom_layout.addWidget(results, 1)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(top)
         splitter.addWidget(bottom)
@@ -281,6 +381,7 @@ class ToolPage(QWidget):
         self.undo_button.clicked.connect(lambda _c=False: self.undo_last())
         self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
         self.select_none_button.clicked.connect(lambda _c=False: self.select_all(False))
+        self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
         self.save_preset_button.clicked.connect(lambda _c=False: self.save_preset())
         self.delete_preset_button.clicked.connect(lambda _c=False: self.delete_preset())
         self.preset_combo.activated.connect(self._preset_chosen)
@@ -389,8 +490,11 @@ class ToolPage(QWidget):
         return self.worker is not None
 
     def scan(self, *, quiet: bool = False) -> Worker | None:
-        """Scan in a worker and show the plan. Never changes the disk."""
-        if self.busy:
+        """Scan in a worker and show the plan. Never changes the disk.
+
+        Refused while busy, while an apply is being confirmed, and while the window closes.
+        """
+        if self.busy or self._apply_pending or self._closing:
             return None
         options = self._build_options()
         if options is None:
@@ -404,7 +508,7 @@ class ToolPage(QWidget):
             ctx.report(0, 0, "measuring file sizes")
             return plan, action_sizes(plan)
 
-        worker = tool_worker(self.state, job, with_journal=False, parent=self)
+        worker = tool_worker(self.state, job, with_journal=False)
         worker.succeeded.connect(self._scan_done)
         self._live = quiet
         self._start(worker, "Scanning…" if not quiet else "Updating the preview…")
@@ -419,6 +523,8 @@ class ToolPage(QWidget):
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
         self.notes_view.setPlainText("\n".join(plan.notes))
         self._show_missing(missing_programs(plan.notes))
+        self._show_cloud_only(plan)
+        self._show_size_map(plan)
         count = len(plan.actions)
         if count:
             self._set_status(
@@ -427,12 +533,21 @@ class ToolPage(QWidget):
         else:
             self._set_status("Nothing to do: the scan found no actions.")
 
+    def _applying(self) -> bool:
+        """An apply is being confirmed or is running."""
+        return self._apply_pending or (self.worker is not None and self.worker.writes)
+
     def _form_changed(self) -> None:
-        if self.tool.id in LIVE_PREVIEW_TOOLS:
+        if self.tool.id in LIVE_PREVIEW_TOOLS and not self._applying() and not self._closing:
             self._preview_timer.start()
 
     def _live_preview(self) -> None:
-        """Rename live preview: re-scan (read-only) after the options stop changing."""
+        """Rename live preview: re-scan (read-only) after the options stop changing.
+
+        Never during an apply (pending or running): the preview is dropped, not postponed.
+        """
+        if self._applying() or self._closing:
+            return
         if self.busy:
             self._preview_timer.start()
             return
@@ -443,7 +558,7 @@ class ToolPage(QWidget):
 
     def select_all(self, selected: bool = True) -> int:
         """Check (or uncheck) every action of the plan. Returns how many changed."""
-        if self.plan is None or self._applied or self.busy:
+        if self.plan is None or self._applied or self.busy or self._apply_pending:
             return 0
         changed = self.plan.select_all(selected)
         self.table.refresh()
@@ -453,10 +568,25 @@ class ToolPage(QWidget):
     # ----- apply ------------------------------------------------------------------------------
 
     def apply(self) -> Worker | None:
-        """Ask for confirmation, then apply the checked actions in a worker (journaled)."""
-        if self.busy or self.plan is None or self._applied:
+        """Ask for confirmation, then apply the checked actions in a worker (journaled).
+
+        The worker gets a copy of the plan taken before the question, so later edits to the
+        shown plan cannot reach it. Editing and scans are off until the apply has finished.
+        """
+        if self.busy or self.plan is None or self._applied or self._apply_pending:
             return None
-        plan = self.plan
+        if self._closing:
+            return None
+        self._preview_timer.stop()
+        self._apply_pending = True
+        self._update_buttons()
+        try:
+            return self._confirm_and_apply(copy.deepcopy(self.plan))
+        finally:
+            self._apply_pending = False
+            self._update_buttons()
+
+    def _confirm_and_apply(self, plan: Plan) -> Worker | None:
         selected = plan.selected_actions()
         if not selected:
             self.inform("Apply", "No action is checked, so there is nothing to apply.")
@@ -474,12 +604,16 @@ class ToolPage(QWidget):
             ):
                 self._set_status("Apply cancelled; nothing changed.")
                 return None
+        if self._closing:
+            return None
+        self._close_compare()
         tool = self.tool
+        self.applied_plan = plan
 
         def job(ctx: Any) -> RunResult:
             return tool.apply(plan, ctx)
 
-        worker = tool_worker(self.state, job, with_journal=True, parent=self)
+        worker = tool_worker(self.state, job, with_journal=True)
         worker.succeeded.connect(self._apply_done)
         self._start(worker, "Applying…")
         return worker
@@ -488,6 +622,7 @@ class ToolPage(QWidget):
         assert isinstance(value, RunResult)
         self.result = value
         self.last_run_id = value.run_id
+        self.undo_info = undo_info_from_result(value)
         self._applied = True
         text = result_summary(value)
         failures = [o for o in value.outcomes if o.status == "failed"][:10]
@@ -496,41 +631,113 @@ class ToolPage(QWidget):
         self._set_status(text.splitlines()[0] + " Scan again to see what is left.")
         self.runApplied.emit(value.run_id)
         self._update_buttons()
+        if self._closing:
+            return  # no message box while the window waits to close
+        applied = self.applied_plan
+        if applied is not None and wants_clipboard(applied):
+            self._copy_to_clipboard(value)
         self.inform("Apply finished", text)
 
+    # ----- copy to clipboard ------------------------------------------------------------------
+
+    def _copy_to_clipboard(self, result: RunResult) -> Worker | None:
+        """``copy_to_clipboard``: read the written file in a worker, then copy it (UI thread)."""
+        path = written_file(result)
+        if path is None:
+            self._set_status("Nothing was copied to the clipboard: the run wrote no file.")
+            return None
+
+        def job(_worker: Worker) -> ClipboardText:
+            return read_for_clipboard(path)
+
+        worker = Worker(job)
+        worker.succeeded.connect(self._clipboard_ready)
+        worker.failed.connect(
+            lambda exc: self._set_status(f"Not copied to the clipboard: {exc}", error=True)
+        )
+        worker.start()
+        return worker
+
+    def _clipboard_ready(self, value: object) -> None:
+        if not shiboken6.isValid(self) or not isinstance(value, ClipboardText):
+            return
+        if value.text is None:
+            self._set_status(value.message, error=True)
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            self._set_status("Not copied: there is no clipboard.", error=True)
+            return
+        clipboard.setText(value.text)
+        self._set_status(value.message)
+        self.clipboardCopied.emit(value.message)
+
     # ----- undo -------------------------------------------------------------------------------
+
+    def can_undo(self) -> bool:
+        """The shared rule (``undo_rules``) for the run this page applied last."""
+        info = self.undo_info
+        return self.last_run_id is not None and info is not None and info.undoable
 
     def undo_last(self) -> Worker | None:
         """Undo the run this page applied last (the same as Undo in History)."""
         run_id = self.last_run_id
-        if self.busy or run_id is None:
+        if self.busy or run_id is None or self._apply_pending or self._closing:
+            return None
+        if not self.can_undo():
             return None
         if not self.confirm(
             "Undo",
-            f"Move and rename back everything run {run_id} changed?\n\n"
-            "Items sent to the Recycle Bin must be restored from the Recycle Bin.",
+            f"Undo run {run_id}?\n\nMoves and renames are put back, and items sent to the "
+            "Recycle Bin are restored while they are still there. Anything that cannot be put "
+            "back is listed afterwards.",
         ):
             return None
         journal_path = self.state.settings.journal_path()
+        protection = self.state.settings.protected_paths()
 
-        def job(_worker: Worker) -> UndoReport:
+        def job(_worker: Worker) -> tuple[UndoReport, UndoInfo]:
             with Journal(journal_path) as journal:
-                return undo_run(journal, run_id)
+                report = undo_run(journal, run_id, protection=protection)
+            return report, read_undo_info(journal_path, run_id)
 
-        worker = Worker(job, self)
+        worker = Worker(job, writes=True)
         worker.succeeded.connect(self._undo_done)
         self._start(worker, "Undoing…")
         return worker
 
     def _undo_done(self, value: object) -> None:
-        assert isinstance(value, UndoReport)
-        lines = [f"Run {value.run_id}: {value.status} ({value.reverted} reverted)."]
-        lines += [f"  skipped: {s}" for s in value.skipped[:10]]
-        lines += [f"  failed: {f}" for f in value.failed[:10]]
-        self.last_run_id = None
+        report, info = cast("tuple[UndoReport, UndoInfo]", value)
+        lines = [f"Run {report.run_id}: {report.status} ({report.reverted} reverted)."]
+        lines += [f"  skipped: {s}" for s in report.skipped[:10]]
+        lines += [f"  failed: {f}" for f in report.failed[:10]]
+        self._set_undo_info(info)
         self._set_status(lines[0])
-        self.runApplied.emit(value.run_id)  # History reloads
-        self.inform("Undo finished", "\n".join(lines))
+        self.runUndone.emit(report.run_id)  # History and the other pages refresh
+        if not self._closing:
+            self.inform("Undo finished", "\n".join(lines))
+
+    def refresh_undo(self, run_id: int) -> Worker | None:
+        """Another page undid ``run_id``: read the journal again (in a worker) for the button."""
+        if run_id != self.last_run_id or self._closing:
+            return None
+        journal_path = self.state.settings.journal_path()
+        worker = Worker(lambda _worker: read_undo_info(journal_path, run_id))
+        worker.succeeded.connect(self._undo_info_read)
+        worker.start()
+        return worker
+
+    def _undo_info_read(self, value: object) -> None:
+        if shiboken6.isValid(self) and isinstance(value, UndoInfo):
+            self._set_undo_info(value)
+
+    def _set_undo_info(self, info: UndoInfo) -> None:
+        if info.run_id != self.last_run_id:
+            return
+        self.undo_info = info
+        if not info.undoable:
+            self.last_run_id = None
+        self._update_buttons()
 
     # ----- export -----------------------------------------------------------------------------
 
@@ -566,7 +773,7 @@ class ToolPage(QWidget):
                 return export_result(plan, result, target, fmt, tool_name=name)
             return export_plan(plan, target, fmt, sizes=sizes, tool_name=name)
 
-        worker = Worker(job, self)
+        worker = Worker(job)
         worker.succeeded.connect(lambda written: self._set_status(f"Exported to {written}."))
         self._start(worker, "Exporting…")
         return worker
@@ -578,8 +785,9 @@ class ToolPage(QWidget):
 
         plan = self.plan
         group = group_id or self.table.current_group_id()
-        if plan is None or group is None or self._applied:
+        if plan is None or group is None or self._applied or self._applying() or self._closing:
             return None
+        self._close_compare()
         dialog = CompareDialog(plan, group, self)
         dialog.keeperChanged.connect(self._keeper_changed)
         dialog.setModal(False)
@@ -587,18 +795,220 @@ class ToolPage(QWidget):
         self.compare_dialog = dialog
         return dialog
 
-    def _keeper_changed(self, new_group_id: str) -> None:
-        from various_tools.core.media.thumbs import file_facts
+    def _close_compare(self) -> None:
+        dialog = self.compare_dialog
+        self.compare_dialog = None
+        if dialog is not None and shiboken6.isValid(dialog):
+            dialog.close()
 
+    def _keeper_changed(self, new_group_id: str) -> Worker | None:
+        """The compare dialog swapped a group's keeper: show it now, read the new sizes in a
+        worker (``file_facts`` may block on a network path), then update the size column."""
         plan = self.plan
         if plan is None:
-            return
-        sizes = self.table.sizes()
-        for index, action in enumerate(plan.actions):
-            if action.group_id == new_group_id and action.src is not None and index < len(sizes):
-                sizes[index] = file_facts(action.src).size
-        self.table.refresh(sizes)
+            return None
+        self.table.refresh()
         self._set_status(f"Now keeping {Path(new_group_id).name}.")
+        targets = [
+            (index, action.src)
+            for index, action in enumerate(plan.actions)
+            if action.group_id == new_group_id and action.src is not None
+        ]
+        if not targets:
+            return None
+
+        def job(_worker: Worker) -> list[tuple[int, int | None]]:
+            from various_tools.core.media.thumbs import file_facts
+
+            return [(index, file_facts(src).size) for index, src in targets]
+
+        worker = Worker(job)
+        worker.succeeded.connect(lambda value, p=plan: self._keeper_sizes(p, value))
+        worker.start()
+        return worker
+
+    def _keeper_sizes(self, plan: Plan, value: object) -> None:
+        if not shiboken6.isValid(self) or self.plan is not plan:
+            return  # a new scan replaced the plan meanwhile
+        sizes = self.table.sizes()
+        for index, size in cast("list[tuple[int, int | None]]", value):
+            if index < len(sizes):
+                sizes[index] = size
+        self.table.refresh(sizes)
+
+    # ----- run-time choices (editable drop-downs) ------------------------------------------------
+
+    def _choices_worker(self, source: str) -> Worker | None:
+        """A worker that lists the choices of ``source`` (for example the Ollama models)."""
+        if self._closing:
+            return None
+        from various_tools.core.choices import dynamic_choices
+
+        return tool_worker(self.state, lambda ctx: dynamic_choices(source, ctx), with_journal=False)
+
+    # ----- size map (any tool with a ``size_tree(plan)`` function) --------------------------------
+
+    def _show_size_map(self, plan: Plan) -> None:
+        if self.size_map is None:
+            return
+        builder = getattr(self.tool, "size_tree", None)
+        tree: Any = None
+        if callable(builder):
+            try:
+                tree = builder(plan)  # pure: reads the plan's notes, never the disk
+            except Exception:  # a broken size tree must not break the page
+                log.exception("%s: could not build the size map", self.tool.id)
+        self.size_map.set_tree(tree)
+
+    def _size_map_chose(self, folder: object, recursive: bool) -> int:
+        """A size-map tile was clicked: select the plan rows in that folder."""
+        plan = self.plan
+        if plan is None or not (folder is None or isinstance(folder, Path)):
+            return 0
+        indices = actions_under(plan, folder, recursive=recursive)
+        count = self.table.select_actions(indices)
+        where = folder.name if isinstance(folder, Path) else "the chosen folders"
+        self._set_status(f"{count} listed item(s) in {where or folder}. See the Plan tab.")
+        return count
+
+    def tick_folder(self, folder: object) -> int:
+        """Check the plan's Recycle-Bin rows inside ``folder`` (None: every root).
+
+        Only checks rows; Apply, with its confirmation, is still what sends them to the Recycle
+        Bin. Refused while busy and after the plan was applied. Returns how many were checked.
+        """
+        plan = self.plan
+        if plan is None or self._applied or self.busy or self._apply_pending:
+            return 0
+        if not (folder is None or isinstance(folder, Path)):
+            return 0
+        indices = actions_under(plan, folder, kinds=frozenset({ActionKind.TRASH}))
+        changed = 0
+        for index in indices:
+            if not plan.actions[index].selected:
+                self.table.set_action_checked(index, True)
+                changed += 1
+        self.table.select_actions(indices)
+        self._update_buttons()
+        where = folder.name if isinstance(folder, Path) else "the chosen folders"
+        if indices:
+            self._set_status(
+                f"Ticked {changed} more file(s) in {where or folder} ({len(indices)} listed "
+                "there). Apply sends the ticked files to the Recycle Bin and asks first."
+            )
+        else:
+            self._set_status(f"No listed file is in {where or folder}.")
+        return changed
+
+    # ----- tool extras ---------------------------------------------------------------------------
+
+    def run_extra(self, extra: Any, path: str | None = None) -> Worker | None:
+        """Run one of the tool's extra actions (``tool.extras``) on a file the person picks."""
+        if self.busy or self._apply_pending or self._closing:
+            return None
+        chosen = path if path is not None else self.choose_extra_path(extra)
+        if not chosen:
+            return None
+        target = Path(chosen)
+        run = extra.run
+        label = str(extra.label)
+
+        def job(ctx: Any) -> str:
+            return str(run(target, ctx))
+
+        worker = tool_worker(self.state, job, with_journal=False)
+        worker.succeeded.connect(lambda text, t=label: self._extra_done(t, str(text)))
+        self._start(worker, f"{label}…")
+        # After _start's own handler, so a ValueError's plain message is what stays shown.
+        # Signals from the worker thread are queued, so nothing is missed by connecting now.
+        worker.failed.connect(lambda exc, t=label: self._extra_failed(t, exc))
+        return worker
+
+    def _extra_done(self, label: str, text: str) -> None:
+        self._set_status(f"{label}: {text}")
+        if not self._closing:
+            self.inform(label, text)
+
+    def _extra_failed(self, label: str, exc: object) -> None:
+        if isinstance(exc, ValueError):
+            self._set_status(f"{label}: {exc}", error=True)
+            if not self._closing:
+                self.inform(label, str(exc))
+
+    # ----- cloud-only files (AGENTS.md rule 3) -------------------------------------------------
+
+    def _show_cloud_only(self, plan: Plan) -> None:
+        count = len(plan.cloud_only)
+        if not count:
+            self.cloud_banner.setVisible(False)
+            return
+        files = "file is" if count == 1 else "files are"
+        self.cloud_label.setText(
+            f"{count} {files} cloud-only and were skipped: they are in OneDrive but not on this "
+            "device, so they were not read."
+        )
+        self.download_button.setText(f"Download these {count} files…")
+        self.cloud_banner.setVisible(True)
+
+    def download_cloud_only(self) -> Worker | None:
+        """Ask, then have OneDrive download the files the scan skipped (cancellable)."""
+        plan = self.plan
+        if plan is None or not plan.cloud_only or self.busy or self._apply_pending:
+            return None
+        if self._closing:
+            return None
+        paths = list(plan.cloud_only)
+        count = len(paths)
+        if not self.confirm(
+            "Download cloud-only files",
+            f"Download {count} cloud-only file(s) from OneDrive to this device?\n\n"
+            "They take space on this disk afterwards. Nothing else is changed, and you can "
+            "cancel at any time.",
+        ):
+            self._set_status("Nothing was downloaded.")
+            return None
+        wait = getattr(self.state.settings, "download_wait_seconds", None)
+
+        def job(worker: Worker) -> list[tuple[Path, bool, str]]:
+            results: list[tuple[Path, bool, str]] = []
+            for done, path in enumerate(paths):
+                worker.check_cancelled()
+                worker.report(done, count, f"Downloading {path.name}")
+                if isinstance(wait, int):
+                    ok, detail = onedrive.force_download(path, wait_seconds=wait)
+                else:
+                    ok, detail = onedrive.force_download(path)
+                results.append((path, ok, detail))
+            worker.report(count, count, "Download finished")
+            return results
+
+        worker = Worker(job, writes=True)
+        worker.succeeded.connect(self._download_done)
+        self._start(worker, f"Downloading {count} file(s)…")
+        return worker
+
+    def _download_done(self, value: object) -> None:
+        results = cast("list[tuple[Path, bool, str]]", value)
+        ok = sum(1 for _p, good, _d in results if good)
+        failed = [(p, d) for p, good, d in results if not good]
+        log.info("%s: downloaded %d of %d cloud-only file(s)", self.tool.id, ok, len(results))
+        for path, detail in failed:
+            log.warning("%s: not downloaded: %s (%s)", self.tool.id, path, detail)
+        summary = f"Downloaded {ok} of {len(results)} file(s)."
+        if failed:
+            summary += f" {len(failed)} could not be downloaded; see the log."
+        self._set_status(summary)
+        if self._closing:
+            return
+        if self.confirm("Download finished", f"{summary}\n\nScan again to include them?"):
+            # The download worker is still winding down; scan once it has finished.
+            QTimer.singleShot(0, self._scan_after_download)
+
+    def _scan_after_download(self) -> None:
+        if self.busy:
+            QTimer.singleShot(50, self._scan_after_download)
+            return
+        self.scan()
 
     # ----- missing programs -------------------------------------------------------------------
 
@@ -662,11 +1072,9 @@ class ToolPage(QWidget):
         self._set_status(f"Failed: {type(exc).__name__}: {exc}", error=True)
 
     def _finished(self) -> None:
-        worker = self.worker
+        # The worker object is released by the worker registry once its thread is really done.
         self.worker = None
         self._live = False
-        if worker is not None:
-            worker.deleteLater()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(1 if self.plan is not None else 0)
         self.progress_bar.setFormat("%p%")
@@ -678,13 +1086,23 @@ class ToolPage(QWidget):
             self.worker.cancel()
             self._set_status("Cancelling: waiting for the current step to finish…")
 
-    def shutdown(self, timeout_ms: int = 5000) -> None:
-        """Cancel any running job and wait for it (window close)."""
+    @property
+    def applying(self) -> bool:
+        """An apply or an undo (a job that changes files and the journal) is running."""
+        return self.worker is not None and self.worker.writes
+
+    def shutdown(self) -> None:
+        """The window is closing: stop the live preview, start nothing new, cancel the job.
+
+        Does not wait; the main window keeps itself open until every worker has finished.
+        """
+        self._closing = True
         self._preview_timer.stop()
-        worker = self.worker
-        if worker is not None:
-            worker.cancel()
-            worker.wait(timeout_ms)
+        self._close_compare()
+        if self.worker is not None:
+            self.worker.cancel()
+            self._set_status("Stopping: waiting for the current step to finish…")
+        self._update_buttons()
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status_label.setText(text)
@@ -692,25 +1110,37 @@ class ToolPage(QWidget):
         (log.warning if error else log.info)("%s: %s", self.tool.id, text.splitlines()[0])
 
     def _update_buttons(self) -> None:
-        busy = self.busy
+        # "busy" also covers an Apply confirmation that is open, and a window that is closing.
+        running = self.busy
+        busy = running or self._apply_pending or self._closing
         has_plan = self.plan is not None
         selected = bool(self.plan.selected_actions()) if self.plan is not None else False
         self.scan_button.setEnabled(not busy)
-        self.cancel_button.setEnabled(busy)
+        self.cancel_button.setEnabled(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
         self.export_button.setEnabled(not busy and has_plan)
         can_select = not busy and has_plan and not self._applied
         self.select_all_button.setEnabled(can_select)
         self.select_none_button.setEnabled(can_select)
+        if self.size_map is not None:
+            self.size_map.set_tick_enabled(can_select)
+        for button in self.extra_buttons.values():
+            button.setEnabled(not busy)
+        self.download_button.setEnabled(
+            not busy and self.plan is not None and bool(self.plan.cloud_only)
+        )
+        # No check-box changes while an apply is confirmed or runs (or any job runs).
+        self.table.set_editable(not busy)
         self.compare_button.setEnabled(
             not busy
             and has_plan
             and not self._applied
             and self.table.current_group_id() is not None
         )
-        self.undo_button.setVisible(self.last_run_id is not None)
-        self.undo_button.setEnabled(not busy and self.last_run_id is not None)
-        self.form.setEnabled(not busy or self._live)
+        can_undo = self.can_undo()
+        self.undo_button.setVisible(can_undo)
+        self.undo_button.setEnabled(not busy and can_undo)
+        self.form.setEnabled(not busy or (self._live and not self._closing))
         self.preset_combo.setEnabled(not busy)
         self.save_preset_button.setEnabled(not busy)
         self.delete_preset_button.setEnabled(

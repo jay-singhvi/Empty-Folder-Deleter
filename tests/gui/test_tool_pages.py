@@ -186,20 +186,22 @@ def test_empty_folders_scan_apply_undo(
     assert not page.undo_button.isHidden() and page.undo_button.isEnabled()
     assert page.apply() is None  # a plan is applied once; scan again for a new one
 
-    # History picked the run up.
+    # History picked the run up (it reads the journal in a worker).
     history = window.history_page
+    qtbot.waitUntil(lambda: not history.loading and history.runs_view.rowCount() == 1)
     assert history.runs_view.rowCount() == 1
     assert history.runs_view.item(0, 4).text() == "done"
 
-    # Trash cannot be reversed by Undo, and the report says so.
+    # Undo tries the Recycle Bin. Here there is none (the test fake), so nothing comes back and
+    # the report says to restore by hand. The trash rows stay "done", so Undo stays offered.
     undo(page)
     assert len(dialogs.confirms) == 2 and dialogs.confirms[1][0] == "Undo"
     title, text = dialogs.informs[-1]
     assert title == "Undo finished"
     assert "not undone (0 reverted)" in text
-    assert text.count("not reversible by undo; restore manually") == 4
-    assert page.last_run_id is None
-    assert page.undo_button.isHidden()
+    assert "restore manually from the Recycle Bin" in text
+    assert page.last_run_id == page.result.run_id
+    assert not page.undo_button.isHidden()
     assert names(empty_tree) == ["keep"]
 
 
@@ -576,10 +578,12 @@ def test_media_resize_scan_apply_undo(
     with Image.open(folder / "pic1.jpg") as original:
         assert original.size == (96, 64)  # originals untouched
     undo(page)
+    # Undo recycles unchanged outputs (the Recycle Bin is the test fake); originals stay.
     text = dialogs.informs[-1][1]
-    assert "not undone (0 reverted)" in text
-    assert "not reversible by undo" in text
-    assert names(out) == ["pic1.jpg", "pic2.jpg"]
+    assert "undone (2 reverted)" in text
+    assert not out.exists() or names(out) == []
+    assert names(folder)[:2] == ["pic1.jpg", "pic2.jpg"]
+    assert page.undo_button.isHidden()
 
 
 # ----- project_export -------------------------------------------------------------------------
@@ -609,8 +613,10 @@ def test_project_export_scan_apply_undo(
     text = out.read_text(encoding="utf-8")
     assert "main.py" in text and "print('hello')" in text and "notes.md" in text
     undo(page)
-    assert "not undone (0 reverted)" in dialogs.informs[-1][1]
-    assert out.is_file()
+    # The written export goes to the Recycle Bin (the test fake) because it is unchanged.
+    assert "undone (1 reverted)" in dialogs.informs[-1][1]
+    assert not out.exists()
+    assert page.undo_button.isHidden()
 
 
 # ----- cancel ---------------------------------------------------------------------------------

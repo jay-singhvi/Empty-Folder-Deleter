@@ -106,6 +106,12 @@ class SettingsPage(QWidget):
         self.save_button.clicked.connect(lambda _checked=False: self.save())
         self.revert_button.clicked.connect(lambda _checked=False: self.revert())
         self.defaults_button.clicked.connect(lambda _checked=False: self.restore_defaults())
+        self.tools_panel.settingsSaved.connect(self._panel_saved)
+
+    def _panel_saved(self) -> None:
+        """The programs panel saved the Ollama address: show it in the form too, so a later
+        Save of the form does not put the old address back."""
+        self.form.update_values({"ollama_url": self._state.settings.ollama_url})
 
     # ----- buttons ---------------------------------------------------------------------------
 

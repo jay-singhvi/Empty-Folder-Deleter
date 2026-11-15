@@ -17,13 +17,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import shiboken6
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from pytestqt.qtbot import QtBot
 
+from various_tools.core import journal as journal_module
 from various_tools.core import plan as plan_module
+from various_tools.core import recycle as recycle_module
 from various_tools.gui import app as gui_app
 from various_tools.gui import history_page as history_module
+from various_tools.gui import workers as workers_module
 from various_tools.gui.main_window import MainWindow
 from various_tools.gui.shell import FakeRegistry
 from various_tools.gui.state import AppState
@@ -47,6 +51,8 @@ class Dialogs:
         self.default = True
         self.text: str | None = None
         self.export_choice: tuple[str, str] | None = None
+        self.extra_path: str | None = None  # the file a tool extra's dialog "picks"
+        self.extras_asked: list[str] = []
 
     def confirm(self, title: str, text: str) -> bool:
         self.confirms.append((title, text))
@@ -62,13 +68,18 @@ class Dialogs:
     def choose_export(self) -> tuple[str, str] | None:
         return self.export_choice
 
+    def choose_extra_path(self, extra: Any) -> str | None:
+        self.extras_asked.append(str(extra.id))
+        return self.extra_path
+
     def attach(self, page: Any) -> None:
-        """Replace the hooks the page has (tool pages have all four, others two)."""
+        """Replace the hooks the page has (tool pages have all five, others two)."""
         page.confirm = self.confirm
         page.inform = self.inform
         if isinstance(page, ToolPage):
             page.ask_text = self.ask_text
             page.choose_export = self.choose_export
+            page.choose_extra_path = self.choose_extra_path
 
 
 def toml_value(value: Any) -> str:
@@ -78,17 +89,24 @@ def toml_value(value: Any) -> str:
 
 @pytest.fixture(autouse=True)
 def trashed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Recycle-Bin calls are recorded and carried out as a plain delete in the temp folder."""
+    """Recycle-Bin calls are recorded and carried out as a plain delete in the temp folder.
+
+    That covers apply (``core/plan.py``) and undo, which recycles written outputs
+    (``core/journal.py``). Undo never looks into the real Recycle Bin: there is no bin folder.
+    """
     calls: list[str] = []
 
-    def fake_send2trash(path: str) -> None:
-        calls.append(path)
-        if os.path.isdir(path):
-            os.rmdir(path)
+    def fake_send2trash(path: object) -> None:
+        text = str(path)
+        calls.append(text)
+        if os.path.isdir(text):
+            os.rmdir(text)
         else:
-            os.remove(path)
+            os.remove(text)
 
     monkeypatch.setattr(plan_module, "send2trash", fake_send2trash)
+    monkeypatch.setattr(journal_module, "send2trash", fake_send2trash)
+    monkeypatch.setattr(recycle_module, "current_user_bin", lambda _original: None)
     return calls
 
 
@@ -129,11 +147,12 @@ def _drain_workers(qtbot: QtBot) -> Iterator[None]:
     def idle() -> bool:
         QCoreApplication.processEvents()
         running: list[Worker] = [
+            *workers_module.active_workers(),
             *history_module._RUNNING,  # pyright: ignore[reportPrivateUsage]
             *external_module._RUNNING,  # pyright: ignore[reportPrivateUsage]
             *compare_module._LIVE,  # pyright: ignore[reportPrivateUsage]
         ]
-        return not any(w.isRunning() for w in running)
+        return not any(shiboken6.isValid(w) and w.isRunning() for w in running)
 
     qtbot.waitUntil(idle, timeout=15000)
 
@@ -198,6 +217,7 @@ def make_window(
             state or gui_state, tool=tool, folder=folder, shell_backend=registry
         )
         qtbot.addWidget(window)
+        dialogs.attach(window)  # the close question
         dialogs.attach(window.history_page)
         dialogs.attach(window.settings_page)
         for page in window.tool_pages.values():

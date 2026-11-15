@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -109,6 +109,28 @@ class CliState:
 
     def presets(self) -> PresetStore:
         return PresetStore.for_settings(self.saved_settings())
+
+    def with_programs(
+        self,
+        *,
+        exiftool: str | None = None,
+        ffmpeg: str | None = None,
+        ffprobe: str | None = None,
+        ollama_url: str | None = None,
+    ) -> CliState:
+        """A copy with one-off program paths given on a command (they win over the global ones).
+
+        This is how ``TOOL scan --exiftool PATH`` and ``doctor --ffmpeg PATH`` work: the same as
+        the global options before the command, for this run only. Nothing is saved.
+        """
+        one_off = dict(self.one_off)
+        for name, value in (("exiftool", exiftool), ("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+            if value:
+                one_off[name] = value
+        url = ollama_url or self.ollama_url
+        if url:
+            one_off["ollama"] = url
+        return replace(self, one_off=one_off, ollama_url=url)
 
 
 def get_state(ctx: typer.Context) -> CliState:

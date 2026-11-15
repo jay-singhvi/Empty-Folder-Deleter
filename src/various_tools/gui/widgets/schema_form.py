@@ -23,14 +23,16 @@ Conventions:
 from __future__ import annotations
 
 import html
+import json
 import math
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any, cast
 
+import shiboken6
 from pydantic import BaseModel, ValidationError
 from pydantic_core import InitErrorDetails, PydanticCustomError
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontDatabase, QWheelEvent
+from PySide6.QtGui import QFontDatabase, QShowEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -56,9 +58,14 @@ from PySide6.QtWidgets import (
 
 from various_tools.core.schema import FieldSpec, describe, format_value, parse_value
 from various_tools.gui.widgets.path_picker import PathEdit, PathListEdit
+from various_tools.gui.workers import Worker
 
 ConfirmLocked = Callable[[FieldSpec, QWidget], bool]
 """Called when the person changes a 🔒 value. Return True to allow the change."""
+
+LoadChoices = Callable[[str], Worker | None]
+"""Given a ``choices_from`` source, return a worker (not started) whose result is a list of
+strings, or None when no list can be loaded. The form starts it and fills the drop-down."""
 
 APP_SETTING_TEXT = "(app setting)"
 USE_APP_SETTING_TEXT = "Use app setting"
@@ -331,6 +338,187 @@ class KeyValueEdit(QWidget):
             self.changed.emit()
 
 
+class PairsEdit(QWidget):
+    """A list of text items, each two cells joined by a separator (``widget = "pairs"``).
+
+    Used for the sort-by-type rules (``*.pdf`` | ``Documents/PDF`` is ``*.pdf=Documents/PDF``).
+    An item is split at the first separator. A row whose second cell is empty gives the first
+    cell alone, and a row with both cells empty is ignored. Rows keep their order, which matters
+    (the first matching rule wins), so they can be moved up and down.
+    """
+
+    changed = Signal()
+
+    def __init__(
+        self, headers: Sequence[str], separator: str, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.separator = separator
+        self._silent = False
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(list(headers))
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setMinimumHeight(160)
+        self.add_button = QPushButton("Add", self)
+        self.remove_button = QPushButton("Remove", self)
+        self.up_button = QPushButton("Move up", self)
+        self.down_button = QPushButton("Move down", self)
+        buttons = QVBoxLayout()
+        for button in (self.add_button, self.remove_button, self.up_button, self.down_button):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.table, 1)
+        layout.addLayout(buttons)
+        self.table.itemChanged.connect(self._emit)
+        self.add_button.clicked.connect(lambda _c=False: self.add_row())
+        self.remove_button.clicked.connect(lambda _c=False: self.remove_current())
+        self.up_button.clicked.connect(lambda _c=False: self.move_current(-1))
+        self.down_button.clicked.connect(lambda _c=False: self.move_current(1))
+
+    def rows(self) -> list[tuple[str, str]]:
+        """Every row as ``(first, second)`` text, stripped, blank rows included."""
+        result: list[tuple[str, str]] = []
+        for row in range(self.table.rowCount()):
+            cells = [self.table.item(row, column) for column in (0, 1)]
+            first, second = (c.text().strip() if c is not None else "" for c in cells)
+            result.append((first, second))
+        return result
+
+    def items(self) -> list[str]:
+        """The rows joined with the separator, top to bottom; blank rows are left out."""
+        result: list[str] = []
+        for first, second in self.rows():
+            if not first and not second:
+                continue
+            result.append(f"{first}{self.separator}{second}" if second else first)
+        return result
+
+    def set_items(self, items: Iterable[Any]) -> None:
+        """Replace the rows without emitting ``changed``."""
+        self._silent = True
+        try:
+            self.table.setRowCount(0)
+            for item in items:
+                text = format_value(item)
+                first, sep, second = text.partition(self.separator)
+                self._append(first.strip(), second.strip() if sep else "")
+        finally:
+            self._silent = False
+
+    def add_row(self) -> None:
+        self._append("", "")
+        row = self.table.rowCount() - 1
+        self.table.setCurrentCell(row, 0)
+        item = self.table.item(row, 0)
+        if item is not None and self.table.isVisible():
+            self.table.editItem(item)
+
+    def remove_current(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        self.table.removeRow(row)
+        self.changed.emit()
+
+    def move_current(self, delta: int) -> None:
+        """Move the current row up (-1) or down (+1)."""
+        row = self.table.currentRow()
+        target = row + delta
+        if row < 0 or not 0 <= target < self.table.rowCount():
+            return
+        rows = self.rows()
+        rows[row], rows[target] = rows[target], rows[row]
+        column = max(self.table.currentColumn(), 0)
+        self._silent = True
+        try:
+            for index in (row, target):
+                for col, text in enumerate(rows[index]):
+                    cell = self.table.item(index, col)
+                    if cell is None:
+                        self.table.setItem(index, col, QTableWidgetItem(text))
+                    else:
+                        cell.setText(text)
+        finally:
+            self._silent = False
+        self.table.setCurrentCell(target, column)
+        self.changed.emit()
+
+    def _append(self, first: str, second: str) -> None:
+        was_silent = self._silent
+        self._silent = True
+        try:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(first))
+            self.table.setItem(row, 1, QTableWidgetItem(second))
+        finally:
+            self._silent = was_silent
+
+    def _emit(self, *_args: object) -> None:
+        if not self._silent:
+            self.changed.emit()
+
+
+class DynamicChoiceEdit(QWidget):
+    """An editable drop-down whose suggestions are only known at run time (``choices_from``).
+
+    The value is the text in the box, so a value that is not in the list stays valid. The list is
+    filled by the form through :meth:`set_choices` (from a worker); an empty list leaves a plain
+    editable box. ``refreshRequested`` asks the form to load the list again.
+    """
+
+    changed = Signal()
+    refreshRequested = Signal()
+
+    def __init__(self, can_refresh: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.loading = False
+        self.combo = _WheelGuardCombo()
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo.setMinimumContentsLength(18)
+        self.refresh_button = QToolButton(self)
+        self.refresh_button.setText("Refresh")
+        self.refresh_button.setToolTip("Ask again for the list of choices.")
+        self.refresh_button.setVisible(can_refresh)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.combo, 1)
+        layout.addWidget(self.refresh_button)
+        self.combo.editTextChanged.connect(lambda _t: self.changed.emit())
+        self.refresh_button.clicked.connect(lambda _c=False: self.refreshRequested.emit())
+
+    def text(self) -> str:
+        return self.combo.currentText()
+
+    def set_text(self, text: str) -> None:
+        self.combo.setEditText(text)
+
+    def choices(self) -> list[str]:
+        return [self.combo.itemText(i) for i in range(self.combo.count())]
+
+    def set_loading(self, loading: bool) -> None:
+        self.loading = loading
+        self.refresh_button.setEnabled(not loading)
+        self.refresh_button.setText("Loading…" if loading else "Refresh")
+
+    def set_choices(self, items: Iterable[str]) -> None:
+        """Replace the suggestions and keep the text the box holds. Emits nothing."""
+        current = self.combo.currentText()
+        self.combo.blockSignals(True)
+        try:
+            self.combo.clear()
+            self.combo.addItems([str(item) for item in items])
+            self.combo.setEditText(current)
+        finally:
+            self.combo.blockSignals(False)
+
+
 # ----- the form --------------------------------------------------------------------------------
 
 
@@ -471,10 +659,14 @@ class SchemaForm(QWidget):
         *,
         exclude: Collection[str] = (),
         confirm_locked: ConfirmLocked | None = None,
+        load_choices: LoadChoices | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.model = model
+        self._load_choices = load_choices
+        self._dynamic: dict[str, tuple[str, DynamicChoiceEdit]] = {}
+        self._choices_requested = False
         self._exclude = frozenset(exclude)
         all_specs = describe(model)
         self.specs: list[FieldSpec] = [s for s in all_specs if s.name not in self._exclude]
@@ -703,6 +895,19 @@ class SchemaForm(QWidget):
         if spec.kind == "choice":
             return self._choice_editor(spec, notify)
 
+        if spec.kind == "str" and spec.choices_from:
+            return self._dynamic_editor(spec, notify)
+
+        if spec.kind == "list" and spec.widget == "pairs":
+            headers = spec.pair_headers or ("Item", "Value")
+            pairs = PairsEdit(headers, spec.pair_separator or "=")
+            pairs.changed.connect(notify)
+            return (
+                pairs,
+                pairs.items,
+                lambda v: pairs.set_items([] if v is None else _as_list(v)),
+            )
+
         if spec.kind == "path" and not spec.item_kind:
             mode = "file" if spec.widget == "file" else "folder"
             placeholder = nullable_hint or (
@@ -759,6 +964,8 @@ class SchemaForm(QWidget):
         def set_text(value: Any) -> None:
             if isinstance(value, str) and spec.kind != "str":
                 line.setText(value)  # raw text put back after a failed parse
+            elif spec.kind == "list" and value is not None:
+                line.setText(list_text(_as_list(value)))
             else:
                 line.setText(format_value(value))
 
@@ -800,6 +1007,68 @@ class SchemaForm(QWidget):
             combo.setCurrentIndex(index)
 
         return combo, get, set_choice
+
+    def _dynamic_editor(
+        self, spec: FieldSpec, notify: Callable[[], None]
+    ) -> tuple[QWidget, Callable[[], Any], Callable[[Any], None]]:
+        """An editable drop-down for a ``choices_from`` text field (filled when shown)."""
+        edit = DynamicChoiceEdit(can_refresh=self._load_choices is not None)
+        line = edit.combo.lineEdit()
+        if spec.nullable and line is not None:
+            line.setPlaceholderText("Empty: use the app setting")
+        edit.changed.connect(notify)
+        name = spec.name
+        source = spec.choices_from or ""
+        edit.refreshRequested.connect(lambda: self.refresh_choices(name))
+        self._dynamic[name] = (source, edit)
+        return (
+            edit,
+            lambda: self._read_str(spec, edit.text()),
+            lambda v: edit.set_text("" if v is None else format_value(v)),
+        )
+
+    # ----- run-time choices -------------------------------------------------------------------
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 (Qt name)
+        super().showEvent(event)
+        if not self._choices_requested and self._dynamic:
+            self._choices_requested = True
+            self.refresh_choices()
+
+    def refresh_choices(self, name: str | None = None) -> list[Worker]:
+        """Load the suggestions of one ``choices_from`` field (or all of them) in workers."""
+        started: list[Worker] = []
+        if self._load_choices is None:
+            return started
+        names = [name] if name is not None else list(self._dynamic)
+        for field_name in names:
+            entry = self._dynamic.get(field_name)
+            if entry is None or entry[1].loading:
+                continue
+            source, edit = entry
+            worker = self._load_choices(source)
+            if worker is None:
+                continue
+            edit.set_loading(True)
+            worker.succeeded.connect(lambda items, n=field_name: self._choices_ready(n, items))
+            worker.finished.connect(lambda n=field_name: self._choices_done(n))
+            worker.start()
+            started.append(worker)
+        return started
+
+    def _choices_ready(self, name: str, items: object) -> None:
+        if not shiboken6.isValid(self) or not isinstance(items, list):
+            return
+        entry = self._dynamic.get(name)
+        if entry is not None and shiboken6.isValid(entry[1]):
+            entry[1].set_choices(str(item) for item in cast("list[Any]", items))
+
+    def _choices_done(self, name: str) -> None:
+        if not shiboken6.isValid(self):
+            return
+        entry = self._dynamic.get(name)
+        if entry is not None and shiboken6.isValid(entry[1]):
+            entry[1].set_loading(False)
 
     # ----- reading helpers -------------------------------------------------------------------
 
@@ -979,6 +1248,20 @@ def _as_mapping(values: Mapping[str, Any] | BaseModel) -> Mapping[str, Any]:
     if isinstance(values, BaseModel):
         return values.model_dump()
     return values
+
+
+def list_text(items: Sequence[Any]) -> str:
+    """List items as text for the comma-separated box, which ``parse_value`` reads back.
+
+    Plain items are joined with ", ". When an item would not survive that (it holds a comma, has
+    spaces at either end or is empty, or the text would look like JSON), the list is written as
+    a JSON list instead, so ``["a, b", "c"]`` stays two items.
+    """
+    texts = [format_value(item) for item in items]
+    awkward = any("," in t or t != t.strip() or not t for t in texts)
+    if awkward or (texts and texts[0].startswith("[")):
+        return json.dumps(texts, ensure_ascii=False)
+    return ", ".join(texts)
 
 
 def _as_list(value: Any) -> list[Any]:

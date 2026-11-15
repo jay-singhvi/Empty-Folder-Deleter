@@ -7,7 +7,8 @@ folder itself and on the empty space inside an open folder::
     Software\\Classes\\Directory\\Background\\shell\\VariousTools
 
 Each has a cascading submenu with one entry per tool in :data:`SHELL_TOOLS`. Explorer replaces
-``%V`` in the command with the folder that was clicked.
+``%V`` in the command with the folder that was clicked (see :data:`FOLDER_PLACEHOLDER` for drive
+roots).
 
 There is no Qt in this module. The registry sits behind the small :class:`RegistryBackend`
 protocol, so tests and scratch checks use :class:`FakeRegistry` and never touch the real registry.
@@ -15,6 +16,8 @@ protocol, so tests and scratch checks use :class:`FakeRegistry` and never touch 
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Protocol
@@ -153,6 +156,12 @@ class FakeRegistry:
         return self._norm(key_path) in self.keys
 
 
+# ``%V`` is the clicked folder. For a drive root it ends in a backslash (``D:\``), and ``"D:\"``
+# would make that backslash escape the closing quote. ``\.`` after it keeps every backslash
+# literal (``"D:\\."``, ``"C:\Photos\."``); :func:`clean_folder_arg` turns it back into the folder.
+FOLDER_PLACEHOLDER = '"%V\\."'
+
+
 def launch_command(tool_id: str) -> str:
     """The command Explorer runs for a tool. ``%V`` is the clicked folder.
 
@@ -161,11 +170,26 @@ def launch_command(tool_id: str) -> str:
     """
     if getattr(sys, "frozen", False):
         program = sys.executable
-        return f'"{program}" --tool {tool_id} --folder "%V"'
+        return f'"{program}" --tool {tool_id} --folder {FOLDER_PLACEHOLDER}'
     interpreter = Path(sys.executable)
     windowless = interpreter.with_name("pythonw.exe")
     program = str(windowless if windowless.is_file() else interpreter)
-    return f'"{program}" -m various_tools.gui --tool {tool_id} --folder "%V"'
+    return f'"{program}" -m various_tools.gui --tool {tool_id} --folder {FOLDER_PLACEHOLDER}'
+
+
+def clean_folder_arg(raw: str) -> str:
+    """The folder from a ``--folder`` argument, also for drive roots.
+
+    Handles what the menu passes (``D:\\.``, ``C:\\Photos\\.``) and what an older entry passed for a
+    drive root (``D:"``: the backslash had escaped the quote). A bare drive (``D:``) means its
+    root, not the current folder on that drive.
+    """
+    text = raw.strip().strip('"').strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"[A-Za-z]:", text):
+        text += "\\"
+    return os.path.normpath(text)
 
 
 def install(backend: RegistryBackend | None = None) -> None:

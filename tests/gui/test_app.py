@@ -285,7 +285,7 @@ def test_shell_install_layout(registry: shell.FakeRegistry) -> None:
             command = registry.get_value(f"{tool_key}\\command", "")
             assert command is not None
             assert f"--tool {tool_id}" in command
-            assert command.endswith('--folder "%V"')
+            assert command.endswith('--folder "%V\\."')
     # Only the per-user branch is ever written.
     assert all(w[1].lower().startswith("software\\classes\\") for w in registry.writes)
 
@@ -323,7 +323,7 @@ def test_launch_command_from_source(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.setattr(sys, "executable", str(python))
     command = shell.launch_command("duplicates")
-    assert command == f'"{python}" -m various_tools.gui --tool duplicates --folder "%V"'
+    assert command == f'"{python}" -m various_tools.gui --tool duplicates --folder "%V\\."'
     windowless = tmp_path / "pythonw.exe"
     windowless.write_text("")
     assert shell.launch_command("duplicates").startswith(f'"{windowless}"')
@@ -333,10 +333,81 @@ def test_launch_command_when_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     exe = tmp_path / "VariousTools.exe"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
-    assert shell.launch_command("empty_folders") == (f'"{exe}" --tool empty_folders --folder "%V"')
+    assert shell.launch_command("empty_folders") == (
+        f'"{exe}" --tool empty_folders --folder "%V\\."'
+    )
     registry = shell.FakeRegistry()
     shell.install(registry)
     assert registry.get_value(shell.MENU_KEY, "Icon") == str(exe)
+
+
+def _windows_argv(command_line: str) -> list[str]:
+    """Split a command line exactly as Windows does for a program (CommandLineToArgvW)."""
+    import ctypes
+    from ctypes import wintypes
+
+    shell32 = ctypes.WinDLL("shell32")
+    kernel32 = ctypes.WinDLL("kernel32")
+    shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    count = ctypes.c_int()
+    argv = shell32.CommandLineToArgvW(command_line, ctypes.byref(count))
+    try:
+        return [argv[i] for i in range(count.value)]
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv, wintypes.HLOCAL))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Explorer command lines are Windows-only")
+@pytest.mark.parametrize(
+    ("clicked", "expected"),
+    [
+        ("D:\\", "D:\\"),
+        ("C:\\Users\\me\\My Photos", "C:\\Users\\me\\My Photos"),
+        ("\\\\server\\share\\Some Folder", "\\\\server\\share\\Some Folder"),
+    ],
+)
+def test_menu_command_passes_drive_roots_and_folders_intact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clicked: str, expected: str
+) -> None:
+    exe = tmp_path / "Various Tools.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    command = shell.launch_command("empty_folders").replace("%V", clicked)  # what Explorer does
+    argv = _windows_argv(command)
+    assert argv[0] == str(exe)
+    args, rest = gui_app.parse_args(argv[1:])
+    assert rest == [] and args.tool == "empty_folders"
+    assert shell.clean_folder_arg(args.folder) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Explorer command lines are Windows-only")
+def test_an_old_menu_entry_for_a_drive_root_still_opens_the_root() -> None:
+    # Older entries used "%V": for D:\ the backslash escaped the quote and D:" arrived.
+    argv = _windows_argv('"app.exe" --tool duplicates --folder "D:\\"')
+    args, _rest = gui_app.parse_args(argv[1:])
+    assert args.folder == 'D:"'
+    assert shell.clean_folder_arg(args.folder) == "D:\\"
+
+
+def test_clean_folder_arg() -> None:
+    assert shell.clean_folder_arg("D:") == "D:\\"
+    assert shell.clean_folder_arg(' "E:\\" ') == "E:\\"
+    assert shell.clean_folder_arg("C:\\Data\\.") == "C:\\Data"
+    assert shell.clean_folder_arg("") == ""
+
+
+def test_make_window_cleans_the_folder_argument(
+    gui_state: AppState, registry: shell.FakeRegistry, qtbot: QtBot, tmp_path: Path
+) -> None:
+    folder = tmp_path / "start"
+    folder.mkdir()
+    window = gui_app.make_window(
+        gui_state, tool="project_export", folder=f"{folder}\\.", shell_backend=registry
+    )
+    qtbot.addWidget(window)
+    assert str(window.tool_pages["project_export"].form.raw_values()["root"]) == str(folder)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the real backend refuses keys on win32 only")

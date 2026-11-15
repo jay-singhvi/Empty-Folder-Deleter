@@ -1,9 +1,9 @@
 """Tool pages for the Phase 7 tools: scan -> apply -> undo through the GUI for each of them.
 
 Same pattern as ``test_tool_pages.py``. Every tree is generated under ``tmp_path``. Recycle-Bin
-calls go to the fake in ``conftest.py`` (an autouse fixture, so it covers this file too), and
-``media_convert`` and ``metadata_strip`` import ``send2trash`` themselves, so those tests replace
-it on their own module. Dialog hooks are replaced (``dialogs``), so nothing blocks.
+calls (apply, the tools' own recycling through ``core/plan.py``, and undo) go to the fake in
+``conftest.py``, an autouse fixture, so it covers this file too. Undo finds no Recycle Bin to
+restore from. Dialog hooks are replaced (``dialogs``), so nothing blocks.
 
 Nothing here needs ffmpeg or Ollama. ExifTool is needed to strip metadata, so the stripper has a
 "program missing" test that runs everywhere and a full test that is skipped without ExifTool.
@@ -13,10 +13,11 @@ those variables at ``tmp_path``, so the real temp folder and browser caches are 
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import random
-import shutil
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -29,8 +30,6 @@ from various_tools.core.plan import ActionKind
 from various_tools.gui.state import AppState
 from various_tools.gui.tool_page import ToolPage
 from various_tools.tools.disk_usage import FOLDER_SIZE_PREFIX, ROOT_SIZE_PREFIX, parse_size_note
-from various_tools.tools.media_convert import tool as convert_tool
-from various_tools.tools.metadata_strip import tool as strip_tool
 from various_tools.tools.temp_cleaner import BROWSER_CACHE_PREFIX, parse_browser_cache_note
 
 if TYPE_CHECKING:
@@ -41,7 +40,7 @@ OpenTool = Callable[..., ToolPage]
 PageStep = Callable[[ToolPage], None]
 
 DAY = 86400
-NOT_REVERSIBLE = "not reversible by undo"
+RESTORE_BY_HAND = "restore manually from the Recycle Bin"
 
 
 def tree_snapshot(root: Path) -> list[tuple[str, bool, int, int]]:
@@ -70,8 +69,41 @@ def write(path: Path, data: bytes | str = b"x", age_days: float = 0.0) -> Path:
 
 
 def age(path: Path, days: float) -> None:
+    """Make ``path`` look ``days`` old: the modified time and (on Windows) the creation time.
+
+    The temp cleaner judges age on the newer of the two, so a fresh file whose modified time was
+    moved back still counts as new unless its creation time moves back too.
+    """
     when = time.time() - days * DAY
     os.utime(path, (when, when))
+    set_created(path, when)
+
+
+def set_created(path: Path, when: float) -> None:
+    """Set the Windows creation time (``st_birthtime``) of a file or folder. A no-op elsewhere."""
+    if sys.platform != "win32":
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.SetFileTime.argtypes = [ctypes.c_void_p] * 4
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    # FILE_WRITE_ATTRIBUTES, share all, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS (folders too).
+    handle = kernel32.CreateFileW(str(path), 0x100, 0x7, None, 3, 0x02000000, None)
+    assert handle not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+    try:
+        filetime = ctypes.c_uint64(int((when + 11644473600) * 10_000_000))
+        assert kernel32.SetFileTime(handle, ctypes.byref(filetime), None, None)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def sha256(data: bytes) -> str:
@@ -124,13 +156,6 @@ def test_checksum_create_then_verify_through_the_page(
         digest, name = line.split("  ", 1)
         assert digest == sha256(contents[name.lstrip("*")])
 
-    # A manifest is a new file that Undo cannot take back, and the report says so.
-    undo(page)
-    text = undo_text(dialogs)
-    assert "not undone (0 reverted)" in text and NOT_REVERSIBLE in text
-    assert manifest.is_file()
-    assert page.undo_button.isHidden()
-
     # The same page can now verify what it wrote. Verify is read-only, so it has no actions.
     page.form.update_values({"mode": "verify"})
     scan(page)
@@ -148,6 +173,13 @@ def test_checksum_create_then_verify_through_the_page(
     assert "Verify: PROBLEMS FOUND - 2 OK, 1 mismatched" in notes
     assert "mismatch: a.txt" in notes and "extra: new.txt" in notes
     assert not page.apply_button.isEnabled()
+
+    # The written manifest is unchanged, so Undo sends it to the Recycle Bin (the test fake).
+    assert not page.undo_button.isHidden()
+    undo(page)
+    assert "undone (1 reverted)" in undo_text(dialogs)
+    assert not manifest.exists()
+    assert page.undo_button.isHidden()
 
 
 def test_checksum_never_replaces_an_existing_manifest(
@@ -256,8 +288,8 @@ def test_corrupt_media_only_the_ticked_file_is_trashed_and_trash_is_not_undone(
     assert [Path(p).name for p in trashed] == ["cut.jpg"]
     assert (media_tree / "noise.jpg").is_file() and (media_tree / "empty.png").is_file()
     undo(page)
-    text = undo_text(dialogs)
-    assert "not undone (0 reverted)" in text and NOT_REVERSIBLE in text
+    text = undo_text(dialogs)  # there is no Recycle Bin to restore from in tests
+    assert "not undone (0 reverted)" in text and RESTORE_BY_HAND in text
     assert not (media_tree / "cut.jpg").exists()
 
 
@@ -314,7 +346,7 @@ def test_disk_usage_select_largest_files_apply_and_trash_is_not_undone(
     undo(page)
     text = undo_text(dialogs)
     assert "not undone (0 reverted)" in text
-    assert text.count(NOT_REVERSIBLE) == 2
+    assert text.count(RESTORE_BY_HAND) == 2
     assert sorted(p.name for p in root.rglob("*") if p.is_file()) == ["mid.bin", "small.txt"]
 
 
@@ -335,15 +367,11 @@ def test_media_convert_webp_to_jpg_keeps_the_originals_and_undo_reports_manual(
     open_tool: OpenTool,
     dialogs: Dialogs,
     webp_tree: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    trashed: list[str],
     scan: PageStep,
     apply: PageStep,
     undo: PageStep,
 ) -> None:
-    def refuse(path: object) -> None:
-        raise AssertionError(f"the Recycle Bin must not be used here: {path}")
-
-    monkeypatch.setattr(convert_tool, "send2trash", refuse)  # originals are kept by default
     page = open_tool("media_convert", str(webp_tree))
     page.form.update_values({"convert_mov": False, "keep_metadata": False, "jpeg_quality": 80})
     before = tree_snapshot(webp_tree)
@@ -372,11 +400,13 @@ def test_media_convert_webp_to_jpg_keeps_the_originals_and_undo_reports_manual(
             assert converted.format == "JPEG" and converted.size == (64, 48)
     for name, data in original.items():
         assert (webp_tree / name).read_bytes() == data  # originals untouched
+    assert trashed == []  # originals are kept by default: the Recycle Bin was not used
 
-    undo(page)
-    text = undo_text(dialogs)
-    assert "not undone (0 reverted)" in text and NOT_REVERSIBLE in text
-    assert sorted(p.name for p in out.iterdir()) == ["pic1.jpg", "pic2.jpg"]
+    undo(page)  # the unchanged outputs go to the Recycle Bin (the test fake); originals stay
+    assert "undone (2 reverted)" in undo_text(dialogs)
+    assert list(out.iterdir()) == []
+    for name, data in original.items():
+        assert (webp_tree / name).read_bytes() == data
 
 
 def test_media_convert_can_recycle_the_original_after_the_output_is_verified(
@@ -384,21 +414,11 @@ def test_media_convert_can_recycle_the_original_after_the_output_is_verified(
     open_tool: OpenTool,
     dialogs: Dialogs,
     webp_tree: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    trashed: list[str],
     scan: PageStep,
     apply: PageStep,
     undo: PageStep,
 ) -> None:
-    recycled: list[Path] = []
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-
-    def fake_send2trash(path: str | os.PathLike[str]) -> None:
-        source = Path(path)
-        recycled.append(source)
-        shutil.move(str(source), str(bin_dir / source.name))
-
-    monkeypatch.setattr(convert_tool, "send2trash", fake_send2trash)
     page = open_tool("media_convert", str(webp_tree))
     page.form.update_values(
         {
@@ -412,11 +432,10 @@ def test_media_convert_can_recycle_the_original_after_the_output_is_verified(
     assert page.plan is not None and len(page.plan.actions) == 2
     assert all("Recycle Bin" in a.reason for a in page.plan.actions)
     apply(page)
-    assert sorted(p.name for p in recycled) == ["pic1.webp", "pic2.webp"]
+    assert sorted(Path(p).name for p in trashed) == ["pic1.webp", "pic2.webp"]
     assert sorted(p.name for p in webp_tree.iterdir()) == ["notes.txt", "pic1.jpg", "pic2.jpg"]
-    undo(page)
-    assert NOT_REVERSIBLE in undo_text(dialogs)
-    assert sorted(p.name for p in webp_tree.iterdir()) == ["notes.txt", "pic1.jpg", "pic2.jpg"]
+    undo(page)  # the recycled originals are journaled, but there is no Recycle Bin in tests
+    assert RESTORE_BY_HAND in undo_text(dialogs)
 
 
 # ----- metadata_strip -------------------------------------------------------------------------
@@ -468,15 +487,11 @@ def test_metadata_strip_gps_scan_apply_undo(
     open_tool: OpenTool,
     dialogs: Dialogs,
     exiftool_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    trashed: list[str],
     scan: PageStep,
     apply: PageStep,
     undo: PageStep,
 ) -> None:
-    def refuse(path: object) -> None:
-        raise AssertionError(f"the Recycle Bin must not be used here: {path}")
-
-    monkeypatch.setattr(strip_tool, "send2trash", refuse)  # in-place mode is off
     folder = tmp_path / "pics"
     source = picture_with_gps(folder / "gps.jpg")
     Image.new("RGB", (64, 48), (1, 2, 3)).save(folder / "clean.jpg", format="JPEG")
@@ -496,13 +511,14 @@ def test_metadata_strip_gps_scan_apply_undo(
     apply(page)
     assert page.result is not None and page.result.count("done") == 1
     assert source.read_bytes() == original  # the original is never changed
+    assert trashed == []  # in-place mode is off: the Recycle Bin was not used
     with Image.open(folder / "stripped" / "gps.jpg") as stripped:
         assert not dict(stripped.getexif().get_ifd(GPS_IFD))
         assert stripped.size == (64, 48)
-    undo(page)
-    text = undo_text(dialogs)
-    assert "not undone (0 reverted)" in text and NOT_REVERSIBLE in text
-    assert (folder / "stripped" / "gps.jpg").is_file()
+    undo(page)  # the unchanged output goes to the Recycle Bin (the test fake)
+    assert "undone (1 reverted)" in undo_text(dialogs)
+    assert not (folder / "stripped" / "gps.jpg").exists()
+    assert source.read_bytes() == original
 
 
 # ----- sort_by_type ---------------------------------------------------------------------------
@@ -651,7 +667,7 @@ def test_temp_cleaner_scan_apply_undo_and_browser_caches_stay_read_only(
     undo(page)
     text = undo_text(dialogs)
     assert "not undone (0 reverted)" in text
-    assert text.count(NOT_REVERSIBLE) == 3
+    assert text.count(RESTORE_BY_HAND) == 3  # there is no Recycle Bin to restore from in tests
     assert sorted(p.name for p in root.iterdir()) == ["new.tmp"]
 
 

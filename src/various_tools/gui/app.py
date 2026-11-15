@@ -45,12 +45,13 @@ def make_window(
     """Build the main window (tests call this with a temporary AppState)."""
     from various_tools.gui.icon import app_icon
     from various_tools.gui.main_window import MainWindow
+    from various_tools.gui.shell import clean_folder_arg
     from various_tools.gui.state import AppState
 
     window = MainWindow(state or AppState.load(), shell_backend=shell_backend)
     window.setWindowIcon(app_icon())
     if tool:
-        window.open_tool(tool, folder)
+        window.open_tool(tool, clean_folder_arg(folder) if folder else None)
     return window
 
 

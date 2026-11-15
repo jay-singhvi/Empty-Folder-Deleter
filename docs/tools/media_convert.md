@@ -60,9 +60,14 @@ When on, each original goes to the Recycle Bin after its output was written **an
 
 - a picture is reopened from disk at its final name, decoded, and its size must match;
 - a video is probed with ffprobe, and its length must be within the tolerance of the original.
+  This check runs on the encoded file while it still has its temporary name, before it is renamed
+  to the output name.
 
-If verification fails, the original is not touched, the output is kept for you to look at, and the
-action is marked failed in History. If the Recycle Bin refuses, the original stays and the action
+If verification fails, the original is not touched and the action is marked failed in History. A
+picture output is kept for you to look at. A video that fails is never given the output name: only
+the tool's own temporary file is removed, so no broken `photo.mp4` is left behind and the next scan
+offers the conversion again (instead of saying the output already exists). The video check runs
+whether or not `trash_originals` is on. If the Recycle Bin refuses, the original stays and the action
 fails too (the output exists). The plan row says "original goes to the Recycle Bin after the
 output is verified", and so does the journal entry. Only the Recycle Bin is used, never a
 permanent delete.
@@ -102,9 +107,13 @@ the video encode timeout and the ExifTool write timeout.
 
 ## Limits in this version
 
-- **Undo cannot reverse a conversion.** The output is a new file, and undo lists it as "not
-  reversible by undo; restore manually" instead of deleting it. No file is lost. An original that
-  was recycled is restored from the Recycle Bin by hand.
+- **Undo of a conversion** sends the output to the Recycle Bin, but only when it is unchanged
+  since the run (same size and modified time). An output you edited is left alone and listed for
+  manual removal. An original recycled by `trash_originals` has its own History row, and undo
+  puts it back from the Recycle Bin when it finds it there; otherwise it is listed to restore by
+  hand. Nothing is ever deleted for good.
+- **Files that are not on this device** are listed in the plan's cloud-only list, for the optional
+  download action. They are never read.
 - **Animated WebP and multi-image HEIC files** are left as they are.
 - **10-bit and HDR video** that has to be re-encoded becomes 8-bit 4:2:0 (a remux keeps it as it
   is).

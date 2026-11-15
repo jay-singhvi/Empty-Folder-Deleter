@@ -15,7 +15,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -110,9 +110,38 @@ def _write(path: Path, age_days: float = 10.0, size: int = 5) -> Path:
     return path
 
 
-def _age(path: Path, days: float) -> None:
+def _age(path: Path, days: float, *, created_days: float | None = None) -> None:
+    """Set the modified time, and the creation time (``days`` unless ``created_days``)."""
     when = time.time() - days * DAY
     os.utime(path, (when, when))
+    _set_created(path, time.time() - (days if created_days is None else created_days) * DAY)
+
+
+def _set_created(path: Path, when: float) -> None:
+    """Set the Windows creation time (``st_birthtime``). A no-op elsewhere."""
+    if sys.platform != "win32":
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.SetFileTime.argtypes = [ctypes.c_void_p] * 4
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    # FILE_WRITE_ATTRIBUTES, share all, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS (folders too).
+    handle = kernel32.CreateFileW(str(path), 0x100, 0x7, None, 3, 0x02000000, None)
+    assert handle not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+    try:
+        filetime = ctypes.c_uint64(int((when + 11644473600) * 10_000_000))
+        assert kernel32.SetFileTime(handle, ctypes.byref(filetime), None, None)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _rel(path: Path | None, base: Path) -> str:
@@ -493,15 +522,16 @@ def test_a_cache_inside_a_chosen_folder_is_skipped_never_trashed(
 ) -> None:
     local = tmp_path / "local"
     folders = _browsers(local)
-    _write(local / "Temp" / "old.tmp")
-    _write(local / "other" / "old2.tmp")
+    chosen = local / "Google"  # holds the three Chrome caches
+    _write(chosen / "old.tmp")
+    _write(chosen / "other" / "old2.tmp")
     tool = TempCleaner(environ={"LOCALAPPDATA": str(local)})
     ctx = _ctx(tmp_path, journal)
     plan = tool.scan(
-        TempCleanerOptions(roots=[local], list_browser_caches=False, min_age_days=1), ctx
+        TempCleanerOptions(roots=[chosen], list_browser_caches=False, min_age_days=1), ctx
     )
-    assert sorted(_srcs(plan, local)) == ["Temp/old.tmp", "other/old2.tmp"]
-    assert "5 browser cache folder(s) skipped" in plan.notes[0]
+    assert sorted(_srcs(plan, chosen)) == ["old.tmp", "other/old2.tmp"]
+    assert "3 browser cache folder(s) skipped" in plan.notes[0]
     result = tool.apply(plan, ctx)
     assert result.count("done") == 2
     for folder in folders.values():
@@ -596,6 +626,29 @@ def test_cloud_only_files_are_skipped_and_never_read(
     assert _srcs(plan, root) == ["local.tmp"]  # the cloud-only file keeps its folder too
     assert f"skipped: cloud-only: {root / 'box' / 'cloud.tmp'}" in plan.notes
     assert "1 cloud-only, skipped and not read" in plan.notes[0]
+    assert plan.cloud_only == [root / "box" / "cloud.tmp"]  # for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path,
+    root: Path,
+    journal: Journal,
+    sent_to_trash: list[str],
+    cloud_placeholder: Callable[..., None],
+) -> None:
+    _write(root / "placeholder.tmp")
+    _write(root / "folder" / "inside.tmp")
+    _age(root / "folder", 10)
+    cloud_placeholder("placeholder.tmp", "folder")  # a placeholder file and a placeholder folder
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    plan = tool.scan(_opts(root), ctx)
+    assert _srcs(plan, root) == ["folder/inside.tmp", "folder", "placeholder.tmp"]
+    assert plan.cloud_only == []  # on the device, so it is an ordinary file
+    # Apply checks every file again, and must not take the placeholder for a junction either.
+    result = tool.apply(plan, ctx)
+    assert result.count("done") == 3, [o.detail for o in result.outcomes]
+    assert _listing(root) == set()
 
 
 def test_nested_roots_are_collapsed(tmp_path: Path, root: Path) -> None:
@@ -735,3 +788,216 @@ def test_parse_browser_cache_note() -> None:
     assert parse_browser_cache_note("folder-size: 1 C:\\x") is None
     assert parse_browser_cache_note(f"{BROWSER_CACHE_PREFIX}broken") is None
     assert BrowserCache(name="n", path=Path("p")).name == "n"
+
+
+# --- Age: newest of modified and created, checked again at apply --------------------------------
+
+
+def _short_name(path: Path) -> Path:
+    """The 8.3 short form of ``path``, or skip when the volume does not make short names."""
+    if sys.platform != "win32":
+        pytest.skip("8.3 short names are a Windows feature")
+    buffer = ctypes.create_unicode_buffer(1024)
+    length = ctypes.WinDLL("kernel32").GetShortPathNameW(str(path), buffer, 1024)
+    if not length or os.path.normcase(buffer.value) == os.path.normcase(str(path)):
+        pytest.skip("this volume does not create 8.3 short names")
+    return Path(buffer.value)
+
+
+windows_times = pytest.mark.skipif(
+    sys.platform != "win32", reason="creation times are set through Win32"
+)
+
+
+@windows_times
+def test_a_file_unpacked_with_an_old_modified_time_is_recent_by_its_creation_time(
+    tmp_path: Path, root: Path
+) -> None:
+    # An installer unpacking an archive keeps the archive's old modified times.
+    _write(root / "unpacked.dll", age_days=400)
+    _age(root / "unpacked.dll", 400, created_days=0.01)
+    _write(root / "really_old.tmp", age_days=30)
+    plan = _tool(tmp_path).scan(_opts(root), _ctx(tmp_path))
+    assert _srcs(plan, root) == ["really_old.tmp"]
+    assert "1 too recent, kept" in plan.notes[0]
+
+
+@windows_times
+def test_a_folder_created_recently_is_kept_even_with_an_old_modified_time(
+    tmp_path: Path, root: Path
+) -> None:
+    (root / "fresh").mkdir()
+    _age(root / "fresh", 30, created_days=0.01)
+    plan = _tool(tmp_path).scan(_opts(root), _ctx(tmp_path))
+    assert _srcs(plan, root) == []
+
+
+@windows_times
+def test_reason_uses_the_newer_of_modified_and_created(tmp_path: Path, root: Path) -> None:
+    _write(root / "a.tmp", age_days=40)
+    _age(root / "a.tmp", 40, created_days=12)
+    plan = _tool(tmp_path).scan(_opts(root), _ctx(tmp_path))
+    assert plan.actions[0].reason == "5 bytes, modified 12 days ago"
+
+
+def test_a_file_changed_after_the_scan_is_skipped_at_apply_and_journaled(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    _write(root / "changed.tmp")
+    _write(root / "still_old.tmp")
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    saved = tool.scan(_opts(root), ctx).to_json()
+    (root / "changed.tmp").write_bytes(b"new content")  # modified now, a week after the scan
+    result = tool.apply(Plan.from_json(saved), ctx)
+    assert (root / "changed.tmp").exists() and not (root / "still_old.tmp").exists()
+    assert sent_to_trash == [str(root / "still_old.tmp")]
+    assert result.count("done") == 1 and result.count("skipped") == 1
+    skipped = [o for o in result.outcomes if o.status == "skipped"]
+    assert skipped[0].src == str(root / "changed.tmp")
+    assert "changed since the scan" in skipped[0].detail
+    rows = {a.src: a for a in journal.actions(result.run_id)}
+    assert rows[str(root / "changed.tmp")].status == "skipped"
+    assert "changed since the scan" in (rows[str(root / "changed.tmp")].error or "")
+
+
+@windows_times
+def test_a_file_recreated_after_the_scan_is_skipped_at_apply(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    _write(root / "setup.tmp", age_days=30)
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    plan = tool.scan(_opts(root), ctx)
+    # A program deletes it and unpacks a new copy that keeps the old modified time.
+    (root / "setup.tmp").unlink()
+    _write(root / "setup.tmp", age_days=30)
+    _age(root / "setup.tmp", 30, created_days=0)
+    result = tool.apply(plan, ctx)
+    assert result.count("skipped") == 1 and sent_to_trash == []
+    assert (root / "setup.tmp").exists()
+
+
+def test_a_file_that_no_longer_matches_is_skipped_at_apply(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    _write(root / "a.tmp")
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    plan = tool.scan(_opts(root), ctx)
+    (root / "a.tmp").unlink()
+    (root / "a.tmp").mkdir()  # now a folder with something in it
+    _write(root / "a.tmp" / "inside.txt", age_days=30)
+    result = tool.apply(plan, ctx)
+    assert result.count("skipped") == 1 and sent_to_trash == []
+    assert (root / "a.tmp" / "inside.txt").exists()
+
+
+def test_cloud_only_at_apply_time_is_skipped_and_never_trashed(
+    tmp_path: Path,
+    root: Path,
+    journal: Journal,
+    sent_to_trash: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(root / "a.tmp")
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    plan = tool.scan(_opts(root), ctx)
+    monkeypatch.setattr(tc_tool, "_attributes", lambda path, st: OFFLINE)
+    result = tool.apply(plan, ctx)
+    assert result.count("skipped") == 1 and sent_to_trash == []
+    assert "cloud-only" in result.outcomes[0].detail
+
+
+def test_the_age_limit_at_apply_comes_from_the_saved_options(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    _write(root / "a.tmp", age_days=3)
+    ctx = _ctx(tmp_path, journal)
+    tool = _tool(tmp_path)
+    plan = tool.scan(_opts(root, min_age_days=2), ctx)
+    assert tool.apply(plan, ctx).count("done") == 1 and sent_to_trash == [str(root / "a.tmp")]
+
+
+# --- Roots: the same folder by another name, and folders that must never be cleaned -------------
+
+
+def test_the_short_and_long_names_of_one_folder_are_one_root(tmp_path: Path) -> None:
+    long_root = tmp_path / "Long Temp Folder Name"
+    _write(long_root / "old.tmp")
+    _write(long_root / "inner folder" / "deep.tmp")
+    short = _short_name(long_root)
+    plan = TempCleaner(environ={}).scan(
+        TempCleanerOptions(
+            roots=[short, long_root, _short_name(long_root / "inner folder")],
+            list_browser_caches=False,
+            remove_empty_folders=False,
+        ),
+        _ctx(tmp_path),
+    )
+    assert len(plan.roots) == 1
+    names = sorted(a.src.name for a in plan.actions if a.src)
+    assert names == ["deep.tmp", "old.tmp"]  # each file planned once
+
+
+def test_temp_given_as_a_short_name_and_localappdata_temp_are_one_default_root(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / "Local App Data"
+    temp = local / "Temp"
+    _write(temp / "old.tmp")
+    environ = {"TEMP": str(_short_name(temp)), "TMP": str(temp), "LOCALAPPDATA": str(local)}
+    plan = TempCleaner(environ=environ).scan(
+        TempCleanerOptions(list_browser_caches=False), _ctx(tmp_path)
+    )
+    assert len(plan.roots) == 1 and [a.src.name for a in plan.actions if a.src] == ["old.tmp"]
+
+
+@pytest.mark.parametrize("variable", ["LOCALAPPDATA", "APPDATA", "PROGRAMDATA"])
+def test_app_data_folders_themselves_are_refused_as_roots(tmp_path: Path, variable: str) -> None:
+    folder = tmp_path / variable.lower()
+    _write(folder / "SomeApp" / "settings.db", age_days=30)
+    tool = TempCleaner(environ={variable: str(folder)})
+    plan = tool.scan(TempCleanerOptions(roots=[folder], list_browser_caches=False), _ctx(tmp_path))
+    assert plan.roots == [] and plan.actions == []
+    assert any(n.startswith("Refused") and f"%{variable}%" in n for n in plan.notes)
+    assert (folder / "SomeApp" / "settings.db").exists()
+
+
+def test_a_folder_that_holds_the_temp_folder_is_refused(tmp_path: Path) -> None:
+    profile_appdata = tmp_path / "AppData"
+    temp = profile_appdata / "Local" / "Temp"
+    _write(temp / "old.tmp")
+    _write(profile_appdata / "Roaming" / "App" / "data.db")
+    tool = TempCleaner(environ={"TEMP": str(temp)})
+    for chosen in (profile_appdata, profile_appdata / "Local"):
+        plan = tool.scan(
+            TempCleanerOptions(roots=[chosen], list_browser_caches=False), _ctx(tmp_path)
+        )
+        assert plan.roots == [] and plan.actions == []
+        assert any("holds the temp folder" in n for n in plan.notes)
+
+
+def test_a_folder_that_holds_a_short_named_temp_folder_is_refused(tmp_path: Path) -> None:
+    holder = tmp_path / "Profile Folder"
+    temp = holder / "Temp Files"
+    _write(temp / "old.tmp")
+    tool = TempCleaner(environ={"TEMP": str(_short_name(temp))})
+    plan = tool.scan(TempCleanerOptions(roots=[holder], list_browser_caches=False), _ctx(tmp_path))
+    assert plan.roots == [] and any("holds the temp folder" in n for n in plan.notes)
+
+
+def test_the_temp_folders_themselves_stay_allowed(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    temp, tmp = local / "Temp", tmp_path / "tmp-var"
+    _write(temp / "a.tmp")
+    _write(tmp / "b.tmp")
+    _write(local / "Temp" / "sub" / "c.tmp")
+    tool = TempCleaner(environ={"TEMP": str(temp), "TMP": str(tmp), "LOCALAPPDATA": str(local)})
+    plan = tool.scan(
+        TempCleanerOptions(roots=[temp, tmp, temp / "sub"], list_browser_caches=False),
+        _ctx(tmp_path),
+    )
+    assert plan.roots == [temp, tmp]
+    assert sorted(a.src.name for a in plan.actions if a.src) == ["a.tmp", "b.tmp", "c.tmp"]

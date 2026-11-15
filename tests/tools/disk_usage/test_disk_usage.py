@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -471,6 +471,20 @@ def test_cloud_only_files_are_skipped_and_never_counted(
     assert any(n.startswith("skipped: cloud-only: 1 file(s)") for n in plan.notes)
     sizes = [parse_size_note(n) for n in plan.notes if n.startswith(ROOT_SIZE_PREFIX)]
     assert sizes == [("root-size", 100, root)]
+    assert plan.cloud_only == [root / "cloud.bin"]  # collected for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, root: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    _write(root / "placeholder.bin", 500)
+    _write(root / "folder" / "inside.bin", 300)
+    cloud_placeholder("placeholder.bin", "folder")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert sorted(_files(plan, root)) == ["folder/inside.bin", "placeholder.bin"]
+    sizes = [parse_size_note(n) for n in plan.notes if n.startswith(ROOT_SIZE_PREFIX)]
+    assert sizes == [("root-size", 800, root)]
+    assert plan.cloud_only == []  # on the device, so it is counted like any other file
 
 
 def test_cancelling_stops_the_scan(tmp_path: Path, root: Path) -> None:
@@ -531,6 +545,142 @@ def test_a_saved_plan_can_be_applied_later(
     assert loaded.notes == plan.notes
     result = TOOL.apply(loaded, ctx)
     assert result.count("done") == 1 and not (root / "media" / "clip.mp4").exists()
+
+
+# --- The size tree (treemap data) ------------------------------------------------------------
+
+
+def _tree_root(root: Path) -> None:
+    """root 10000: top.bin 1000, a 8000 (a/x.bin 500, a/b 7500 (b/y.bin 7000, b/c/z.bin 500)),
+    tiny 10, d 990 (d/e.bin 990)."""
+    _write(root / "top.bin", 1000)
+    _write(root / "a" / "x.bin", 500)
+    _write(root / "a" / "b" / "y.bin", 7000)
+    _write(root / "a" / "b" / "c" / "z.bin", 500)
+    _write(root / "tiny" / "t.bin", 10)
+    _write(root / "My Stuff, 2024" / "e.bin", 990)
+
+
+def _tree_notes(plan: Plan, base: Path) -> list[tuple[int, int, str]]:
+    found: list[tuple[int, int, str]] = []
+    for note in plan.notes:
+        parsed = du_tool.parse_tree_note(note)
+        if parsed is not None:
+            depth, size, path = parsed
+            found.append((depth, size, "." if path == base else _rel(path, base)))
+    return found
+
+
+def test_tree_notes_list_each_folder_down_to_the_depth_and_share(
+    tmp_path: Path, root: Path
+) -> None:
+    _tree_root(root)
+    plan = TOOL.scan(_opts(root, tree_depth=2, tree_min_share_pct=1.0), _ctx(tmp_path))
+    assert _tree_notes(plan, root) == [
+        (0, 10000, "."),
+        (1, 8000, "a"),
+        (2, 7500, "a/b"),
+        (1, 990, "My Stuff, 2024"),
+    ]  # "tiny" is 0.1 % (under 1 %), "a/b/c" is depth 3
+    assert all(parse_size_note(n) is None for n in plan.notes if n.startswith("tree-size: "))
+    # The existing notes are unchanged.
+    assert ("a", 8000) in _folder_notes(plan, root)
+    assert [parse_size_note(n) for n in plan.notes if n.startswith(ROOT_SIZE_PREFIX)] == [
+        ("root-size", 10000, root)
+    ]
+
+
+def test_tree_options_have_defaults_and_bounds() -> None:
+    opts = DiskUsageOptions()
+    assert opts.tree_depth == 3 and opts.tree_min_share_pct == 1.0
+    for bad in ({"tree_depth": -1}, {"tree_depth": 33}, {"tree_min_share_pct": 101}):
+        with pytest.raises(ValidationError):
+            DiskUsageOptions.model_validate(bad)
+
+
+def test_size_tree_rebuilds_the_hierarchy_largest_first(tmp_path: Path, root: Path) -> None:
+    from various_tools.tools.disk_usage import SizeNode, size_tree
+
+    _tree_root(root)
+    plan = TOOL.scan(_opts(root, tree_depth=5, tree_min_share_pct=0.0), _ctx(tmp_path))
+    tree = size_tree(plan)
+    assert isinstance(tree, SizeNode)
+    assert (tree.path, tree.bytes, tree.depth, tree.name) == (root, 10000, 0, "root")
+    assert [c.name for c in tree.children] == ["a", "My Stuff, 2024", "tiny"]
+    a = tree.children[0]
+    assert [(c.name, c.bytes) for c in a.children] == [("b", 7500)]
+    assert a.own_bytes == 500 and tree.own_bytes == 1000  # files directly inside
+    c = a.children[0].children[0]
+    assert (c.path, c.bytes, c.depth, c.children, c.own_bytes) == (
+        root / "a" / "b" / "c",
+        500,
+        3,
+        (),
+        500,
+    )
+    # Round trip through a saved plan.
+    assert size_tree(Plan.from_json(plan.to_json())) == tree
+
+
+def test_the_remainder_includes_folders_too_small_to_list(tmp_path: Path, root: Path) -> None:
+    from various_tools.tools.disk_usage import size_tree
+
+    _tree_root(root)
+    tree = size_tree(TOOL.scan(_opts(root, tree_depth=1, tree_min_share_pct=10.0), _ctx(tmp_path)))
+    assert [c.name for c in tree.children] == ["a"]
+    assert tree.own_bytes == 10000 - 8000  # top.bin, tiny and "My Stuff, 2024"
+    assert tree.children[0].children == () and tree.children[0].own_bytes == 8000
+
+
+def test_size_tree_with_several_roots_and_with_none(tmp_path: Path) -> None:
+    from various_tools.tools.disk_usage import size_tree
+
+    one, two = tmp_path / "one", tmp_path / "two"
+    _write(one / "a.bin", 100)
+    _write(two / "sub" / "b.bin", 300)
+    plan = TOOL.scan(DiskUsageOptions(roots=[one, two]), _ctx(tmp_path))
+    tree = size_tree(plan)
+    assert tree.path is None and tree.bytes == 400 and tree.depth == -1
+    assert [(c.path, c.bytes) for c in tree.children] == [(two, 300), (one, 100)]
+    assert [c.name for c in tree.children[0].children] == ["sub"]
+    empty = size_tree(TOOL.scan(DiskUsageOptions(roots=[]), _ctx(tmp_path)))
+    assert empty.path is None and empty.bytes == 0 and empty.children == ()
+
+
+def test_recursive_off_gives_the_root_only(tmp_path: Path, root: Path) -> None:
+    from various_tools.tools.disk_usage import size_tree
+
+    _tree_root(root)
+    plan = TOOL.scan(_opts(root, recursive=False), _ctx(tmp_path))
+    assert _tree_notes(plan, root) == [(0, 1000, ".")]
+    assert size_tree(plan).children == ()
+
+
+def test_cloud_only_files_stay_out_of_the_tree(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.tools.disk_usage import size_tree
+
+    _write(root / "box" / "local.bin", 100)
+    _write(root / "box" / "cloud.bin", 7000)
+    _write(root / "cloudy" / "only.bin", 5000)
+    monkeypatch.setattr(
+        du_tool,
+        "_attributes",
+        lambda path, st: OFFLINE if path.name in ("cloud.bin", "only.bin") else 0,
+    )
+    tree = size_tree(TOOL.scan(_opts(root, tree_min_share_pct=0.0), _ctx(tmp_path)))
+    assert tree.bytes == 100 and [(c.name, c.bytes) for c in tree.children] == [("box", 100)]
+
+
+def test_parse_tree_note() -> None:
+    assert du_tool.parse_tree_note("tree-size: 2 1234 C:\\My Files, old\\x") == (
+        2,
+        1234,
+        Path("C:\\My Files, old\\x"),
+    )
+    assert du_tool.parse_tree_note("folder-size: 1 C:\\x") is None
+    assert du_tool.parse_tree_note("tree-size: x 1 C:\\x") is None
 
 
 def test_a_file_outside_the_roots_is_refused_at_apply(

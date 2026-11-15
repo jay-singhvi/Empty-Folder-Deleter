@@ -267,9 +267,10 @@ def test_unknown_option_fields_are_rejected() -> None:
         MediaResizeOptions(roots=[], overwrite=True)  # type: ignore[call-arg]
 
 
-def test_overwrite_is_not_offered_as_an_output() -> None:
+def test_output_choices_are_the_plans() -> None:
+    assert MediaResizeOptions(roots=[], output="overwrite").output == "overwrite"
     with pytest.raises(ValidationError):
-        MediaResizeOptions(roots=[], output="overwrite")  # type: ignore[arg-type]
+        MediaResizeOptions(roots=[], output="replace")  # type: ignore[arg-type]
 
 
 def test_tool_is_discovered_through_the_registry() -> None:
@@ -449,17 +450,28 @@ def test_output_keeps_the_source_modified_time(tmp_path: Path, journal: Journal)
     assert int(out.stat().st_mtime) == 1_700_000_000
 
 
-def test_apply_then_undo_removes_nothing_and_says_outputs_are_manual(
+def test_apply_then_undo_recycles_the_unchanged_outputs_and_keeps_an_edited_one(
     tmp_path: Path, journal: Journal
 ) -> None:
-    """Undo cannot reverse a convert: the engine has no delete-the-output step. The report says
-    so, and the outputs stay where they are (no data is lost)."""
+    """Undo sends each output that is unchanged since the run to the Recycle Bin. An output the
+    user changed afterwards is listed and kept. The originals are never touched."""
     folder = _make_image_tree(tmp_path / "pics")
-    _plan, result = _run(tmp_path, journal, MediaResizeOptions(roots=[folder]))
-    report = undo_run(journal, result.run_id)
-    assert report.reverted == 0
-    assert any("not reversible" in line for line in report.skipped)
-    assert (folder / "resized" / "wide_2560x1440.jpg").exists()
+    originals = {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()}
+    plan, result = _run(tmp_path, journal, MediaResizeOptions(roots=[folder]))
+    edited = folder / "resized" / "wide_2560x1440.jpg"
+    edited.write_bytes(b"the user changed this")
+    recycled: list[Path] = []
+
+    def fake_trash(path: Path) -> None:
+        recycled.append(path)
+        path.unlink()
+
+    report = undo_run(journal, result.run_id, send_to_trash=fake_trash)
+    assert report.reverted == len(plan.selected_actions()) - 1
+    assert any("changed" in line for line in report.skipped)
+    assert edited.exists() and edited not in recycled
+    assert [p.name for p in (folder / "resized").iterdir()] == ["wide_2560x1440.jpg"]
+    assert {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()} == originals
 
 
 def test_small_files_are_never_enlarged(tmp_path: Path, journal: Journal) -> None:
@@ -820,7 +832,8 @@ def test_output_through_a_junction_is_refused(tmp_path: Path, journal: Journal) 
     try:
         result = TOOL.apply(plan, ctx)
         assert result.count("done") == 0
-        assert result.count("failed") == 1
+        # The engine's guard refuses it before the converter runs, so it is journaled as skipped.
+        assert result.count("skipped") == 1
         assert "junction or symlink" in result.outcomes[0].detail
         assert list(outside.rglob("*")) == []
     finally:

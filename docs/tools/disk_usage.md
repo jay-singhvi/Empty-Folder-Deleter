@@ -10,7 +10,7 @@ age. You can send the files you pick to the Recycle Bin. Category: Clean up.
 2. **Preview** lists the largest files, each with its size, type and age, and **none of them is
    checked**. The plan notes carry the folder totals (see "Plan note format").
 3. **Apply** sends the files you checked to the Recycle Bin. Each one is journaled and shows in
-   History. Restore them from the Recycle Bin by hand; Various Tools cannot undo a trash.
+   History. Undo from History puts trashed items back from the Recycle Bin when it finds them there (same path, same time, same size); an item it cannot find is listed to restore by hand.
 
 Folders are measured but never offered for removal: a folder with contents cannot be trashed by
 the engine. Open the folder, pick its files, or use Empty Folder Deleter.
@@ -26,6 +26,8 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 | Include sub-folders | on | Look inside sub-folders. When off, only files directly in each folder are listed and no folder totals are made. |
 | Largest files to list | 50 (1 to 10000) | How many of the largest files are offered for removal. |
 | Largest folders to report | 25 (0 to 10000) | How many folders get a `folder-size:` note. 0 turns the folder report off. |
+| Size map depth (advanced) | 3 (0 to 32) | How many folder levels below each scanned folder get a `tree-size:` note for the size map. 0 gives only the scanned folders. Needs "Include sub-folders". |
+| Size map smallest folder (%, advanced) | 1 (0 to 100) | A folder smaller than this share of its scanned folder gets no `tree-size:` note; it counts in the remainder of the folder above. 0 lists every folder that holds counted files. |
 | Minimum file size (MB) | 0 (0 to 10,000,000) | Ignore smaller files (1 MB is 1,048,576 bytes). Empty files are always ignored. |
 | File kind | any | Count only pictures, videos, music, documents, archives, installers or disk images. |
 | File types | (none) | Count only these extensions, for example `.mp4`. Added to the file kind. |
@@ -61,6 +63,31 @@ Parse them with `^(folder-size|root-size): (\d+) (.+)$`, or call
 - Ties are ordered by path, so two scans of the same tree give the same notes.
 - Other notes: `skipped: cloud-only: ...` and a count of hidden items left out.
 
+### Size map (treemap) notes
+
+For drawing a treemap or sunburst, the plan also holds one note per folder, down to *Size map
+depth* and above *Size map smallest folder*:
+
+```
+tree-size: <depth> <bytes> <path>    depth 0 is a scanned folder; written depth first,
+                                     each folder before its children, children largest first
+```
+
+Parse one with `^tree-size: (\d+) (\d+) (.+)$` or `parse_tree_note(note)` (gives
+`(depth, bytes, Path)` or `None`). A folder's parent is the listed folder whose path is its
+`Path.parent`; a parent is always at least as large as its child, so every listed folder's parent
+is listed too. A folder's **remainder** is its bytes minus the bytes of its listed children: the
+files directly inside it plus the sub-folders too small or too deep to list. Empty folders (no
+counted bytes) are never listed. Cloud-only files are not counted here either.
+
+`various_tools.tools.disk_usage.size_tree(plan) -> SizeNode` rebuilds the tree from these notes
+alone (no disk access, so it works on a saved plan). `SizeNode` is a frozen dataclass:
+`name: str`, `path: Path | None`, `bytes: int`, `depth: int`, `children: tuple[SizeNode, ...]`
+(largest first, ties by path) and the property `own_bytes` (the remainder). With one scanned
+folder that folder is the top node. With several, the top node is `All folders` (`path=None`,
+`depth=-1`) with one child per scanned folder. A plan with no tree notes gives an empty
+`All folders` node.
+
 ## Safety
 
 - The scan reads no file contents and writes nothing.
@@ -68,6 +95,7 @@ Parse them with `^(folder-size|root-size): (\d+) (.+)$`, or call
   mark.
 - Cloud-only OneDrive files are not counted and not offered. They take no space on this device, and
   deleting one would also delete it from the cloud. They are reported as "skipped: cloud-only".
+- OneDrive files and folders are not links, even though Windows marks them as reparse points.
 - Junctions and symlinks are never followed or counted, so nothing outside the chosen folder is
   measured or removed.
 - Protected folders (the Windows folder, Program Files, drive roots, your profile folder) are

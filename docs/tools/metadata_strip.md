@@ -69,8 +69,10 @@ For when you do not want copies. It is recoverable, in this order:
 If any step before 3 fails, the original is untouched and the temporary file is deleted. If the
 rename in step 4 fails after the original is already in the Recycle Bin, the copy is kept, and the
 action's error says where it is and what to rename it to. The plan row says "in place: the original
-goes to the Recycle Bin, then the stripped copy takes its name". **Undo does not restore it**;
-restore the original from the Recycle Bin by hand.
+goes to the Recycle Bin, then the stripped copy takes its name". Recycling the original is its own
+History row. **Undo restores it** from the Recycle Bin (and recycles the stripped copy, if it is
+unchanged); when the Recycle Bin item cannot be found, nothing is changed and the original is
+listed to restore by hand.
 
 ## Options
 
@@ -100,8 +102,10 @@ write timeouts and the `ffprobe` timeout.
 
 ## Limits in this version
 
-- **Undo cannot reverse a strip.** The output is a new file (or, in place, the original is in the
-  Recycle Bin), and undo lists it as "not reversible by undo; restore manually". No file is lost.
+- **Undo of a strip** sends an unchanged output to the Recycle Bin. An output you changed is left
+  alone and listed for manual removal. No file is lost.
+- **Files that are not on this device** are listed in the plan's cloud-only list, for the optional
+  download action. They are never read.
 - **Video container dates stay,** and so do track headers: they describe the file, and ExifTool's
   "remove all" keeps them.
 - **TIFF cannot lose all metadata**, only GPS (see File types).

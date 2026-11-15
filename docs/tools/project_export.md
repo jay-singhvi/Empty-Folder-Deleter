@@ -29,6 +29,7 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 | Output format | txt | `txt` uses separator lines. `md` writes headings and fenced code blocks. |
 | Output file | the output name in the root | Where the export is written. The output file is never part of the export itself. |
 | Output file name | `Project-File-Content` | The file name, without extension, used when no output file is chosen. A plain name: no folders, no characters Windows rejects. |
+| Copy to clipboard | off | After Apply, the app also copies the written file's text to the clipboard, ready to paste into an AI assistant. The export itself never touches the clipboard: the command line and the app do the copy once the file is written. |
 | Separator line (advanced) | 50 `=` signs | The line printed above and below each heading in `txt` exports. One line of text. |
 | Code block languages (advanced) | `.py` = python, `.md` = markdown, `.json` = json, and 11 more | For `md` exports: the language written after each code fence, by extension. Other extensions get a plain block. |
 | Characters per token (advanced) | 4 (1 to 100) | Only the preview's token estimate. It never changes the export. |
@@ -43,6 +44,7 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 - OneDrive cloud-only files are never read. They are listed as skipped, and nothing is downloaded.
 - Junctions and symlinks are never followed.
 - An existing export file is never overwritten.
+- Earlier exports next to the new one (`name.ext`, `name_dupN.ext` and `.partial` leftovers, for the output's own extension as well as `.txt` and `.md`) are left out of the next export.
 
 ## Command line
 

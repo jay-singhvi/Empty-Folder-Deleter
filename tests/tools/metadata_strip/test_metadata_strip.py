@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import subprocess
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,7 @@ from PIL import Image, ImageCms
 from pydantic import ValidationError
 
 from various_tools.core import onedrive
+from various_tools.core import plan as plan_module
 from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal, undo_run
@@ -125,20 +129,39 @@ def _gps_left(tags: dict[str, Any]) -> list[str]:
     return [k for k in tags if "GPS" in k.partition(":")[2].upper() and "Composite" not in k]
 
 
-@pytest.fixture
-def fake_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Replace ``send2trash`` with a move into ``tmp_path/bin``. Returns the trashed paths."""
-    trashed: list[Path] = []
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+class FakeBin(list[Path]):
+    """Stands in for the Recycle Bin: trashing writes a ``$I``/``$R`` pair into a folder under
+    tmp_path. It is a list of the trashed paths, so ``bin == [src]`` checks what was recycled."""
 
-    def fake(path: str | os.PathLike[str]) -> None:
+    def __init__(self, folder: Path) -> None:
+        super().__init__()
+        self.folder = folder
+        folder.mkdir(parents=True, exist_ok=True)
+
+    def trash(self, path: str | os.PathLike[str]) -> None:
         source = Path(path)
-        trashed.append(source)
-        shutil.move(str(source), str(bin_dir / source.name))
+        size = source.stat().st_size
+        key = uuid.uuid4().hex[:6].upper()
+        when = int(datetime.now(UTC).timestamp() * 10_000_000) + 116444736000000000
+        text = str(source) + "\x00"
+        index = struct.pack("<qqqi", 2, size, when, len(text)) + text.encode("utf-16-le")
+        shutil.move(str(source), str(self.folder / f"$R{key}{source.suffix}"))
+        (self.folder / f"$I{key}{source.suffix}").write_bytes(index)
+        self.append(source)
 
-    monkeypatch.setattr(strip_tool, "send2trash", fake)
-    return trashed
+    def locate(self, _path: Path) -> Path | None:
+        return self.folder
+
+    def items(self) -> list[Path]:
+        return sorted(self.folder.glob("$R*"))
+
+
+@pytest.fixture
+def fake_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBin:
+    """Replace the engine's ``send2trash`` with a fake Recycle Bin. Lists the trashed paths."""
+    fake = FakeBin(tmp_path / "bin")
+    monkeypatch.setattr(plan_module, "send2trash", fake.trash)
+    return fake
 
 
 @pytest.fixture
@@ -146,7 +169,7 @@ def no_trash(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(path: object) -> None:
         raise AssertionError(f"the Recycle Bin must not be used here: {path}")
 
-    monkeypatch.setattr(strip_tool, "send2trash", refuse)
+    monkeypatch.setattr(plan_module, "send2trash", refuse)
 
 
 # ----- tag rules (pure) ----------------------------------------------------------------------
@@ -607,6 +630,20 @@ def test_cloud_only_files_are_skipped_and_never_read(
     plan = TOOL.scan(MetadataStripOptions(roots=[tmp_path / "pics"]), _ctx(tmp_path, None))
     assert plan.actions == []
     assert any("skipped: cloud-only, not read" in n for n in plan.notes)
+    assert plan.cloud_only == [tmp_path / "pics" / "a.jpg"]  # for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, exiftool_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    _picture(tmp_path / "pics" / "a.jpg")
+    _picture(tmp_path / "pics" / "sub" / "b.jpg")
+    cloud_placeholder("a.jpg", "sub")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(
+        MetadataStripOptions(roots=[tmp_path / "pics"], recursive=True), _ctx(tmp_path, None)
+    )
+    assert sorted(a.src.name for a in plan.selected_actions() if a.src) == ["a.jpg", "b.jpg"]
+    assert plan.cloud_only == []
 
 
 def test_apply_never_reads_a_file_that_became_cloud_only_after_scan(
@@ -675,7 +712,8 @@ def test_output_through_a_junction_is_refused(
         pytest.skip("could not create a junction in this environment")
     try:
         result = TOOL.apply(plan, ctx)
-        assert result.count("done") == 0 and result.count("failed") == 1
+        # The engine's guard refuses it before the handler runs, and journals it as skipped.
+        assert result.count("done") == 0 and result.count("skipped") == 1
         assert "junction or symlink" in result.outcomes[0].detail
         assert list(outside.rglob("*")) == []
     finally:
@@ -696,15 +734,23 @@ def test_a_plan_cannot_reach_outside_the_selected_folders(
     assert not (tmp_path / "pics" / "stripped").exists()
 
 
-def test_apply_then_undo_says_outputs_are_manual(
-    tmp_path: Path, journal: Journal, exiftool_path: Path, no_trash: None
+def test_undo_recycles_an_unchanged_output_and_lists_a_changed_one(
+    tmp_path: Path, journal: Journal, exiftool_path: Path, fake_trash: FakeBin
 ) -> None:
-    src = _picture(tmp_path / "pics" / "a.jpg")
-    _plan, result = _run(tmp_path, journal, MetadataStripOptions(roots=[src.parent]))
-    report = undo_run(journal, result.run_id)
-    assert report.reverted == 0
-    assert any("not reversible" in line for line in report.skipped)
-    assert (src.parent / "stripped" / "a.jpg").exists()
+    first = _picture(tmp_path / "pics" / "a.jpg")
+    _picture(tmp_path / "pics" / "b.jpg")
+    _plan, result = _run(tmp_path, journal, MetadataStripOptions(roots=[first.parent]))
+    assert result.count("done") == 2
+    untouched = first.parent / "stripped" / "a.jpg"
+    edited = first.parent / "stripped" / "b.jpg"
+    edited.write_bytes(b"the user changed this output")
+
+    report = undo_run(journal, result.run_id, send_to_trash=fake_trash.trash)
+    assert report.reverted == 1
+    assert not untouched.exists() and fake_trash == [untouched]
+    assert edited.read_bytes() == b"the user changed this output"
+    assert any("changed after the run" in line for line in report.skipped)
+    assert first.exists()  # originals are never touched
 
 
 # ----- ExifTool missing, timeouts ------------------------------------------------------------
@@ -794,13 +840,13 @@ def test_in_place_checks_the_copy_recycles_the_original_then_renames(
     tmp_path: Path,
     journal: Journal,
     exiftool_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.jpg")
     original = src.read_bytes()
     at_trash_time: dict[str, Any] = {}
-    real_fake = strip_tool.send2trash
+    real_fake = plan_module.send2trash
 
     def watching(path: str | os.PathLike[str]) -> None:
         staging = [p for p in src.parent.iterdir() if p.name.endswith(".tmp")]
@@ -808,7 +854,7 @@ def test_in_place_checks_the_copy_recycles_the_original_then_renames(
         at_trash_time["clean"] = _gps_left(_read(exiftool_path, staging[0])) == []
         real_fake(path)
 
-    monkeypatch.setattr(strip_tool, "send2trash", watching)
+    monkeypatch.setattr(plan_module, "send2trash", watching)
     opts = MetadataStripOptions(roots=[src.parent], in_place=True)
     plan, result = _run(tmp_path, journal, opts)
     assert "Recycle Bin" in plan.actions[0].reason
@@ -817,18 +863,44 @@ def test_in_place_checks_the_copy_recycles_the_original_then_renames(
     # The copy was complete and clean before the original went away.
     assert len(at_trash_time["staging"]) == 1 and at_trash_time["clean"] is True
     assert fake_trash == [src]
-    assert (tmp_path / "bin" / "a.jpg").read_bytes() == original
+    assert [item.read_bytes() for item in fake_trash.items()] == [original]
     assert _gps_left(_read(exiftool_path, src)) == []
     assert _read(exiftool_path, src)["IFD0:Make"] == "TestMake"
     assert list(src.parent.iterdir()) == [src]  # no stripped/ folder, no temp file
     assert "Recycle Bin" in plan.notes[0]
+    # Rule 5: recycling the original is its own journal row, in the same step as the strip.
+    rows = journal.actions(result.run_id)
+    assert [(r.kind, r.status, r.seq) for r in rows] == [
+        ("convert", "done", 1),
+        ("trash", "done", 1),
+    ]
+    assert rows[1].src == str(src)
+
+
+def test_undoing_an_in_place_strip_brings_the_original_back_from_the_recycle_bin(
+    tmp_path: Path, journal: Journal, exiftool_path: Path, fake_trash: FakeBin
+) -> None:
+    src = _picture(tmp_path / "pics" / "a.jpg")
+    original = src.read_bytes()
+    opts = MetadataStripOptions(roots=[src.parent], in_place=True)
+    _plan, result = _run(tmp_path, journal, opts)
+    assert result.count("done") == 1 and src.read_bytes() != original
+
+    report = undo_run(
+        journal, result.run_id, send_to_trash=fake_trash.trash, locate_bin=fake_trash.locate
+    )
+    assert report.reverted == 2, (report.skipped, report.failed)
+    assert src.read_bytes() == original
+    clean_copies = [item.read_bytes() for item in fake_trash.items()]
+    assert len(clean_copies) == 1 and clean_copies[0] != original  # the clean copy was recycled
+    assert [a.status for a in journal.actions(result.run_id)] == ["undone", "undone"]
 
 
 def test_in_place_with_a_copy_that_fails_its_check_leaves_the_original_alone(
     tmp_path: Path,
     journal: Journal,
     exiftool_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.jpg")
@@ -856,9 +928,13 @@ def test_in_place_when_the_recycle_bin_refuses_keeps_the_original(
     def refuse(path: object) -> None:
         raise OSError("the Recycle Bin is not available")
 
-    monkeypatch.setattr(strip_tool, "send2trash", refuse)
+    monkeypatch.setattr(plan_module, "send2trash", refuse)
     _plan, result = _run(tmp_path, journal, MetadataStripOptions(roots=[src.parent], in_place=True))
     assert result.count("failed") == 1
+    assert [(r.kind, r.status) for r in journal.actions(result.run_id)] == [
+        ("convert", "failed"),
+        ("trash", "failed"),
+    ]
     assert src.read_bytes() == original
     assert list(src.parent.iterdir()) == [src]
 
@@ -867,7 +943,7 @@ def test_in_place_when_the_final_rename_fails_the_copy_is_kept_and_reported(
     tmp_path: Path,
     journal: Journal,
     exiftool_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.jpg")

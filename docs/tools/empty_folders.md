@@ -31,12 +31,11 @@ the app settings, where the list can be changed.
 ## Safety
 
 - The folder you select is never removed, even when it is empty.
-- Junctions and symlinks are never followed, so nothing outside the selected folder is touched.
-- Removal goes to the Recycle Bin by default. Trashed items cannot be restored by Various Tools,
-  so restore them from the Recycle Bin by hand.
+- Junctions and symlinks are never followed, so nothing outside the selected folder is touched. OneDrive files and folders are not links, even though Windows marks them as reparse points.
+- Removal goes to the Recycle Bin by default. Undo from History puts trashed items back from the Recycle Bin when it finds them there (same path, same time, same size); an item it cannot find is listed to restore by hand.
 - A folder that still has contents is refused at apply time, even if its selection was changed
   by hand.
-- Unchecking a folder in the preview also unchecks the removal of every folder above it.
+- Unchecking a folder in the preview also unchecks the removal of every folder above it. A junk file is only removed together with its folder: ticking or unticking its row acts on the folder, and a junk file whose folder is not selected is kept and recorded as skipped when applied.
 
 ## Command line
 

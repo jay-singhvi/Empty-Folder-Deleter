@@ -9,17 +9,25 @@ Rules that always hold (legacy docstring, rules 1-4, 🔒):
 1. the date is the capture date when one is available (EXIF for photos, the container's creation
    time for videos). Only then does the file's modified time count, and only when it is plausible;
 2. a file with no usable date and no plausible modified time goes to the unknown-date folder;
-3. a cloud-only OneDrive file is never read, so its date is unknown, and it is never moved. It is
-   reported as skipped. Nothing is downloaded;
+3. a cloud-only OneDrive file is never read during the scan, so its date is unknown, and it is
+   never moved as it is. By default (``cloud_only="skip"``) it is reported as skipped and listed
+   in ``plan.cloud_only``, and nothing is downloaded. Only the owner's explicit choice
+   (``ask`` or ``download``, then Apply on a ticked row) downloads it, at apply time. It is then
+   on this device, and its date and destination are worked out exactly as the scan does;
 4. only files already on this device are moved. Junctions are not followed (AGENTS.md rule 4).
 
 Also: a file already in its place is not moved, the selected folders are never changed, protected
-folders are refused (rule 6), and every move is journaled (rule 5).
+folders are refused (rule 6), and every move is journaled (rule 5). With ``also_resize`` each
+picture is first resized in place by media_resize's pipeline: the resized copy is checked, the
+original goes to the Recycle Bin as its own journaled row, and undo restores it. Pictures are
+never enlarged.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import sqlite3
 from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -35,20 +43,37 @@ from various_tools.core.deps import install_hint
 from various_tools.core.fs import (
     FileInfo,
     destination_refusal,
+    is_inside,
+    is_link,
     long_path,
+    move_no_replace,
     protected_reason,
+    reparse_ancestor,
     root_refusal,
+    same_path,
+    stat_no_follow,
     walk,
 )
 from various_tools.core.media.exif import ExifInfo
 from various_tools.core.onedrive import (
     CloudOnlyFileError,
     SyncStatus,
+    force_download,
     get_sync_status,
     is_on_device,
+    unpin_file,
 )
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
-from various_tools.tools.base import Category, ToolOptions
+from various_tools.core.plan import (
+    ActionKind,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+    extra_action,
+)
+from various_tools.tools.base import Category, ToolExtra, ToolOptions
+from various_tools.tools.media_resize import images
+from various_tools.tools.media_resize.images import ImageRules, SizePlan
 from various_tools.tools.organize_by_date import dates
 from various_tools.tools.organize_by_date.catalog import (
     DONE_STATUSES,
@@ -73,6 +98,12 @@ DEFAULT_CLASH_SUFFIX = "_dup"
 ALLOWED_TEMPLATE_FIELDS = ("year", "month")
 _BAD_NAME_CHARS = '\\/:*?"<>|'
 _BAD_PATH_CHARS = '*?"<>|'  # a sub-path may hold separators, but not these
+DOWNLOAD_WAIT_SECONDS = 30  # the legacy script's DOWNLOAD_WAIT_SECONDS
+RESIZE_PX = 1080  # media_resize's default side length
+RESIZE_JPEG_QUALITY = 85  # media_resize's default JPEG quality
+RESIZED_NOTE = "the original goes to the Recycle Bin"
+CloudOnlyChoice = Literal["skip", "ask", "download"]
+ResizeSide = Literal["shorter_side", "longer_side"]
 
 
 def default_catalog_path(ctx: RunContext) -> Path:
@@ -257,9 +288,94 @@ class OrganizeByDateOptions(ToolOptions):
         title="Catalog file",
         description=(
             "The SQLite file that records what each scan read. Empty uses catalog.sqlite in the "
-            "App data folder from Settings."
+            "App data folder from Settings. The catalog export and import buttons always use "
+            "that default file."
         ),
         json_schema_extra={"widget": "file", "group": "Advanced", "advanced": True},
+    )
+    cloud_only: CloudOnlyChoice = Field(
+        default="skip",
+        title="Cloud-only files",
+        description=(
+            "🔒 Locked default: skip. What to do with OneDrive files that are only in the "
+            "cloud. skip: never read or download them; they are reported as skipped. ask: list "
+            "each one unticked; ticking a row downloads that file when you apply, then moves it "
+            "by its date. download: the same rows, already ticked, so Apply downloads every one "
+            "of them, which uses disk space and network. Nothing is downloaded during the scan."
+        ),
+        json_schema_extra={"group": "Cloud-only files", "advanced": True, "locked": True},
+    )
+    download_wait_seconds: int = Field(
+        default=DOWNLOAD_WAIT_SECONDS,
+        ge=1,
+        le=3600,
+        title="Download wait (seconds)",
+        description=(
+            "How long to wait for OneDrive to download one file before giving up on it. The "
+            "file then stays where it is and its row fails. Default: 30, as in the original "
+            "script."
+        ),
+        json_schema_extra={
+            "group": "Cloud-only files",
+            "advanced": True,
+            "depends_on": "cloud_only=ask|download",
+        },
+    )
+    keep_pinned: bool = Field(
+        default=False,
+        title="Keep downloaded files on this device",
+        description=(
+            "A download marks the file 'Always keep on this device'. Off (default): the mark is "
+            "removed again after the move, as the original script did, so OneDrive can free "
+            "the space later. On: the file stays pinned and downloaded."
+        ),
+        json_schema_extra={
+            "group": "Cloud-only files",
+            "advanced": True,
+            "depends_on": "cloud_only=ask|download",
+        },
+    )
+    also_resize: bool = Field(
+        default=False,
+        title="Also resize pictures",
+        description=(
+            "Shrink each picture (JPEG, PNG, BMP, GIF, TIFF, WebP) in place before it is moved, "
+            "as the original script's --resize did. The resized copy is checked first, then "
+            "the original goes to the Recycle Bin, and undo restores it. Pictures are never "
+            "enlarged. Videos, RAW, HEIC and downloaded files are only moved. Default: off."
+        ),
+        json_schema_extra={"group": "Resize", "advanced": True},
+    )
+    resize_mode: ResizeSide = Field(
+        default="shorter_side",
+        title="Side to resize",
+        description=(
+            "Which side of a picture becomes the length below: the shorter side (the original "
+            "script's rule) or the longer side. Default: shorter side."
+        ),
+        json_schema_extra={"group": "Resize", "advanced": True, "depends_on": "also_resize=true"},
+    )
+    resize_px: int = Field(
+        default=RESIZE_PX,
+        ge=16,
+        le=16384,
+        title="Side length (px)",
+        description=(
+            "The length, in pixels, that the chosen side becomes. Pictures whose side is already "
+            "this length or shorter are left alone. Default: 1080, as in Resize media."
+        ),
+        json_schema_extra={"group": "Resize", "advanced": True, "depends_on": "also_resize=true"},
+    )
+    resize_jpeg_quality: int = Field(
+        default=RESIZE_JPEG_QUALITY,
+        ge=1,
+        le=100,
+        title="JPEG quality",
+        description=(
+            "Quality of resized JPEG pictures, from 1 (smallest) to 100 (best). Default: 85, as "
+            "in Resize media (the original script used 95)."
+        ),
+        json_schema_extra={"group": "Resize", "advanced": True, "depends_on": "also_resize=true"},
     )
 
     @field_validator("photo_exts", "raw_exts", "video_exts")
@@ -290,21 +406,65 @@ class _Config:
     video_exts: frozenset[str]
     unknown_folder: str
     clash_suffix: str
+    resize: ImageRules | None = None  # set when also_resize is on
 
     @property
     def processable(self) -> frozenset[str]:
         return self.photo_exts | self.raw_exts | self.video_exts
 
 
+def _resize_rules(opts: OrganizeByDateOptions) -> ImageRules | None:
+    """media_resize's rules for ``also_resize``: never enlarge, keep the metadata."""
+    if not opts.also_resize:
+        return None
+    return ImageRules(
+        mode=opts.resize_mode,
+        box=None,
+        target_px=opts.resize_px,
+        amount=100,  # used only by the percent mode, which this tool does not offer
+        jpeg_quality=opts.resize_jpeg_quality,
+        keep_metadata=True,
+        never_upscale=True,  # 🔒 media_resize's locked default; not an option here
+    )
+
+
+def _config(opts: OrganizeByDateOptions, ctx: RunContext, unknown_folder: str) -> _Config:
+    """The settings one run reads files with. The scan and a download at apply share it."""
+    return _Config(
+        priority=tuple(opts.date_priority),
+        workers=opts.workers if opts.workers is not None else ctx.settings.workers,
+        min_year=(
+            opts.min_plausible_year
+            if opts.min_plausible_year is not None
+            else ctx.settings.min_plausible_year
+        ),
+        now=datetime.now(),
+        ffprobe=ctx.deps.ffprobe(),
+        exiftool=ctx.deps.exiftool(),
+        ffprobe_timeout=ctx.settings.ffprobe_timeout_s,
+        exiftool_timeout=ctx.settings.exiftool_read_timeout_s,
+        photo_exts=frozenset(opts.photo_exts),
+        raw_exts=frozenset(opts.raw_exts),
+        video_exts=frozenset(opts.video_exts),
+        unknown_folder=unknown_folder,
+        clash_suffix=opts.clash_suffix,
+        resize=_resize_rules(opts),
+    )
+
+
 @dataclass(frozen=True)
 class _Inspection:
-    """What reading one file produced. ``state`` is ``ok``, ``cloud_only`` or ``error``."""
+    """What reading one file produced. ``state`` is ``ok``, ``cloud_only`` or ``error``.
+
+    ``resize`` is set only with ``also_resize``: the planned sizes, or why it is not resized.
+    """
 
     info: FileInfo
     sync: str
     state: Literal["ok", "cloud_only", "error"]
     reading: dates.Reading | None = None
     error: str | None = None
+    resize: SizePlan | str | None = None
 
 
 @dataclass
@@ -314,6 +474,7 @@ class _Totals:
     cloud_only: int = 0
     errors: int = 0
     unknown: int = 0
+    to_resize: int = 0
     by_source: Counter[str] = field(default_factory=Counter)
 
 
@@ -454,7 +615,21 @@ def _inspect(info: FileInfo, cfg: _Config) -> _Inspection:
         return _Inspection(info, SyncStatus.CLOUD_ONLY.value, "cloud_only")
     except Exception as exc:  # one unreadable file must not stop the run; it is reported
         return _Inspection(info, sync.value, "error", error=f"{type(exc).__name__}: {exc}")
-    return _Inspection(info, sync.value, "ok", reading=reading)
+    return _Inspection(info, sync.value, "ok", reading=reading, resize=_resize_plan(path, cfg))
+
+
+def _resize_plan(path: Path, cfg: _Config) -> SizePlan | str | None:
+    """With ``also_resize``: the sizes for a picture media_resize can rewrite, or why not."""
+    if cfg.resize is None or not images.is_image_name(path.name):
+        return None
+    if path.suffix.lower() not in cfg.photo_exts:
+        return None
+    try:
+        return images.preview(path, cfg.resize)  # header only; the file is on the device
+    except CloudOnlyFileError:
+        return "cloud-only, not read"
+    except Exception as exc:  # one unreadable header must not stop the run; the move still runs
+        return f"could not read the picture size ({exc})"
 
 
 def _relative_label(path: Path, dest_root: Path) -> str:
@@ -486,17 +661,7 @@ class _Planner:
         self.totals = _Totals()
 
     def add(self, insp: _Inspection) -> None:
-        path = insp.info.path
-        row: dict[str, object] = {
-            "key": path_key(path),
-            "path": str(path),
-            "original_path": str(path),
-            "file_name": path.name,
-            "size": insp.info.size,
-            "mtime": insp.info.mtime,
-            "sync_status": insp.sync,
-            "checked": self.stamp,
-        }
+        row = _base_row(insp, self.stamp)
         if insp.state == "cloud_only":
             self._cloud_only(insp, row)
         elif insp.state == "error" or insp.reading is None:
@@ -508,16 +673,35 @@ class _Planner:
     def _cloud_only(self, insp: _Inspection, row: dict[str, object]) -> None:
         path = insp.info.path
         self.totals.cloud_only += 1
+        if self.opts.cloud_only == "skip":
+            self.plan.cloud_only.append(path)
+            self.actions.append(
+                PlannedAction(
+                    kind=ActionKind.MOVE,
+                    src=path,
+                    dst=None,
+                    reason="skipped: cloud-only (not on device). Not read, so its date is unknown.",
+                    selected=False,
+                )
+            )
+            row.update(status="skipped", last_action="skipped: cloud-only")
+            return
+        # ask / download: a row whose tick is the consent to download (rule 3). Nothing is read
+        # or downloaded now; the handler does both at apply, for this row only.
+        wait = self.opts.download_wait_seconds
         self.actions.append(
             PlannedAction(
-                kind=ActionKind.MOVE,
+                kind=ActionKind.CONVERT,
                 src=path,
                 dst=None,
-                reason="skipped: cloud-only (not on device). Not read, so its date is unknown.",
-                selected=False,
+                reason=(
+                    f"cloud-only: will be downloaded from OneDrive first (waiting up to {wait} s), "
+                    "then moved by its date. Not read until you apply."
+                ),
+                selected=self.opts.cloud_only == "download",
             )
         )
-        row.update(status="skipped", last_action="skipped: cloud-only")
+        row.update(status="skipped", last_action="cloud-only: offered for download")
 
     def _error(self, insp: _Inspection, row: dict[str, object]) -> None:
         path = insp.info.path
@@ -531,59 +715,112 @@ class _Planner:
         folder = folder_for(
             self.dest_root, self.opts.folder_template, self.cfg.unknown_folder, reading.date
         )
-        exif: ExifInfo | None = reading.exif
-        row.update(
-            capture_time=reading.date.isoformat(timespec="seconds") if reading.date else None,
-            date_source=reading.label,
-            camera_make=exif.camera_make if exif else None,
-            camera_model=exif.camera_model if exif else None,
-            width=exif.width if exif else None,
-            height=exif.height if exif else None,
-            gps_lat=exif.gps[0] if exif and exif.gps else None,
-            gps_lon=exif.gps[1] if exif and exif.gps else None,
-        )
+        row.update(_reading_fields(reading))
         if reading.date is None:
             self.totals.unknown += 1
         self.totals.by_source[reading.label] += 1
+        not_resized = self._resize(path, insp.resize)
 
         if path_key(folder / path.name) == path_key(path):
             self.totals.organized += 1
             row.update(status="organized", last_action="already in place", destination=str(path))
             return
 
-        dst = self._claim(folder, path.name)
-        when = reading.date.strftime("%Y-%m-%d %H:%M:%S") if reading.date else "no usable date"
-        self.actions.append(
-            PlannedAction(
-                kind=ActionKind.MOVE,
-                src=path,
-                dst=dst,
-                reason=f"{reading.label}: {when} -> {_relative_label(dst.parent, self.dest_root)}",
-            )
-        )
+        dst = _claim(folder, path.name, self.claimed, self.cfg.clash_suffix)
+        reason = _move_reason(reading, dst, self.dest_root)
+        if not_resized:
+            reason += f"; not resized: {not_resized}"
+        self.actions.append(PlannedAction(kind=ActionKind.MOVE, src=path, dst=dst, reason=reason))
         self.totals.to_move += 1
         row.update(status="planned", last_action="planned move", destination=str(dst))
 
-    def _claim(self, folder: Path, name: str) -> Path:
-        """A free destination: the first name that is neither on disk nor claimed by this batch."""
-        stem, suffix = Path(name).stem, Path(name).suffix
-        candidate = folder / name
-        counter = 0
-        while path_key(candidate) in self.claimed or os.path.lexists(long_path(candidate)):
-            counter += 1
-            candidate = folder / f"{stem}{self.cfg.clash_suffix}{counter}{suffix}"
-        self.claimed.add(path_key(candidate))
-        return candidate
+    def _resize(self, path: Path, planned: SizePlan | str | None) -> str | None:
+        """Plan the in-place resize that runs before the move. Returns why not, if not."""
+        if not isinstance(planned, SizePlan):
+            return planned
+        width, height = planned.source_size
+        target = planned.target
+        side = "shorter" if self.opts.resize_mode == "shorter_side" else "longer"
+        self.actions.append(
+            PlannedAction(
+                kind=ActionKind.CONVERT,
+                src=path,
+                dst=path,
+                reason=(
+                    f"resize {width}x{height} -> {target.width}x{target.height} in place "
+                    f"({side} side {self.opts.resize_px} px), before the move; {RESIZED_NOTE}"
+                ),
+            )
+        )
+        self.totals.to_resize += 1
+        return None
 
 
-def _summary(unknown_folder: str, totals: _Totals, skipped_processed: int) -> str:
+def _base_row(insp: _Inspection, stamp: str) -> dict[str, object]:
+    """The catalog row every inspected file gets: where it is and what the listing said."""
+    path = insp.info.path
+    return {
+        "key": path_key(path),
+        "path": str(path),
+        "original_path": str(path),
+        "file_name": path.name,
+        "size": insp.info.size,
+        "mtime": insp.info.mtime,
+        "sync_status": insp.sync,
+        "checked": stamp,
+    }
+
+
+def _reading_fields(reading: dates.Reading) -> dict[str, object]:
+    """The catalog fields that come from reading a file's date and EXIF."""
+    exif: ExifInfo | None = reading.exif
+    return {
+        "capture_time": reading.date.isoformat(timespec="seconds") if reading.date else None,
+        "date_source": reading.label,
+        "camera_make": exif.camera_make if exif else None,
+        "camera_model": exif.camera_model if exif else None,
+        "width": exif.width if exif else None,
+        "height": exif.height if exif else None,
+        "gps_lat": exif.gps[0] if exif and exif.gps else None,
+        "gps_lon": exif.gps[1] if exif and exif.gps else None,
+    }
+
+
+def _move_reason(reading: dates.Reading, dst: Path, dest_root: Path) -> str:
+    when = reading.date.strftime("%Y-%m-%d %H:%M:%S") if reading.date else "no usable date"
+    return f"{reading.label}: {when} -> {_relative_label(dst.parent, dest_root)}"
+
+
+def _claim(folder: Path, name: str, claimed: set[str], clash_suffix: str) -> Path:
+    """A free destination: the first name that is neither on disk nor in ``claimed``. The name
+    found is added to ``claimed``, so one batch never gives two files the same name."""
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate = folder / name
+    counter = 0
+    while path_key(candidate) in claimed or os.path.lexists(long_path(candidate)):
+        counter += 1
+        candidate = folder / f"{stem}{clash_suffix}{counter}{suffix}"
+    claimed.add(path_key(candidate))
+    return candidate
+
+
+def _summary(
+    opts: OrganizeByDateOptions, unknown_folder: str, totals: _Totals, skipped_processed: int
+) -> str:
+    if opts.cloud_only == "skip":
+        cloud = f"{totals.cloud_only} cloud-only, skipped and not read"
+    else:
+        how = "ticked" if opts.cloud_only == "download" else "tick a row to download that file"
+        cloud = f"{totals.cloud_only} cloud-only, not read yet and offered for download ({how})"
     parts = [
         f"Organize by date: {totals.to_move} file(s) to move"
         f" ({totals.unknown} with no usable date go to '{unknown_folder}')",
         f"{totals.organized} already in place",
-        f"{totals.cloud_only} cloud-only, skipped and not read",
+        cloud,
         f"{totals.errors} could not be read",
     ]
+    if opts.also_resize:
+        parts.append(f"{totals.to_resize} picture(s) to resize in place first")
     if skipped_processed:
         parts.append(f"{skipped_processed} skipped as already processed")
     text = ", ".join(parts) + "."
@@ -599,7 +836,7 @@ class OrganizeByDate:
     description = (
         "Move photos and videos into year and month folders, by capture date (EXIF or the video's "
         "creation time), or by modified date when no capture date exists. Cloud-only files are "
-        "skipped and never read."
+        "skipped and never read, unless you choose to download them."
     )
     category: Category = "Organize"
     Options = OrganizeByDateOptions
@@ -633,37 +870,17 @@ class OrganizeByDate:
             return plan
         plan.roots = roots
 
-        ffprobe = ctx.deps.ffprobe()
-        exiftool = ctx.deps.exiftool()
-        if "video_tag" in opts.date_priority and ffprobe is None:
+        cfg = _config(opts, ctx, unknown_folder)
+        if "video_tag" in opts.date_priority and cfg.ffprobe is None:
             plan.notes.append(
                 "Videos use their file date: ffprobe was not found, so their embedded creation "
                 f"time is not read. Install it with `{install_hint('ffmpeg')}`, or set its path "
                 "in Settings."
             )
-        if "exiftool" in opts.date_priority and exiftool is None:
+        if "exiftool" in opts.date_priority and cfg.exiftool is None:
             plan.notes.append(
                 "RAW files use their file date: ExifTool was not found. Set its path in Settings."
             )
-        cfg = _Config(
-            priority=tuple(opts.date_priority),
-            workers=opts.workers if opts.workers is not None else ctx.settings.workers,
-            min_year=(
-                opts.min_plausible_year
-                if opts.min_plausible_year is not None
-                else ctx.settings.min_plausible_year
-            ),
-            now=datetime.now(),
-            ffprobe=ffprobe,
-            exiftool=exiftool,
-            ffprobe_timeout=ctx.settings.ffprobe_timeout_s,
-            exiftool_timeout=ctx.settings.exiftool_read_timeout_s,
-            photo_exts=frozenset(opts.photo_exts),
-            raw_exts=frozenset(opts.raw_exts),
-            video_exts=frozenset(opts.video_exts),
-            unknown_folder=unknown_folder,
-            clash_suffix=opts.clash_suffix,
-        )
 
         catalog_path = opts.catalog_path or default_catalog_path(ctx)
         with Catalog(catalog_path) as catalog:
@@ -680,7 +897,7 @@ class OrganizeByDate:
             plan.actions = planner.actions
             catalog.write_scan(planner.rows)
 
-        plan.notes.insert(0, _summary(unknown_folder, planner.totals, skipped_processed))
+        plan.notes.insert(0, _summary(opts, unknown_folder, planner.totals, skipped_processed))
         ctx.log.info(
             "organize_by_date scan: %d candidate(s), %d to move",
             len(selected),
@@ -712,30 +929,311 @@ class OrganizeByDate:
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
         opts = OrganizeByDateOptions.model_validate_json(plan.options_json)
-        # AGENTS.md rule 3: a file that became cloud-only after the scan is not moved, because a
-        # move across volumes would read it.
         for action in plan.actions:
-            if (
-                action.selected
-                and action.src is not None
-                and not is_on_device(get_sync_status(action.src))
-            ):
+            if not action.selected or action.src is None or _is_download_row(action):
+                continue
+            # AGENTS.md rule 3: a file that became cloud-only after the scan is not moved or
+            # resized, because a move across volumes or a resize would read it. A download row
+            # is cloud-only on purpose: its tick is the consent to download it.
+            if not is_on_device(get_sync_status(action.src)):
                 action.selected = False
                 plan.notes.append(f"skipped: became cloud-only after the scan: {action.src}")
+        _drop_resizes_without_their_move(plan)
 
-        result = apply_plan(plan, ctx)
+        applier = _Applier(opts, plan, ctx)
+        result = apply_plan(plan, ctx, handlers={ActionKind.CONVERT: applier})
+        _update_catalog(opts, plan, ctx, result, applier)
+        return result
 
-        catalog_path = opts.catalog_path or default_catalog_path(ctx)
-        with Catalog(catalog_path) as catalog:
-            for outcome in result.outcomes:
-                if outcome.src is None:
-                    continue
-                src = Path(outcome.src)
-                if outcome.status == "done" and outcome.dst is not None:
+    extras: tuple[ToolExtra, ...] = ()
+
+
+def _is_download_row(action: PlannedAction) -> bool:
+    """A cloud-only file offered for download: a ``convert`` row without a destination."""
+    return action.kind is ActionKind.CONVERT and action.dst is None
+
+
+def _is_resize_row(action: PlannedAction) -> bool:
+    """An ``also_resize`` row: a ``convert`` that rewrites the picture at its own path."""
+    return (
+        action.kind is ActionKind.CONVERT
+        and action.src is not None
+        and action.dst is not None
+        and same_path(action.src, action.dst)
+    )
+
+
+def _drop_resizes_without_their_move(plan: Plan) -> None:
+    """A picture whose move was unticked is not resized either: the resize belongs to the move.
+    A picture already in its place has no move row, and its resize stands alone."""
+    moves = {path_key(a.src) for a in plan.actions if a.kind is ActionKind.MOVE and a.src}
+    ticked = {
+        path_key(a.src) for a in plan.actions if a.kind is ActionKind.MOVE and a.src and a.selected
+    }
+    for action in plan.actions:
+        if not (action.selected and _is_resize_row(action)) or action.src is None:
+            continue
+        key = path_key(action.src)
+        if key in moves and key not in ticked:
+            action.selected = False
+            plan.notes.append(f"not resized, because its move is not ticked: {action.src}")
+
+
+def _update_catalog(
+    opts: OrganizeByDateOptions,
+    plan: Plan,
+    ctx: RunContext,
+    result: RunResult,
+    applier: _Applier,
+) -> None:
+    """Record what the run did. A catalog problem never hides the run's result: it is noted
+    and logged per file, and the remaining files are still recorded."""
+
+    def problem(name: str, exc: BaseException) -> None:
+        message = f"catalog: could not record {name}: {exc}"
+        plan.notes.append(message)
+        ctx.log.warning("organize_by_date %s", message)
+
+    catalog_path = opts.catalog_path or default_catalog_path(ctx)
+    try:
+        catalog = Catalog(catalog_path)
+    except (sqlite3.Error, OSError) as exc:
+        problem(str(catalog_path), exc)
+        return
+    with catalog:
+        for outcome in result.outcomes:
+            if outcome.src is None:
+                continue
+            src = Path(outcome.src)
+            try:
+                downloaded = applier.moved.get(path_key(src))
+                if outcome.status == "done" and outcome.kind == "move" and outcome.dst:
                     catalog.record_move(src, Path(outcome.dst))
+                elif outcome.status == "done" and downloaded is not None:
+                    dst, row = downloaded
+                    catalog.write_scan([row])
+                    if not same_path(src, dst):
+                        catalog.record_move(src, dst)
                 elif outcome.status == "failed":
                     catalog.record_failure(src, outcome.detail)
-        return result
+            except (sqlite3.Error, OSError) as exc:
+                problem(src.name, exc)
+
+
+class _Applier:
+    """The ``convert`` handler: an ``also_resize`` rewrite, or a download that the user ticked.
+
+    Every call checks its source again: inside a selected folder, not the folder itself, not a
+    link and not below one (rule 4).
+    """
+
+    def __init__(self, opts: OrganizeByDateOptions, plan: Plan, ctx: RunContext) -> None:
+        self.opts = opts
+        self.plan = plan
+        self.ctx = ctx
+        self.rules = _resize_rules(opts)
+        # Names other rows of this plan will take, so a download never takes one of them.
+        self.claimed = {
+            path_key(a.dst)
+            for a in plan.actions
+            if a.kind is ActionKind.MOVE and a.dst is not None and a.selected
+        }
+        # path key of each downloaded source -> (where it went, its catalog row)
+        self.moved: dict[str, tuple[Path, dict[str, object]]] = {}
+        self._cfg: _Config | None = None
+
+    def __call__(self, action: PlannedAction) -> Path | None:
+        src = action.src
+        if src is None:
+            raise ValueError("the action has no source")
+        self._check_source(src)
+        if _is_download_row(action):
+            self._download(src)
+            # The move is journaled as its own row with the real destination, so undo moves the
+            # file back. Returning a path here would make undo recycle the photo instead.
+            return None
+        if _is_resize_row(action):
+            return self._resize(src)
+        raise ValueError("this tool only resizes in place or downloads; nothing was changed")
+
+    def _check_source(self, src: Path) -> None:
+        roots = [r for r in self.plan.roots if is_inside(src, r)]
+        if not roots:
+            raise ValueError(f"source is outside the selected folders: {src}")
+        root = max(roots, key=lambda r: len(str(r)))
+        if same_path(src, root):
+            raise ValueError("the selected root folder is never changed")
+        link = reparse_ancestor(src.parent, root)
+        if link is not None or is_link(src):
+            raise ValueError(f"source is a junction or symlink, or inside one: {link or src}")
+
+    # ----- also_resize ---------------------------------------------------------------------
+
+    def _resize(self, src: Path) -> Path:
+        if self.rules is None:
+            raise ValueError("resizing is off in this plan's options; the picture was not changed")
+        rendered = images.render(src, src.suffix.lower(), self.rules, raw_to_jpeg=False)
+        if isinstance(rendered, str):
+            raise ValueError(f"not resized: {rendered}")
+        images.replace_in_place(rendered, src)
+        return src
+
+    # ----- downloads -----------------------------------------------------------------------
+
+    def _config(self) -> _Config:
+        if self._cfg is None:
+            unknown = _unknown_folder(self.opts, self.ctx)
+            # Downloaded files are only moved, never resized.
+            self._cfg = dataclasses.replace(_config(self.opts, self.ctx, unknown), resize=None)
+        return self._cfg
+
+    def _download(self, src: Path) -> None:
+        if self.opts.cloud_only == "skip":
+            raise ValueError(
+                "downloading is off in this plan's options (cloud-only files: skip); the file "
+                "was left where it is"
+            )
+        downloaded = False
+        if not is_on_device(get_sync_status(src)):
+            ok, detail = force_download(src, wait_seconds=self.opts.download_wait_seconds)
+            if not ok:
+                raise RuntimeError(f"download failed: {detail}; the file was left where it is")
+            downloaded = True
+        current = src
+        try:
+            current = self._move_downloaded(src)
+        finally:
+            # As the legacy script: once downloaded, the pin is released again at the file's
+            # current place, whether or not the move worked, unless keep_pinned is on. A file
+            # that was already on the device keeps whatever pin it had.
+            if downloaded and not self.opts.keep_pinned and not unpin_file(current):
+                self.ctx.log.warning("organize_by_date: could not unpin %s", current)
+
+    def _move_downloaded(self, src: Path) -> Path:
+        """Work out the date and destination as the scan does, then move without replacing."""
+        st = stat_no_follow(src)
+        if st is None:
+            raise FileNotFoundError(f"source is gone: {src}")
+        info = FileInfo(src, st.st_size, st.st_mtime, getattr(st, "st_file_attributes", 0))
+        cfg = self._config()
+        insp = _inspect(info, cfg)
+        if insp.state == "cloud_only":
+            raise RuntimeError("the file is still not on this device; it was left where it is")
+        if insp.state == "error" or insp.reading is None:
+            detail = insp.error or "no date reading"
+            raise RuntimeError(f"its date could not be read ({detail}); it was left where it is")
+        reading = insp.reading
+        dest_root = _dest_root(self.opts, self.ctx)
+        refusal = _dest_refusal(dest_root, self.ctx)
+        if refusal is not None:
+            raise ValueError(refusal)
+        row = _base_row(insp, now_text())
+        row.update(_reading_fields(reading))
+        folder = folder_for(dest_root, self.opts.folder_template, cfg.unknown_folder, reading.date)
+        if path_key(folder / src.name) == path_key(src):
+            row.update(status="organized", last_action="already in place", destination=str(src))
+            self.moved[path_key(src)] = (src, row)
+            return src
+        dst = _claim(folder, src.name, self.claimed, cfg.clash_suffix)
+        reason = f"{_move_reason(reading, dst, dest_root)} (downloaded from OneDrive)"
+        with extra_action(ActionKind.MOVE, src, dst, reason):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            move_no_replace(src, dst)
+        row.update(status="planned", last_action="planned move", destination=str(dst))
+        self.moved[path_key(src)] = (dst, row)
+        return dst
+
+
+# ----- extras: catalog export and import -------------------------------------------------------
+
+EXPORT_TYPES = (".xlsx", ".csv")
+IMPORT_TYPES = (".xlsx", ".xlsm")
+
+
+def _output_file_refusal(target: Path, ctx: RunContext) -> str | None:
+    """Why the export must not write ``target``, or None (rules 4 and 6)."""
+    reason = protected_reason(target, rules=ctx.settings.protected_paths())
+    if reason and not ctx.settings.allow_protected_paths:
+        return f"That folder is protected ({reason}); choose another place: {target.parent}"
+    return destination_refusal(target)
+
+
+def export_catalog(target: Path, ctx: RunContext) -> str:
+    """Export the catalog to a new ``.xlsx`` or ``.csv`` file. Never replaces a file."""
+    target = Path(os.path.abspath(target))
+    if target.suffix.lower() not in EXPORT_TYPES:
+        raise ValueError("Choose a file name ending in .xlsx (Excel) or .csv.")
+    if os.path.lexists(long_path(target)):
+        raise ValueError(f"{target} already exists; it was not replaced. Choose a new name.")
+    refusal = _output_file_refusal(target, ctx)
+    if refusal is not None:
+        raise ValueError(refusal)
+    catalog_path = default_catalog_path(ctx)
+    if not catalog_path.is_file():
+        raise ValueError(f"There is no catalog yet ({catalog_path}). Run a scan first.")
+    try:
+        with Catalog(catalog_path) as catalog:
+            if target.suffix.lower() == ".xlsx":
+                count = catalog.export_xlsx(target)
+            else:
+                count = catalog.export_csv(target)
+    except FileExistsError as exc:
+        raise ValueError(
+            f"{target} already exists; it was not replaced. Choose a new name."
+        ) from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise ValueError(f"The catalog could not be exported: {exc}") from exc
+    return f"Exported {count} catalog row(s) to {target}."
+
+
+def import_master_log(source: Path, ctx: RunContext) -> str:
+    """One-time import of the legacy ``Photo_Metadata_Master.xlsx`` into the catalog."""
+    source = Path(os.path.abspath(source))
+    if not source.is_file():  # reads attributes only, so a cloud-only file is not recalled
+        raise ValueError(f"No such file: {source}")
+    if not is_on_device(get_sync_status(source)):
+        raise ValueError(
+            f"{source.name} is cloud-only (not on this device), so it was not read. Make it "
+            "available on this device in OneDrive first, then import it again."
+        )
+    if source.suffix.lower() not in IMPORT_TYPES:
+        raise ValueError(f"{source.name} is not an Excel workbook (.xlsx).")
+    try:
+        with Catalog(default_catalog_path(ctx)) as catalog:
+            added, skipped = catalog.import_master_log(source)
+    except (OSError, sqlite3.Error) as exc:
+        raise ValueError(f"The master log could not be imported: {exc}") from exc
+    return (
+        f"Imported {added} row(s) from {source.name}: {added} added, {skipped} skipped "
+        "(already in the catalog, or without a path)."
+    )
+
+
+OrganizeByDate.extras = (
+    ToolExtra(
+        id="catalog-export",
+        label="Export catalog…",
+        description=(
+            "Save the media catalog (one row per file: path, date taken, date source, camera, "
+            "size, GPS, status) as an Excel workbook or a CSV file. An existing file is never "
+            "replaced."
+        ),
+        path_kind="save_file",
+        file_filter="Excel workbook (*.xlsx);;CSV file (*.csv)",
+        run=export_catalog,
+    ),
+    ToolExtra(
+        id="catalog-import",
+        label="Import old master log…",
+        description=(
+            "One-time import of the old Photo_Metadata_Master.xlsx (its Metadata sheet) into "
+            "the catalog. Files the catalog already knows keep their newer catalog rows."
+        ),
+        path_kind="open_file",
+        file_filter="Excel workbook (*.xlsx)",
+        run=import_master_log,
+    ),
+)
 
 
 def _select(

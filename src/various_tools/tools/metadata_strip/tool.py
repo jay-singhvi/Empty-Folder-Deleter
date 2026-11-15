@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, field_validator
-from send2trash import send2trash
 
 from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
@@ -49,7 +48,14 @@ from various_tools.core.media import ffmpeg as ffmpeg_media
 from various_tools.core.media.ffmpeg import MediaError
 from various_tools.core.media.imaging import open_image
 from various_tools.core.onedrive import ensure_on_device, is_on_device, status_from_attributes
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+    trash_extra,
+)
 from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.media_resize.tool import normalise_extensions
 from various_tools.tools.metadata_strip.exiftool import (
@@ -598,7 +604,9 @@ class _Stripper:
         Raises :class:`_KeptCopyError` when the original is already in the Recycle Bin but the
         rename failed, so the caller does not delete the only remaining copy.
         """
-        send2trash(str(src))
+        # Its own journal row (rule 5), so undo can put the original back from the Recycle Bin.
+        # When the recycle fails or is refused, the original stays and the error propagates.
+        trash_extra(src, reason="original replaced by the clean copy")
         try:
             rename_no_replace(staging, src)
         except OSError as exc:
@@ -657,6 +665,8 @@ class MetadataStrip:
             path = candidate.info.path
             if _cloud_only(candidate.info):
                 planner.skip("cloud-only, not read", path)
+                if path not in plan.cloud_only:
+                    plan.cloud_only.append(path)
             elif opts.scope == "all" and path.suffix.lower() in GPS_ONLY_EXTS:
                 planner.skip("ExifTool can remove only GPS from a TIFF, not all metadata", path)
             else:

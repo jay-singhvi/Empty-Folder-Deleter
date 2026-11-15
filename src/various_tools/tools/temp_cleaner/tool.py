@@ -22,11 +22,13 @@ Rules that always hold:
 
 from __future__ import annotations
 
+import ctypes
 import fnmatch
 import os
+import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +36,20 @@ from pydantic import Field
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     is_inside,
     long_path,
     root_refusal,
+    stat_is_link,
 )
 from various_tools.core.onedrive import is_on_device, status_from_attributes
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    ActionOutcome,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+)
 from various_tools.tools.base import Category, ToolOptions
 
 TOOL_ID = "temp_cleaner"
@@ -87,6 +96,63 @@ def _lookup(environ: Mapping[str, str], name: str) -> str | None:
 
 def _key(path: Path | str) -> str:
     return os.path.normcase(os.path.abspath(path))
+
+
+def _real_key(path: Path | str) -> str:
+    """``_key`` of the folder's real, long name. ``%TEMP%`` is often an 8.3 short path
+    (``C:\\Users\\NAME~1\\...``) while ``%LOCALAPPDATA%\\Temp`` is the long form of the same
+    folder, so roots are compared on this. Reads the disk (no file is opened); a path that does
+    not exist keeps the part that cannot be resolved as written."""
+    try:
+        return os.path.normcase(_plain(os.path.realpath(long_path(path))))
+    except OSError, ValueError:
+        return _key(path)
+
+
+def _key_inside(path_key: str, root_key: str) -> bool:
+    return path_key == root_key or path_key.startswith(root_key.rstrip(os.sep) + os.sep)
+
+
+def last_change(st: os.stat_result) -> float:
+    """When the item last changed: the newer of its modified and creation times.
+
+    An installer that unpacks an archive gives the new files the archive's old modified times,
+    so the modified time alone would make a file created a minute ago look years old. Windows
+    reports the creation time as ``st_birthtime``; elsewhere only the modified time is used.
+    """
+    born = getattr(st, "st_birthtime", None)
+    return max(st.st_mtime, born) if isinstance(born, int | float) else st.st_mtime
+
+
+# Folders that hold application data. Cleaning one of them with the default rules (every file not
+# changed for a week) would trash program settings and data, so they are refused as roots.
+APP_DATA_VARIABLES: tuple[str, ...] = ("APPDATA", "LOCALAPPDATA", "PROGRAMDATA")
+
+
+def dangerous_root_reason(root: Path, environ: Mapping[str, str]) -> str | None:
+    """Why ``root`` must never be cleaned, or ``None``.
+
+    Refused: ``%APPDATA%``, ``%LOCALAPPDATA%`` and ``%PROGRAMDATA%`` themselves, and any folder
+    that holds the temp folder (``TEMP``, ``TMP`` or ``%LOCALAPPDATA%\\Temp``), such as
+    ``%USERPROFILE%\\AppData``. The temp folders themselves, and folders inside them, stay
+    allowed. Compared on the real long names, so an 8.3 short path is no way around it.
+    """
+    key = _real_key(root)
+    for variable in APP_DATA_VARIABLES:
+        value = _lookup(environ, variable)
+        if value and Path(value).is_absolute() and _real_key(value) == key:
+            return (
+                f"Refused {root}: it is %{variable}% itself, where programs keep their settings "
+                "and data. Choose the temp folder inside it, or a folder of your own."
+            )
+    for temp in default_temp_roots(environ):
+        temp_key = _real_key(temp)
+        if temp_key != key and _key_inside(temp_key, key):
+            return (
+                f"Refused {root}: it holds the temp folder ({temp}) and other folders that "
+                "programs need. Choose the temp folder itself."
+            )
+    return None
 
 
 def default_temp_roots(environ: Mapping[str, str]) -> list[Path]:
@@ -191,8 +257,7 @@ def _folder_size(folder: Path, ctx: RunContext) -> int | None:
                         st = entry.stat(follow_symlinks=False)
                     except OSError:
                         continue
-                    attributes = getattr(st, "st_file_attributes", 0)
-                    if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                    if entry.is_symlink() or stat_is_link(st):
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(current / entry.name)
@@ -375,8 +440,10 @@ class _Scan:
                 blocked = True
                 continue
             attributes = _attributes(path, child)
-            if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-                blocked = True  # rule 4: never followed, and it counts as content
+            if entry.is_symlink() or stat_is_link(child):
+                # Rule 4: a junction, symlink or unknown reparse point is never followed, and it
+                # counts as content. A OneDrive placeholder is an ordinary file or folder.
+                blocked = True
                 continue
             if _key(path) in self.pruned:
                 self.totals.cache_skipped += 1
@@ -406,9 +473,11 @@ class _Scan:
             if not is_on_device(status_from_attributes(attributes)):
                 self.totals.cloud_only += 1
                 self.plan.notes.append(f"skipped: cloud-only: {path}")
+                if path not in self.plan.cloud_only:
+                    self.plan.cloud_only.append(path)
                 blocked = True
                 continue
-            if child.st_mtime > self.cutoff:
+            if last_change(child) > self.cutoff:
                 self.totals.recent += 1
                 blocked = True
                 continue
@@ -426,7 +495,7 @@ class _Scan:
 
         if st is None or blocked or not self.opts.remove_empty_folders:
             return False
-        if st.st_mtime > self.cutoff:
+        if last_change(st) > self.cutoff:
             return False  # changed recently: kept until it has been quiet for the age limit
         self.plan.actions.append(
             PlannedAction(
@@ -442,7 +511,7 @@ class _Scan:
         return True
 
     def file_action(self, path: Path, st: os.stat_result) -> PlannedAction:
-        days = max(0, int((self.now - st.st_mtime) // SECONDS_PER_DAY))
+        days = max(0, int((self.now - last_change(st)) // SECONDS_PER_DAY))
         age = (
             "modified today" if days == 0 else f"modified {days} day{'' if days == 1 else 's'} ago"
         )
@@ -459,23 +528,59 @@ def _attributes(path: Path, st: os.stat_result) -> int:
     return getattr(st, "st_file_attributes", 0)
 
 
-def _usable_roots(roots: list[Path], ctx: RunContext, notes: list[str]) -> list[Path]:
-    """Folders that may be cleaned. Duplicates and folders inside another root drop out."""
-    candidates: list[Path] = []
+def _usable_roots(
+    roots: list[Path], ctx: RunContext, notes: list[str], environ: Mapping[str, str]
+) -> list[Path]:
+    """Folders that may be cleaned, by their real long names. The same folder given twice (for
+    example as an 8.3 short path and in full) and folders inside another root drop out, so no
+    file is planned twice. App data folders, and folders that hold the temp folder, are refused.
+    """
+    candidates: list[tuple[Path, str]] = []
     for raw in roots:
         path = Path(raw)
         refusal = root_refusal(path, ctx.settings.protected_paths())
+        if refusal is None:
+            refusal = dangerous_root_reason(path, environ)
         if refusal is not None:
             notes.append(refusal)
             continue
-        if any(_key(path) == _key(other) for other in candidates):
+        key = _real_key(path)
+        if any(key == other for _p, other in candidates):
             continue
-        candidates.append(path)
+        # Plan with the long name, so the actions show (and the journal keeps) real paths.
+        candidates.append((Path(_long_name(path)), key))
     return [
         path
-        for path in candidates
-        if not any(_key(path) != _key(other) and is_inside(path, other) for other in candidates)
+        for path, key in candidates
+        if not any(key != other and _key_inside(key, other) for _p, other in candidates)
     ]
+
+
+def _long_name(path: Path) -> str:
+    """``path`` with any 8.3 short names expanded, as written otherwise. Reads the disk only."""
+    text = os.path.abspath(path)
+    if sys.platform != "win32":
+        return text
+    get_long = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW
+    get_long.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    get_long.restype = ctypes.c_uint32
+    size = 1024
+    for _ in range(2):
+        buffer = ctypes.create_unicode_buffer(size)
+        length = int(get_long(long_path(text), buffer, size))
+        if length == 0:
+            return text  # missing or unreadable: root_refusal has already had its say
+        if length < size:
+            return _plain(buffer.value)
+        size = length + 1
+    return text
+
+
+def _plain(text: str) -> str:
+    """``text`` without the ``\\\\?\\`` long-path prefix that system calls need."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\") :]
+    return text.removeprefix("\\\\?\\")
 
 
 class TempCleaner:
@@ -514,7 +619,7 @@ class TempCleaner:
                 )
         caches = find_browser_caches(environ)
         roots: list[Path] = []
-        for root in _usable_roots(chosen, ctx, plan.notes):
+        for root in _usable_roots(chosen, ctx, plan.notes, environ):
             if any(is_inside(root, cache.path) for cache in caches):
                 plan.notes.append(f"Browser caches are listed, never cleaned; refused: {root}")
             else:
@@ -575,7 +680,120 @@ class TempCleaner:
             plan.notes.append(f"{BROWSER_CACHE_PREFIX}{cache.name} | {cache.path} | {text}")
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
-        return apply_plan(plan, ctx)
+        checked, refused = _recheck(plan, ctx)
+        result = apply_plan(checked, ctx)
+        _journal_refused(ctx, result, refused)
+        return result
+
+
+# ----- apply: every file is checked again, because a saved plan can be applied days later --------
+
+FOLDER_REASONS = frozenset({"empty folder", "folder left empty by this clean-up"})
+
+
+def _file_refusal(
+    action: PlannedAction, opts: TempCleanerOptions, roots: list[Path], cutoff: float
+) -> str | None:
+    """Why a planned file must be kept now, or ``None``. Reads attributes only, opens nothing.
+
+    The file must still be a plain, local file that matches the patterns, is not hidden (when
+    those are kept) and has not changed (modified or created) within the age limit. A folder row
+    is not checked here: trashing its files changes its time, and the engine refuses a folder
+    that is not empty.
+    """
+    src = action.src
+    if src is None or action.kind is not ActionKind.TRASH or action.reason in FOLDER_REASONS:
+        return None
+    try:
+        st = os.stat(long_path(src), follow_symlinks=False)
+    except FileNotFoundError:
+        return None  # the engine reports it as gone
+    except OSError as exc:
+        return f"could not be checked again before removal ({exc.strerror or exc}), so it was kept"
+    attributes = _attributes(src, st)
+    if stat_is_link(st):
+        return "is now a junction or symlink, so it was kept"
+    if not os.path.isfile(long_path(src)):
+        return "is no longer a file, so it was kept"
+    if not is_on_device(status_from_attributes(attributes)):
+        return "skipped: cloud-only (the file is no longer on this device), so it was kept"
+    if opts.skip_hidden_system and attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM):
+        return "is now hidden or system, so it was kept"
+    containing = [r for r in roots if is_inside(src, r)]
+    if containing:
+        root = max(containing, key=lambda r: len(str(r)))
+        rel_posix = Path(os.path.relpath(src, root)).as_posix()
+        if any(
+            fnmatch.fnmatch(src.name, g) or fnmatch.fnmatch(rel_posix, g)
+            for g in opts.exclude_patterns
+        ):
+            return "now matches 'Never remove', so it was kept"
+        if not any(
+            fnmatch.fnmatch(src.name, g) or fnmatch.fnmatch(rel_posix, g)
+            for g in opts.include_patterns
+        ):
+            return "no longer matches 'Only these files', so it was kept"
+    if last_change(st) > cutoff:
+        return (
+            f"changed since the scan (modified or created within {opts.min_age_days} day(s)), "
+            "so it was kept"
+        )
+    return None
+
+
+def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
+    """Unselect the files that no longer qualify. Returns the plan to run and the refused rows."""
+    try:
+        opts = TempCleanerOptions.model_validate_json(plan.options_json)
+    except ValueError:
+        opts = None
+    cutoff = time.time() - (opts.min_age_days if opts else 0) * SECONDS_PER_DAY
+    kept: list[PlannedAction] = []
+    refused: list[ActionOutcome] = []
+    for action in plan.actions:
+        ctx.check_cancelled()
+        if not action.selected:
+            kept.append(action)
+            continue
+        if opts is None:
+            why: str | None = "the plan's options could not be read, so nothing was removed"
+        else:
+            why = _file_refusal(action, opts, plan.roots, cutoff)
+        if why is None:
+            kept.append(action)
+            continue
+        kept.append(replace(action, selected=False))
+        refused.append(
+            ActionOutcome(
+                0,
+                str(action.kind),
+                "skipped",
+                str(action.src) if action.src else None,
+                None,
+                why,
+            )
+        )
+    return replace(plan, actions=kept), refused
+
+
+def _journal_refused(ctx: RunContext, result: RunResult, refused: list[ActionOutcome]) -> None:
+    """Record the rows refused before the engine ran, as skipped, like the engine's own refusals."""
+    journal = ctx.journal
+    seq = len(result.outcomes)
+    for outcome in refused:
+        seq += 1
+        if journal is not None:
+            journal.record_action(
+                result.run_id,
+                seq,
+                outcome.kind,
+                Path(outcome.src) if outcome.src else None,
+                None,
+                "checked again at apply",
+                status="skipped",
+                error=outcome.detail,
+            )
+        result.outcomes.append(replace(outcome, seq=seq))
 
 
 TOOL = TempCleaner()

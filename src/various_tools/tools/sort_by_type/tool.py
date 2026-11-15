@@ -25,22 +25,29 @@ from __future__ import annotations
 import fnmatch
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import Field, field_validator
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     destination_refusal,
     is_inside,
     long_path,
     root_refusal,
+    stat_is_link,
 )
 from various_tools.core.onedrive import is_on_device, status_from_attributes
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    ActionOutcome,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+)
 from various_tools.tools.base import Category, ToolOptions
 
 TOOL_ID = "sort_by_type"
@@ -158,6 +165,49 @@ def parse_rule(text: str) -> Rule:
     return Rule(text=text.strip(), patterns=patterns, folder=parse_folder(folder_text))
 
 
+_GLOB_CHARS = frozenset("*?[")
+
+
+def join_rule_pieces(value: Any) -> Any:
+    """Rules as a list of ``PATTERN=FOLDER`` lines, put back together when an editor split them.
+
+    A rule is split only at its first ``=``, so a comma in a folder (``*.pdf=Smith, John``) is
+    part of the folder. Text is read one rule per line. A one-line editor that splits a list at
+    commas turns ``*.pdf=Smith, John`` into ``*.pdf=Smith`` and ``John``: a piece without ``=``
+    cannot be a rule, so it is joined back. A piece that looks like a pattern (``*``, ``?`` or
+    ``[``) joins the next rule as another pattern (``*.jpg, *.png=Pictures`` becomes
+    ``*.jpg|*.png=Pictures``); any other piece joins the previous rule's folder with ``", "``.
+    A piece with nothing to join is left alone, so validation still names it.
+    """
+    if isinstance(value, str):
+        return [line.strip() for line in value.splitlines() if line.strip()]
+    if not isinstance(value, list | tuple):
+        return value
+    items: list[Any] = list(cast("list[Any] | tuple[Any, ...]", value))
+    pieces = [item.strip() if isinstance(item, str) else item for item in items]
+    joined: list[Any] = []
+    waiting: list[str] = []  # pattern pieces waiting for the rule they belong to
+    for piece in pieces:
+        if not isinstance(piece, str):
+            joined.append(piece)  # not text: left for validation to reject
+            continue
+        if not piece:
+            continue
+        if "=" in piece:
+            if waiting:
+                piece = "|".join([*waiting, piece])
+                waiting = []
+            joined.append(piece)
+        elif any(ch in _GLOB_CHARS for ch in piece):
+            waiting.append(piece)
+        elif joined and isinstance(joined[-1], str) and not waiting:
+            joined[-1] = f"{joined[-1]}, {piece}"
+        else:
+            joined.append(piece)
+    joined.extend(waiting)
+    return joined
+
+
 class SortByTypeOptions(ToolOptions):
     # ----- where -----------------------------------------------------------------------
     roots: list[Path] = Field(
@@ -192,7 +242,13 @@ class SortByTypeOptions(ToolOptions):
             "Default: documents, spreadsheets, presentations, pictures (RAW apart), videos, "
             "music, archives, installers and disk images."
         ),
-        json_schema_extra=_hint("Rules"),
+        # Edited as a two-column table: each row is "<patterns>=<folder>" split at the first "=".
+        json_schema_extra=_hint(
+            "Rules",
+            widget="pairs",
+            pair_separator="=",
+            pair_headers=["Pattern(s)", "Folder"],
+        ),
     )
     unmatched: Literal["leave", "other"] = Field(
         default="leave",
@@ -276,6 +332,11 @@ class SortByTypeOptions(ToolOptions):
         ),
         json_schema_extra=_hint("Name clashes", advanced=True, depends_on="clash_handling=rename"),
     )
+
+    @field_validator("rules", mode="before")
+    @classmethod
+    def _rejoin_rules(cls, value: Any) -> Any:
+        return join_rule_pieces(value)
 
     @field_validator("rules")
     @classmethod
@@ -427,8 +488,10 @@ class _Scan:
                     self.totals.unreadable += 1
                     continue
                 attributes = _attributes(path, st)
-                if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-                    continue  # rule 4: never followed, never moved
+                if entry.is_symlink() or stat_is_link(st):
+                    # Rule 4: a junction, symlink or unknown reparse point is never followed or
+                    # moved. A OneDrive placeholder is an ordinary file or folder.
+                    continue
                 if any(
                     fnmatch.fnmatch(entry.name, g) or fnmatch.fnmatch(rel_posix, g)
                     for g in opts.exclude_globs
@@ -455,6 +518,8 @@ class _Scan:
         if not is_on_device(status_from_attributes(attributes)):
             self.totals.cloud_only += 1
             self.notes.add("cloud-only files", f"skipped: cloud-only: {path}")
+            if path not in self.plan.cloud_only:
+                self.plan.cloud_only.append(path)
             return
         if self.cutoff is not None and st.st_mtime > self.cutoff:
             self.totals.recent += 1
@@ -588,9 +653,92 @@ class SortByType:
         return plan
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
-        # An existing file is never replaced: the engine gives a moved file a numbered name when
-        # its destination has been taken since the scan.
-        return apply_plan(plan, ctx)
+        # An existing file is never replaced. A destination taken since the scan is handled here,
+        # with this run's own clash options, before the engine runs the move.
+        checked, refused = _recheck_destinations(plan)
+        result = apply_plan(checked, ctx)
+        _journal_refused(ctx, result, refused)
+        return result
+
+
+def _saved_options(plan: Plan) -> SortByTypeOptions:
+    try:
+        return SortByTypeOptions.model_validate_json(plan.options_json)
+    except ValueError:
+        return SortByTypeOptions()  # the defaults: rename with "_dup", never replace
+
+
+def _recheck_destinations(plan: Plan) -> tuple[Plan, list[ActionOutcome]]:
+    """Handle destinations that were taken between the scan and now (a saved plan, or another
+    program). ``clash_handling = "skip"`` leaves the file where it is, journaled as skipped;
+    ``"rename"`` picks the next free name with ``clash_suffix``, never one that another move in
+    this plan is going to. Reads names only."""
+    opts = _saved_options(plan)
+    claimed = {
+        _key(a.dst)
+        for a in plan.actions
+        if a.selected and a.kind is ActionKind.MOVE and a.dst is not None
+    }
+    kept: list[PlannedAction] = []
+    refused: list[ActionOutcome] = []
+    for action in plan.actions:
+        dst = action.dst
+        if (
+            not action.selected
+            or action.kind is not ActionKind.MOVE
+            or dst is None
+            or not os.path.lexists(long_path(dst))
+        ):
+            kept.append(action)
+            continue
+        if opts.clash_handling == "skip":
+            kept.append(replace(action, selected=False))
+            refused.append(
+                ActionOutcome(
+                    0,
+                    str(action.kind),
+                    "skipped",
+                    str(action.src) if action.src else None,
+                    str(dst),
+                    f"left in place: the name is taken in {dst.parent} since the scan",
+                )
+            )
+            continue
+        stem, suffix = Path(dst.name).stem, Path(dst.name).suffix
+        counter = 0
+        candidate = dst
+        while _key(candidate) in claimed or os.path.lexists(long_path(candidate)):
+            counter += 1
+            candidate = dst.parent / f"{stem}{opts.clash_suffix}{counter}{suffix}"
+        claimed.add(_key(candidate))
+        kept.append(
+            replace(
+                action,
+                dst=candidate,
+                reason=f"{action.reason}, renamed to {candidate.name} (name taken since the scan)",
+            )
+        )
+    return replace(plan, actions=kept), refused
+
+
+def _journal_refused(ctx: RunContext, result: RunResult, refused: list[ActionOutcome]) -> None:
+    """Record the rows refused before the engine ran, as skipped, like the engine's own refusals."""
+    journal = ctx.journal
+    seq = len(result.outcomes)
+    for outcome in refused:
+        seq += 1
+        if journal is not None:
+            journal.record_action(
+                result.run_id,
+                seq,
+                outcome.kind,
+                Path(outcome.src) if outcome.src else None,
+                Path(outcome.dst) if outcome.dst else None,
+                "checked again at apply",
+                status="skipped",
+                error=outcome.detail,
+            )
+        result.outcomes.append(replace(outcome, seq=seq))
 
 
 TOOL = SortByType()

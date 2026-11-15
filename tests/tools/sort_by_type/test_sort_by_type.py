@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -541,6 +541,22 @@ def test_cloud_only_files_are_skipped_not_moved(
     assert set(_moves(plan, root)) == {"local.pdf"}
     assert any(n == f"skipped: cloud-only: {root / 'cloud.pdf'}" for n in plan.notes)
     assert "1 cloud-only, skipped and not read" in plan.notes[0]
+    assert plan.cloud_only == [root / "cloud.pdf"]  # for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, root: Path, journal: Journal, cloud_placeholder: Callable[..., None]
+) -> None:
+    _write(root / "a.pdf")
+    _write(root / "sub" / "b.pdf")
+    (root / "Documents").mkdir()
+    # A placeholder file, a placeholder folder to walk into, and a placeholder destination.
+    cloud_placeholder("a.pdf", "sub", "Documents")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root, recursive=True), ctx)
+    assert set(_moves(plan, root)) == {"a.pdf", "sub/b.pdf"}
+    assert plan.cloud_only == [] and not any("junction" in n for n in plan.notes)
+    assert TOOL.apply(plan, ctx).count("done") == 2
 
 
 def test_nested_and_repeated_roots_are_collapsed(tmp_path: Path, root: Path) -> None:
@@ -627,6 +643,102 @@ def test_a_name_taken_after_the_scan_is_never_overwritten(
     assert result.count("done") == 1
     assert (root / "Documents" / "PDF" / "a.pdf").read_text(encoding="utf-8") == "arrived later"
     assert (root / "Documents" / "PDF" / "a_dup1.pdf").read_text(encoding="utf-8") == "mine"
+
+
+def test_a_name_taken_after_the_scan_gets_the_configured_suffix(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "a.pdf", "mine")
+    _write(root / "b.pdf", "b")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root, clash_suffix="-copy"), ctx)
+    pdf = root / "Documents" / "PDF"
+    _write(pdf / "a.pdf", "arrived later")
+    _write(pdf / "a-copy1.pdf", "also later")
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 2, result.outcomes
+    assert (pdf / "a.pdf").read_text(encoding="utf-8") == "arrived later"
+    assert (pdf / "a-copy1.pdf").read_text(encoding="utf-8") == "also later"
+    assert (pdf / "a-copy2.pdf").read_text(encoding="utf-8") == "mine"
+    assert not list(pdf.glob("*_dup*"))
+    rows = {a.src: a for a in journal.actions(result.run_id)}
+    assert rows[str(root / "a.pdf")].dst == str(pdf / "a-copy2.pdf")
+    assert undo_run(journal, result.run_id).reverted == 2
+    assert (root / "a.pdf").read_text(encoding="utf-8") == "mine"
+
+
+def test_a_new_name_at_apply_never_takes_a_name_planned_for_another_file(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "a.pdf", "first")
+    _write(root / "sub" / "a.pdf", "second")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root, recursive=True), ctx)
+    pdf = root / "Documents" / "PDF"
+    assert sorted(_moves(plan, root).values()) == [
+        "Documents/PDF/a.pdf",
+        "Documents/PDF/a_dup1.pdf",
+    ]
+    _write(pdf / "a.pdf", "arrived later")
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 2, result.outcomes
+    assert sorted(p.name for p in pdf.iterdir()) == ["a.pdf", "a_dup1.pdf", "a_dup2.pdf"]
+    assert (pdf / "a.pdf").read_text(encoding="utf-8") == "arrived later"
+
+
+def test_skip_at_apply_leaves_a_file_whose_name_was_taken_after_the_scan(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "a.pdf", "mine")
+    _write(root / "b.pdf", "b")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root, clash_handling="skip"), ctx)
+    pdf = root / "Documents" / "PDF"
+    _write(pdf / "a.pdf", "arrived later")
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 1 and result.count("skipped") == 1
+    assert (root / "a.pdf").read_text(encoding="utf-8") == "mine"
+    assert (pdf / "a.pdf").read_text(encoding="utf-8") == "arrived later"
+    assert sorted(p.name for p in pdf.iterdir()) == ["a.pdf", "b.pdf"]
+    skipped = [o for o in result.outcomes if o.status == "skipped"]
+    assert skipped[0].src == str(root / "a.pdf") and "name is taken" in skipped[0].detail
+    row = {a.src: a for a in journal.actions(result.run_id)}[str(root / "a.pdf")]
+    assert row.status == "skipped" and "name is taken" in (row.error or "")
+
+
+# --- Rules as a table ------------------------------------------------------------------------
+
+
+def test_the_rules_field_asks_for_a_two_column_table() -> None:
+    extra = SortByTypeOptions.model_fields["rules"].json_schema_extra
+    assert isinstance(extra, dict)
+    assert extra["widget"] == "pairs"
+    assert extra["pair_separator"] == "="
+    assert extra["pair_headers"] == ["Pattern(s)", "Folder"]
+
+
+def test_a_folder_name_with_a_comma_is_one_rule(tmp_path: Path, root: Path) -> None:
+    rule = parse_rule("*.pdf=Letters/Smith, John")
+    assert rule.folder == ("Letters", "Smith, John") and rule.patterns == ("*.pdf",)
+    _write(root / "a.pdf")
+    plan = TOOL.scan(_opts(root, rules=["*.pdf=Letters/Smith, John"]), _ctx(tmp_path))
+    assert _moves(plan, root) == {"a.pdf": "Letters/Smith, John/a.pdf"}
+
+
+def test_rules_split_at_commas_by_a_one_line_editor_are_put_back_together() -> None:
+    # "*.pdf=Smith, John" and "*.jpg, *.png=Pictures" typed into a comma-separated field.
+    opts = SortByTypeOptions(rules=["*.pdf=Smith", "John", "*.jpg", "*.png=Pictures"])
+    assert opts.rules == ["*.pdf=Smith, John", "*.jpg|*.png=Pictures"]
+
+
+def test_rules_can_be_one_rule_per_line_text() -> None:
+    opts = SortByTypeOptions.model_validate({"rules": "*.pdf=Smith, John\n\n*.txt=Notes\r\n"})
+    assert opts.rules == ["*.pdf=Smith, John", "*.txt=Notes"]
+
+
+def test_a_lone_piece_with_nothing_to_join_is_still_an_error() -> None:
+    with pytest.raises(ValidationError, match="PATTERN=FOLDER"):
+        SortByTypeOptions(rules=["Smith"])
 
 
 def test_a_saved_plan_can_be_applied_later(tmp_path: Path, root: Path, journal: Journal) -> None:

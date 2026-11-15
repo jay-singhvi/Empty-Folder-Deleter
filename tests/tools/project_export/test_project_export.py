@@ -269,6 +269,24 @@ def test_hash_inside_a_string_is_not_a_comment() -> None:
     assert strip_python_comments("x = 'a # b'  # c\n") == "x = 'a # b'  \n"
 
 
+@pytest.mark.parametrize("separator", ["\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
+def test_odd_line_separators_do_not_shift_the_comment_cut(separator: str) -> None:
+    # str.splitlines also splits on these, but tokenize counts only "\n", so the cut used to
+    # land on the wrong line and column.
+    source = f'a = "x{separator}y"\nb = 2  # note\nc = 3\n'
+    assert strip_python_comments(source) == f'a = "x{separator}y"\nb = 2  \nc = 3\n'
+
+
+def test_form_feed_line_before_a_comment_keeps_the_code(tmp_path: Path) -> None:
+    source = "import os\n\x0c\nvalue = 'keep me'  # trailing\n# whole line\nother = 1\n"
+    path = tmp_path / "ff.py"
+    path.write_bytes(source.encode("utf-8"))
+    text = file_text(path, strip_comments=True, include_markdown=True, include_outputs=False)
+    assert "value = 'keep me'  \n" in text
+    assert "trailing" not in text and "whole line" not in text
+    assert "other = 1\n" in text
+
+
 def test_python_that_cannot_be_tokenized_is_kept_as_it_is(tmp_path: Path) -> None:
     path = tmp_path / "broken.py"
     raw = 'x = """never closed\n# still inside\n'
@@ -331,6 +349,52 @@ def test_earlier_dup_exports_are_left_out(tmp_path: Path, journal: Journal) -> N
     assert "Project-File-Content" not in third
     assert "stale" not in third
     assert "a.py" in third
+
+
+@pytest.mark.parametrize("suffix", [".log", ".export", ".TXT", ""])
+def test_earlier_exports_with_a_custom_output_name_are_left_out(
+    tmp_path: Path, journal: Journal, suffix: str
+) -> None:
+    # Review fix: only .txt and .md earlier exports were recognised, so an output such as
+    # ctx.log (or ctx_dup1.log, or a .partial leftover) was exported into the next export.
+    root = _make_tree(tmp_path / "proj", {"a.py": "x = 1\n"})
+    output = root / f"ctx{suffix}"
+    opts = ProjectExportOptions.model_validate(
+        {"root": root, "output_path": output, "respect_gitignore": False}
+    )
+    ctx = _ctx(tmp_path, journal)
+    for _ in range(3):
+        TOOL.apply(TOOL.scan(opts, ctx), ctx)
+    (root / f"ctx{suffix}.partial").write_text("stale", encoding="utf-8")
+    (root / f"ctx{suffix}_dup4.partial").write_text("stale", encoding="utf-8")
+    written = [p for p in root.iterdir() if p.name.startswith("ctx")]
+    assert len(written) >= 4
+    plan = TOOL.scan(opts, ctx)
+    TOOL.apply(plan, ctx)
+    newest = max(
+        (p for p in root.iterdir() if p.name.startswith("ctx") and p.suffix != ".partial"),
+        key=lambda p: p.stat().st_mtime_ns,
+    )
+    text = newest.read_text(encoding="utf-8")
+    assert "a.py" in text
+    assert "ctx" not in text.replace("Project", "")
+    assert "stale" not in text
+
+
+def test_a_user_file_that_only_looks_like_an_export_is_kept(
+    tmp_path: Path, journal: Journal
+) -> None:
+    root = _make_tree(
+        tmp_path / "proj", {"a.py": "x = 1\n", "ctx_notes.log": "mine\n", "ctx": "q\n"}
+    )
+    opts = ProjectExportOptions.model_validate(
+        {"root": root, "output_path": root / "ctx.log", "respect_gitignore": False}
+    )
+    ctx = _ctx(tmp_path, journal)
+    TOOL.apply(TOOL.scan(opts, ctx), ctx)
+    text = (root / "ctx.log").read_text(encoding="utf-8")
+    assert "ctx_notes.log" in text
+    assert "mine" in text
 
 
 def test_a_file_created_at_the_target_during_apply_is_not_replaced(
@@ -407,10 +471,26 @@ def test_cloud_only_files_are_never_read(
     plan = TOOL.scan(_opts(root, out, mode="contents"), ctx)
     assert "secret.py" not in read
     assert any("skipped: cloud-only" in note and "secret.py" in note for note in plan.notes)
+    assert plan.cloud_only == [root / "secret.py"]  # for the download action, once
     TOOL.apply(plan, ctx)
     text = out.read_text(encoding="utf-8")
     assert "a = 1" in text
     assert "b = 2" not in text
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    root = _make_tree(tmp_path / "proj")
+    out = tmp_path / "out" / "export.txt"
+    out.parent.mkdir()
+    opts = _opts(root, out, mode="contents")
+    expected = TOOL.scan(opts, _ctx(tmp_path, None)).notes
+    cloud_placeholder("a.py", "app")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(opts, _ctx(tmp_path, None))
+    # Nothing was skipped as a link: the same files are exported as without the placeholder bits.
+    assert plan.notes == expected and plan.notes[0].startswith("Export of 7 file(s)")
+    assert plan.cloud_only == []
 
 
 def test_tree_mode_never_reads_contents(

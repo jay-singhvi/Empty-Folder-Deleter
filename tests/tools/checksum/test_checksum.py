@@ -104,8 +104,12 @@ def _set_attributes(path: Path, attributes: int) -> None:
 
 @pytest.fixture
 def watch_opens(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], list[str]]:
-    """Record the file names opened through ``Path.open`` whose name is in ``names``."""
+    """Record the file names opened (``Path.open`` or ``open``) whose name is in ``names``."""
+    import builtins
+    import io
+
     real_open = Path.open
+    real_builtin_open = builtins.open
     seen: list[str] = []
     names: set[str] = set()
 
@@ -114,7 +118,16 @@ def watch_opens(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], list[str]]:
             seen.append(self.name)
         return real_open(self, *args, **kwargs)
 
+    def builtin_spy(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, str | os.PathLike):
+            name = os.path.basename(os.fspath(file))
+            if name in names:
+                seen.append(str(name))
+        return real_builtin_open(file, *args, **kwargs)
+
     monkeypatch.setattr(Path, "open", spy)
+    monkeypatch.setattr(builtins, "open", builtin_spy)
+    monkeypatch.setattr(io, "open", builtin_spy)
 
     def watch(name: str) -> list[str]:
         names.add(name)
@@ -268,7 +281,7 @@ def test_apply_writes_a_sha256sum_compatible_manifest(tmp_path: Path, journal: J
     assert "wrote 4 entries" in result.outcomes[0].detail
 
 
-def test_apply_journals_the_write_and_undo_leaves_it_for_manual_removal(
+def test_apply_journals_the_write_and_undo_recycles_the_unchanged_manifest(
     tmp_path: Path, journal: Journal
 ) -> None:
     root = _tree(tmp_path / "data")
@@ -276,9 +289,33 @@ def test_apply_journals_the_write_and_undo_leaves_it_for_manual_removal(
     actions = journal.actions(result.run_id)
     assert [(a.kind, a.status) for a in actions] == [("write", "done")]
     assert actions[0].dst == str(root / "SHA256SUMS.txt") and actions[0].src is None
-    report = undo_run(journal, result.run_id)
-    assert report.reverted == 0 and any("not reversible" in s for s in report.skipped)
-    assert (root / "SHA256SUMS.txt").exists()
+    assert actions[0].item_size is not None  # the engine recorded the output's state
+    recycled: list[Path] = []
+    report = undo_run(journal, result.run_id, send_to_trash=lambda p: recycled.append(p))
+    assert report.reverted == 1 and report.skipped == () and report.failed == ()
+    assert recycled == [root / "SHA256SUMS.txt"]
+
+
+def test_undo_moves_the_manifest_to_the_bin_and_lists_one_that_was_edited(
+    tmp_path: Path, journal: Journal
+) -> None:
+    first = _tree(tmp_path / "one")
+    second = _tree(tmp_path / "two")
+    ctx = _ctx(tmp_path, journal)
+    result = TOOL.apply(TOOL.scan(_opts(roots=[first, second]), ctx), ctx)
+    assert result.count("done") == 2
+    (second / "SHA256SUMS.txt").write_text("edited by hand" + chr(10), encoding="utf-8")
+    recycled: list[Path] = []
+
+    def to_bin(path: Path) -> None:
+        recycled.append(path)
+        path.unlink()
+
+    report = undo_run(journal, result.run_id, send_to_trash=to_bin)
+    assert report.reverted == 1
+    assert recycled == [first / "SHA256SUMS.txt"] and not (first / "SHA256SUMS.txt").exists()
+    assert (second / "SHA256SUMS.txt").exists()
+    assert any("changed after the run" in line for line in report.skipped)
 
 
 def test_apply_hashes_at_apply_time(tmp_path: Path, journal: Journal) -> None:
@@ -422,7 +459,8 @@ def test_apply_refuses_a_protected_root_added_to_the_settings_later(
     plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
     guarded = _ctx(tmp_path, journal, protected_folders=[str(root)])
     result = TOOL.apply(plan, guarded)
-    assert result.count("failed") == 1 and "Protected folder refused" in result.outcomes[0].detail
+    # The engine's guard stops it before the handler runs, and journals it as skipped.
+    assert result.count("skipped") == 1 and "Protected folder refused" in result.outcomes[0].detail
     assert not (root / "SHA256SUMS.txt").exists()
 
 
@@ -512,6 +550,91 @@ def test_verify_reports_a_changed_a_missing_and_an_extra_file(
     assert _lines(plan, "mismatch: ") == ["mismatch: a.txt"]
     assert _lines(plan, "missing: ") == ["missing: sub/deeper/d.txt"]
     assert _lines(plan, "extra: ") == ["extra: sub/new.txt"]
+
+
+def _deep_tree(root: Path) -> Path:
+    """A file whose full path is well past 260 characters, or skip if the OS refuses it."""
+    from various_tools.core.fs import long_path
+
+    folder = root.joinpath(*[f"level-{i:02d}-" + "x" * 40 for i in range(7)])
+    target = folder / ("deep-file-" + "y" * 30 + ".txt")
+    assert len(str(target)) > 300
+    try:
+        os.makedirs(long_path(folder), exist_ok=True)
+        with open(long_path(target), "wb") as handle:
+            handle.write(b"deep data")
+        with open(long_path(root / "top.txt"), "wb") as handle:
+            handle.write(b"top")
+    except OSError as exc:
+        pytest.skip(f"this system cannot create a path past 260 characters: {exc}")
+    return target
+
+
+@pytest.fixture
+def without_long_path_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Act like Windows without the LongPathsEnabled policy: opening a path of 260 characters
+    or more fails unless it carries the ``\\\\?\\`` prefix (``core/fs.long_path``)."""
+    import builtins
+    import io
+
+    real_open, real_os_open = builtins.open, os.open
+
+    def refuse(file: Any) -> None:
+        if isinstance(file, str | os.PathLike):
+            text = os.fspath(file)
+            if isinstance(text, str) and len(text) >= 260 and not text.startswith("\\\\?\\"):
+                raise FileNotFoundError(2, "The system cannot find the path specified", text)
+
+    def fake_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        refuse(file)
+        return real_open(file, *args, **kwargs)
+
+    def fake_os_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        refuse(path)
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(io, "open", fake_open)
+    monkeypatch.setattr(os, "open", fake_os_open)
+
+
+@pytest.mark.usefixtures("without_long_path_support")
+def test_files_past_260_characters_are_hashed_and_verified(
+    tmp_path: Path, journal: Journal
+) -> None:
+    from various_tools.core.fs import long_path
+
+    root = tmp_path / "data"
+    deep = _deep_tree(root)
+    rel = deep.relative_to(root).as_posix()
+    _plan, result = _create(tmp_path, journal, root)
+    assert result.count("done") == 1, result.outcomes
+    assert "wrote 2 entries" in result.outcomes[0].detail, result.outcomes[0].detail
+    manifest = (root / "SHA256SUMS.txt").read_text(encoding="utf-8")
+    assert f"{_sha(b'deep data')}  {rel}" in manifest.splitlines()
+    good = _verify(tmp_path, root)
+    assert good.notes[0].startswith("Verify: OK - 2 OK"), good.notes
+    with open(long_path(deep), "wb") as handle:
+        handle.write(b"changed")
+    bad = _verify(tmp_path, root)
+    assert _lines(bad, "mismatch: ") == [f"mismatch: {rel}"]
+
+
+@pytest.mark.usefixtures("without_long_path_support")
+def test_a_manifest_past_260_characters_is_read(tmp_path: Path, journal: Journal) -> None:
+    from various_tools.core.fs import long_path
+
+    root = tmp_path / "data"
+    deep = _deep_tree(root)
+    _create(tmp_path, journal, root)
+    copy = deep.parent / "SHA256SUMS.txt"
+    with open(long_path(root / "SHA256SUMS.txt"), "rb") as source:
+        data = source.read()
+    with open(long_path(copy), "wb") as handle:
+        handle.write(data)
+    plan = _verify(tmp_path, root, manifest_file=copy)
+    assert not any(n.startswith("Could not read the manifest") for n in plan.notes), plan.notes
+    assert "manifest SHA256SUMS.txt, 2 entries" in plan.notes[1]
 
 
 def test_extra_files_do_not_fail_the_verify_and_can_be_switched_off(
@@ -671,6 +794,7 @@ def test_cloud_only_files_are_skipped_never_opened_when_creating(
         plan = TOOL.scan(_opts(roots=[root]), ctx)
         assert "1 cloud-only file(s) skipped" in plan.notes[0]
         assert "skipped: cloud-only: b.bin" in plan.notes
+        assert plan.cloud_only == [cloud]  # for the download action, once
         assert "3 file(s)" in plan.actions[0].reason
         result = TOOL.apply(plan, ctx)
         assert "skipped 1 cloud-only file(s)" in result.outcomes[0].detail
@@ -694,9 +818,38 @@ def test_cloud_only_files_are_skipped_never_opened_when_verifying(
         assert plan.notes[0].startswith("Verify: PROBLEMS FOUND - 3 OK")
         assert "1 skipped (cloud-only)" in plan.notes[0]
         assert _lines(plan, "skipped: cloud-only: ") == ["skipped: cloud-only: b.bin"]
+        assert plan.cloud_only == [cloud]
         assert opened == []
     finally:
         _set_attributes(cloud, 0x80)
+
+
+@windows_only
+def test_a_cloud_only_manifest_is_listed_for_the_download_action(
+    tmp_path: Path, journal: Journal
+) -> None:
+    root = _tree(tmp_path / "data")
+    _create(tmp_path, journal, root)
+    manifest = root / "SHA256SUMS.txt"
+    _set_attributes(manifest, 0x1000)
+    try:
+        plan = _verify(tmp_path, root)
+        assert plan.cloud_only == [manifest]
+    finally:
+        _set_attributes(manifest, 0x80)
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, journal: Journal, cloud_placeholder: Callable[..., None]
+) -> None:
+    root = _tree(tmp_path / "data")
+    _create(tmp_path, journal, root)
+    cloud_placeholder("c.txt", "sub")  # a placeholder file inside a placeholder folder
+    listing = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path))
+    assert "4 file(s)" in listing.actions[0].reason  # nothing was skipped as a link
+    plan = _verify(tmp_path, root)
+    assert plan.notes[0].startswith("Verify: OK - 4 OK")
+    assert plan.cloud_only == []
 
 
 def test_a_file_that_became_cloud_only_after_the_scan_is_never_hashed(
@@ -716,14 +869,18 @@ def test_a_file_that_became_cloud_only_after_the_scan_is_never_hashed(
         raise AssertionError("a cloud-only file was read")
 
     monkeypatch.setattr(onedrive, "get_attributes", attributes)
-    real_open = Path.open
+    import builtins
+    import io
 
-    def guarded(self: Path, *args: Any, **kwargs: Any) -> Any:
-        if self.name == "a.txt":
+    real_open = builtins.open
+
+    def guarded(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, str | os.PathLike) and os.path.basename(os.fspath(file)) == "a.txt":
             must_not_read()
-        return real_open(self, *args, **kwargs)
+        return real_open(file, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", guarded)
+    monkeypatch.setattr(builtins, "open", guarded)
+    monkeypatch.setattr(io, "open", guarded)
     result = TOOL.apply(plan, ctx)
     assert result.count("done") == 1
     assert "skipped 1 cloud-only file(s)" in result.outcomes[0].detail

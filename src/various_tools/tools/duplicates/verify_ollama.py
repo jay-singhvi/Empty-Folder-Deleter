@@ -18,6 +18,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from various_tools.core.choices import ollama_model_names
 from various_tools.core.media.imaging import open_image
 from various_tools.core.settings import (
     DEFAULT_OLLAMA_CHAT_TIMEOUT_S,
@@ -54,8 +55,7 @@ class OllamaVerifier:
     def check_model(self) -> str | None:
         """Why the model cannot be used, or None when it is installed."""
         try:
-            with urllib.request.urlopen(f"{self.url}/api/tags", timeout=self.check_timeout) as resp:
-                names = {str(m["name"]) for m in json.load(resp)["models"]}
+            names = set(ollama_model_names(self.url, self.check_timeout))
         except Exception as exc:  # any failure here means the server is not usable
             return f"Ollama is not reachable at {self.url}: {exc}"
         if self.model not in names and f"{self.model}:latest" not in names:

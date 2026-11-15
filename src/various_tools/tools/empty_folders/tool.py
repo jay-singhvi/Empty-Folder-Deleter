@@ -25,10 +25,11 @@ from pydantic import Field
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     is_inside,
+    is_link,
     long_path,
     protected_reason,
+    stat_is_link,
 )
 from various_tools.core.plan import (
     ActionKind,
@@ -176,10 +177,9 @@ class _Scan:
             except OSError:
                 blocked = True
                 continue
-            if entry.is_symlink() or (
-                getattr(child_stat, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
-            ):
-                # Never followed. It counts as content, so the folder above it stays.
+            if entry.is_symlink() or stat_is_link(child_stat):
+                # A junction, symlink or unknown reparse point: never followed. It counts as
+                # content, so the folder above it stays. A OneDrive placeholder is no link.
                 blocked = True
                 continue
             if entry.is_dir(follow_symlinks=False):
@@ -215,11 +215,10 @@ def _usable_roots(options: EmptyFoldersOptions, ctx: RunContext, notes: list[str
     candidates: list[Path] = []
     for raw in options.roots:
         path = Path(raw)
-        attributes = _attributes(path)
         if not path.is_dir():
             notes.append(f"Not a folder, skipped: {path}")
             continue
-        if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        if is_link(path):
             notes.append(f"Junction or symlink, not followed: {path}")
             continue
         reason = protected_reason(path, rules=ctx.settings.protected_paths())
@@ -234,13 +233,6 @@ def _usable_roots(options: EmptyFoldersOptions, ctx: RunContext, notes: list[str
         for path in candidates
         if not any(_key(path) != _key(other) and is_inside(path, other) for other in candidates)
     ]
-
-
-def _attributes(path: Path) -> int:
-    try:
-        return getattr(os.stat(long_path(path), follow_symlinks=False), "st_file_attributes", 0)
-    except OSError:
-        return 0
 
 
 def _assign_groups(scan: _Scan) -> None:
@@ -265,6 +257,7 @@ class EmptyFolders:
     )
     category: Category = "Clean up"
     Options = EmptyFoldersOptions
+    plan_view = "tree"  # the GUI shows this plan as a folder tree first (plan 3.1)
 
     def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:
         if not isinstance(opts, EmptyFoldersOptions):
@@ -323,7 +316,16 @@ def set_folder_selected(plan: Plan, folder: Path, selected: bool) -> None:
     Unchecking also unchecks the removal of every folder above it, with the junk files inside
     those folders, because those folders would no longer be empty. Checking a folder never checks
     its parents.
+
+    ``folder`` may also be a junk file's path (a front end passes the row that was clicked). A
+    junk file is never removed on its own, only with its folder, so the click acts on that
+    folder: checking the file checks the folder and all of its junk files, and unchecking the
+    file unchecks the folder and every folder above it, as unchecking the folder would.
     """
+    for action in plan.actions:
+        if action.src is not None and _is_junk_action(action) and _key(action.src) == _key(folder):
+            folder = action.src.parent
+            break
     target = _key(folder)
     unchecked_parents: set[str] = set()
     for action in plan.actions:
@@ -359,11 +361,11 @@ def _will_be_empty(
             for entry in iterator:
                 path = folder / entry.name
                 try:
-                    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                    child_stat = entry.stat(follow_symlinks=False)
                 except OSError:
                     ok = False
                     break
-                if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                if entry.is_symlink() or stat_is_link(child_stat):
                     ok = False
                 elif entry.is_dir(follow_symlinks=False):
                     ok = _key(path) in removable and _will_be_empty(path, junk, removable, memo)
@@ -378,9 +380,10 @@ def _will_be_empty(
 
 
 def _recheck(plan: Plan) -> tuple[Plan, list[ActionOutcome]]:
-    """Unselect any junk-file removal whose folder has gained real content since the scan.
+    """Unselect any junk-file removal whose folder is not going, or has gained real content.
 
-    A junk file is only trashed when its folder will really end up empty, so a file that was
+    A junk file is only trashed when its folder is selected for removal and will really end up
+    empty, so a hand-edited plan (folder unchecked, junk row checked) keeps the file, and a file
     added after the scan is never left behind in a folder that lost its ``Thumbs.db``. Returns
     the plan to run and the outcomes of the rows that were refused.
     """
@@ -395,24 +398,18 @@ def _recheck(plan: Plan) -> tuple[Plan, list[ActionOutcome]]:
     kept: list[PlannedAction] = []
     refused: list[ActionOutcome] = []
     for action in plan.actions:
-        if (
-            action.selected
-            and action.src is not None
-            and _is_junk_action(action)
-            and not _will_be_empty(action.src.parent, junk, removable, memo)
-        ):
-            kept.append(replace(action, selected=False))
-            refused.append(
-                ActionOutcome(
-                    0,
-                    str(action.kind),
-                    "skipped",
-                    str(action.src),
-                    None,
-                    "its folder is no longer empty, so the file was kept",
+        if action.selected and action.src is not None and _is_junk_action(action):
+            detail: str | None = None
+            if _key(action.src.parent) not in removable:
+                detail = "its folder is not selected for removal, so the file was kept"
+            elif not _will_be_empty(action.src.parent, junk, removable, memo):
+                detail = "its folder is no longer empty, so the file was kept"
+            if detail is not None:
+                kept.append(replace(action, selected=False))
+                refused.append(
+                    ActionOutcome(0, str(action.kind), "skipped", str(action.src), None, detail)
                 )
-            )
-            continue
+                continue
         kept.append(action)
     return replace(plan, actions=kept), refused
 

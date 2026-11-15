@@ -45,7 +45,7 @@ are advanced options, and the GUI warns before one is changed.
 | Burst file-name pattern (`burst_name`) | `^(?:IMG_)?(\d{8}_\d{6})` | Regular expression with exactly one group, the timestamp that the frames of a burst share. |
 | Copy-name pattern (`copy_mark`) | `(\(\d+\)\|\bcopy\b\|-\s*copy)` | Regular expression (case-insensitive) for names that look like a copy. Such a name is kept last when copies are otherwise equal. |
 | Verify borderline matches with Ollama | off | Asks a local vision model about close visual matches. Only a clear YES confirms a match. See below. |
-| Ollama model | `lfm3-vl:latest` | The model used for that check. |
+| Ollama model | `lfm3-vl:latest` | The model used for that check. In the app this is an editable dropdown filled from the models your Ollama server reports (`GET /api/tags`); you can still type a name that is not listed. The command line takes plain text (`--ollama-model`). |
 | Ollama question (`ollama_prompt`) | "Image 1 and image 2 are photos. Are they the same photo? Answer only YES or NO." | The question sent with the two photos. Only an answer starting with YES confirms. |
 | Ollama picture size (`ollama_image_px`) | 512 | Each photo is shrunk to fit this many pixels before it is sent. |
 | Ollama picture quality (`ollama_jpeg_quality`) | 85 | JPEG quality (30 to 100) of the pictures sent. |
@@ -93,8 +93,9 @@ be reached, borderline matches are not moved, and the plan says so.
 
 ## Limits
 
-- The **Trash** action is journaled, but History cannot undo it. Restore those files from the
-  Recycle Bin by hand. Moves can be undone from History.
+- The **Trash** action is journaled. Undo from History puts trashed files back from the Recycle
+  Bin when it finds them there (same path, same time, same size); otherwise it lists them to
+  restore by hand. Moves can be undone from History.
 - Videos need `ffprobe`, and the re-encode check needs `ffmpeg`. Without them, the video part is
   skipped with a note, and exact copies of videos are still found when `ffprobe` is present.
   The plan note shows the install command (`winget install Gyan.FFmpeg`, from the program list in

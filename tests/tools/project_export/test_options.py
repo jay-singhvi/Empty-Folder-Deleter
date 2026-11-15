@@ -145,3 +145,17 @@ def test_protected_folders_come_from_the_settings(tmp_path: Path, project: Path)
     refused = TOOL.scan(ProjectExportOptions(root=project, output_path=out / "x.txt"), output_guard)
     assert refused.actions == []
     assert any("protected location" in note for note in refused.notes)
+
+
+def test_copy_to_clipboard_is_an_off_by_default_flag_that_survives_the_plan(
+    tmp_path: Path, project: Path, journal: Journal
+) -> None:
+    # The tool never touches a clipboard: the CLI and GUI copy the written file after apply.
+    assert ProjectExportOptions(root=project).copy_to_clipboard is False
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(ProjectExportOptions(root=project, copy_to_clipboard=True), ctx)
+    assert ProjectExportOptions.model_validate_json(plan.options_json).copy_to_clipboard is True
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 1
+    (action,) = plan.actions
+    assert action.dst is not None and action.dst.is_file()

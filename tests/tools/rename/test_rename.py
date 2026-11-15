@@ -274,15 +274,23 @@ def test_a_plan_edited_to_select_a_clashing_row_still_does_not_clash(
     assert not any("_dup" in p.name for p in root.iterdir())
 
 
-def test_letter_case_only_change_is_listed_but_not_renamed(tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name != "nt", reason="Windows names are case-insensitive")
+def test_letter_case_only_change_is_renamed_and_undone(tmp_path: Path, journal: Journal) -> None:
     root = tmp_path / "pics"
     _write(root / "IMG_1.JPG", "x", (2024, 3, 3, 10, 0, 0))
+    _write(root / "IMG_2.JPG", "y", (2024, 3, 3, 11, 0, 0))
+    _write(root / "img_2.jpg.keep", "unrelated", (2024, 3, 3, 11, 0, 0))
+    ctx = _ctx(tmp_path, journal)
     plan = TOOL.scan(
         RenameOptions(roots=[root], match="IMG_*.JPG", template="{name}{ext}", case="lower"),
-        _ctx(tmp_path, None),
+        ctx,
     )
-    assert len(plan.actions) == 1 and not plan.actions[0].selected
-    assert "only the letter case changes" in plan.actions[0].reason
+    assert len(plan.actions) == 2 and all(a.selected for a in plan.actions)
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 2
+    assert set(os.listdir(root)) == {"IMG_1.jpg", "IMG_2.jpg", "img_2.jpg.keep"}
+    assert undo_run(journal, result.run_id).reverted == 2
+    assert set(os.listdir(root)) == {"IMG_1.JPG", "IMG_2.JPG", "img_2.jpg.keep"}
 
 
 # ---- dates ------------------------------------------------------------------------------
@@ -410,6 +418,21 @@ def test_cloud_only_capture_is_never_read(
     assert result.count("done") == 0
     assert (root / "IMG_1.jpg").exists()
     assert any("cloud-only, not read" in n for n in plan.notes)
+    assert plan.cloud_only == [root / "IMG_1.jpg"]  # for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    root = _make_snap_tree(tmp_path / "shots")
+    _write(root / "sub" / "Snapchat-2001.jpg", "deeper", (2024, 1, 3, 8, 0, 0))
+    opts = RenameOptions(roots=[root], preset="snapchat", recursive=True)
+    expected = [(a.src, a.dst) for a in TOOL.scan(opts, _ctx(tmp_path, None)).actions]
+    assert any(src == root / "sub" / "Snapchat-2001.jpg" for src, _dst in expected)
+    cloud_placeholder("Snapchat-1001.jpg", "sub")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(opts, _ctx(tmp_path, None))
+    assert [(a.src, a.dst) for a in plan.actions] == expected  # nothing was skipped as a link
+    assert plan.cloud_only == []
 
 
 def test_cloud_only_file_can_still_be_renamed_by_modified_time(

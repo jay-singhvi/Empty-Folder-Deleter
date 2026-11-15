@@ -31,6 +31,12 @@ Pictures: JPEG, PNG, HEIC and HEIF (through pillow-heif), TIFF, BMP, WebP and GI
 program set it to, and put back afterwards, so a cut-off picture is always corrupt. GIF and other
 multi-frame pictures are decoded up to their first frame.
 
+A check that fails for a reason outside the file is **skipped** ("could not check"), never called
+corrupt: running out of memory, and any system error that carries an error number (`errno` or a
+Windows error code), such as a network drive dropping, a sharing violation or `WinError 1450`
+(not enough system resources). Pillow's own decode errors (`image file is truncated`,
+`broken data stream`) carry no error number and stay corrupt.
+
 ## Options
 
 Nothing is a fixed constant: every value below has a default and a hint in the app. Options
@@ -62,8 +68,7 @@ A quarantined file keeps its relative path: `D:\Photos\2024\IMG_1.jpg` goes to
 `_dup1` style suffix. The quarantine folder is **never scanned**, at any depth, so a second run
 does not re-check quarantined files. **Undo from History moves the files back.**
 
-A trashed file goes to the Recycle Bin. Various Tools cannot restore it, so restore it from the
-Recycle Bin by hand.
+A trashed file goes to the Recycle Bin. Undo from History puts trashed items back from the Recycle Bin when it finds them there (same path, same time, same size); an item it cannot find is listed to restore by hand.
 
 ## Safety
 

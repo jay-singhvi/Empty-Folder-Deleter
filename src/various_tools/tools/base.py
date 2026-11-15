@@ -12,13 +12,21 @@ Options conventions (every tool, owner requirement "nothing is constant"):
   (🔒 tuned or safety value: keep the default unless you know why);
 * a field whose app-wide default lives in :class:`~various_tools.core.settings.Settings` is
   ``X | None = None``, and ``None`` means "use the setting". The description names the setting.
+
+**Extras.** A tool may also offer one-off commands that are not a scan and an apply, such as
+exporting its catalog. It lists them in an optional ``extras`` attribute (a tuple of
+:class:`ToolExtra`); callers read it with ``getattr(tool, "extras", ())``, so tools without
+extras need nothing. The CLI turns each extra into a subcommand and the GUI into a button.
 """
 
 from __future__ import annotations
 
 import logging
 import pkgutil
+from collections.abc import Callable
+from dataclasses import dataclass
 from importlib.metadata import EntryPoint, entry_points
+from pathlib import Path
 from typing import Literal, Protocol, get_args
 
 from pydantic import BaseModel, ConfigDict
@@ -39,6 +47,22 @@ class ToolOptions(BaseModel):
     """Base class for every tool's options. Unknown fields are rejected."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True)
+class ToolExtra:
+    """A one-off command a tool offers besides scan and apply (see the module docstring).
+
+    ``run`` does the work for the path the person chose and returns a one-line result. It
+    raises :class:`ValueError` with a message a person can read when it cannot be done.
+    """
+
+    id: str  # kebab-case, becomes the CLI subcommand name, e.g. "catalog-export"
+    label: str  # button text
+    description: str
+    path_kind: Literal["save_file", "open_file"]
+    file_filter: str  # Qt-style, e.g. "Excel workbook (*.xlsx);;CSV file (*.csv)"
+    run: Callable[[Path, RunContext], str]  # returns a one-line result; raises ValueError
 
 
 class Tool(Protocol):

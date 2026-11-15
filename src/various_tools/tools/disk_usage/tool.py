@@ -34,10 +34,10 @@ from pydantic import Field, field_validator, model_validator
 
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
-    FILE_ATTRIBUTE_REPARSE_POINT,
     is_inside,
     long_path,
     root_refusal,
+    stat_is_link,
 )
 from various_tools.core.onedrive import is_on_device, status_from_attributes
 from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
@@ -54,9 +54,17 @@ BYTES_PER_MB = 1024 * 1024
 FOLDER_SIZE_PREFIX = "folder-size: "
 ROOT_SIZE_PREFIX = "root-size: "
 _SIZE_NOTE = re.compile(r"(folder-size|root-size): (\d+) (.+)", re.DOTALL)
+# The size map (treemap) notes: ``tree-size: <depth> <bytes> <path>``, one per folder, depth 0 for
+# a chosen folder. Written depth first, each folder before its children and children largest
+# first; :func:`size_tree` rebuilds the hierarchy from the paths, not from the order.
+TREE_SIZE_PREFIX = "tree-size: "
+_TREE_NOTE = re.compile(r"tree-size: (\d+) (\d+) (.+)", re.DOTALL)
 
 DEFAULT_TOP_FILES = 50
 DEFAULT_TOP_FOLDERS = 25
+DEFAULT_TREE_DEPTH = 3
+MAX_TREE_DEPTH = 32
+DEFAULT_TREE_MIN_SHARE_PCT = 1.0
 
 TypeCategory = Literal[
     "any", "pictures", "videos", "music", "documents", "archives", "installers", "disk_images"
@@ -120,6 +128,79 @@ def parse_size_note(note: str) -> tuple[str, int, Path] | None:
     return match.group(1), int(match.group(2)), Path(match.group(3))
 
 
+def parse_tree_note(note: str) -> tuple[int, int, Path] | None:
+    """Read a ``tree-size:`` plan note as ``(depth, bytes, path)``; any other note gives None."""
+    match = _TREE_NOTE.fullmatch(note)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), Path(match.group(3))
+
+
+@dataclass(frozen=True)
+class SizeNode:
+    """One folder of the size map. ``bytes`` counts every file under it that passed the filters
+    (cloud-only files never count). ``children`` are the folders listed in the plan, largest
+    first; ``own_bytes`` is the rest: files directly inside plus folders too small or too deep
+    to be listed. ``depth`` is 0 for a chosen folder; the combined node over several chosen
+    folders has ``path=None`` and depth -1."""
+
+    name: str
+    path: Path | None
+    bytes: int
+    depth: int
+    children: tuple[SizeNode, ...] = ()
+
+    @property
+    def own_bytes(self) -> int:
+        return max(0, self.bytes - sum(child.bytes for child in self.children))
+
+
+ALL_FOLDERS_NAME = "All folders"
+
+
+def _node_name(path: Path) -> str:
+    return path.name or str(path)
+
+
+def _ordered(nodes: list[SizeNode]) -> tuple[SizeNode, ...]:
+    return tuple(sorted(nodes, key=lambda n: (-n.bytes, _key(n.path) if n.path else "")))
+
+
+def size_tree(plan: Plan) -> SizeNode:
+    """The size map of a disk_usage plan, rebuilt from its ``tree-size:`` notes. Pure: reads
+    the notes only, never the disk, so it works on a saved plan too.
+
+    With one chosen folder that folder is the top node. With several, the top node is a
+    combined ``All folders`` node (``path=None``, depth -1) with one child per chosen folder.
+    A plan without tree notes gives an empty combined node.
+    """
+    entries: list[tuple[int, int, Path]] = []
+    for note in plan.notes:
+        parsed = parse_tree_note(note)
+        if parsed is not None:
+            entries.append(parsed)
+    known = {_key(path) for _depth, _size, path in entries}
+    children: dict[str, list[tuple[int, int, Path]]] = {}
+    tops: list[tuple[int, int, Path]] = []
+    for entry in entries:
+        depth, _size, path = entry
+        parent = _key(path.parent)
+        if depth == 0 or parent not in known or parent == _key(path):
+            tops.append(entry)
+        else:
+            children.setdefault(parent, []).append(entry)
+
+    def build(entry: tuple[int, int, Path]) -> SizeNode:
+        depth, size, path = entry
+        kids = [build(child) for child in children.get(_key(path), [])]
+        return SizeNode(_node_name(path), path, size, depth, _ordered(kids))
+
+    roots = _ordered([build(entry) for entry in tops])
+    if len(roots) == 1:
+        return roots[0]
+    return SizeNode(ALL_FOLDERS_NAME, None, sum(r.bytes for r in roots), -1, roots)
+
+
 def _normalise_extensions(values: list[str]) -> list[str]:
     result: list[str] = []
     for raw in values:
@@ -175,6 +256,30 @@ class DiskUsageOptions(ToolOptions):
             "report off. Default: 25."
         ),
         json_schema_extra=_hint("Results"),
+    )
+    tree_depth: int = Field(
+        default=DEFAULT_TREE_DEPTH,
+        ge=0,
+        le=MAX_TREE_DEPTH,
+        title="Size map depth",
+        description=(
+            "How many folder levels below each chosen folder are measured for the size map "
+            "(treemap). 1 shows the folders directly inside, 3 goes three levels down. 0 gives "
+            "only the chosen folders. Needs 'Include sub-folders'. Default: 3."
+        ),
+        json_schema_extra=_hint("Results", advanced=True, depends_on="recursive=true"),
+    )
+    tree_min_share_pct: float = Field(
+        default=DEFAULT_TREE_MIN_SHARE_PCT,
+        ge=0.0,
+        le=100.0,
+        title="Size map smallest folder (%)",
+        description=(
+            "Folders smaller than this share of their chosen folder are not drawn on their own "
+            "in the size map; they are counted in the remainder of the folder above. Keeps big "
+            "trees readable. 0 lists every folder that holds counted files. Default: 1."
+        ),
+        json_schema_extra=_hint("Results", advanced=True, depends_on="recursive=true"),
     )
     # ----- filters ----------------------------------------------------------------------
     min_size_mb: float = Field(
@@ -308,6 +413,8 @@ class _Totals:
     cloud_only: int = 0
     cloud_only_bytes: int = 0
     unreadable: int = 0
+    # The cloud-only files themselves, for the plan's "download these files" list.
+    cloud_paths: list[Path] = field(default_factory=list[Path])
 
 
 @dataclass
@@ -326,6 +433,9 @@ class _Scan:
     order: int = 0
     folder_sizes: list[tuple[int, Path]] = field(default_factory=list[tuple[int, Path]])
     root_sizes: list[tuple[int, Path]] = field(default_factory=list[tuple[int, Path]])
+    tree_depth: int = DEFAULT_TREE_DEPTH
+    tree_min_share_pct: float = DEFAULT_TREE_MIN_SHARE_PCT
+    tree_notes: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
 
     def keep_file(self, size: int, mtime: float, path: Path) -> None:
         self.order += 1
@@ -360,8 +470,10 @@ class _Scan:
                     self.totals.unreadable += 1
                     continue
                 attributes = _attributes(path, st)
-                if entry.is_symlink() or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-                    continue  # rule 4: never followed, and never counted
+                if entry.is_symlink() or stat_is_link(st):
+                    # Rule 4: a junction, symlink or unknown reparse point is never followed or
+                    # counted. A OneDrive placeholder is an ordinary file or folder.
+                    continue
                 if self.flt.excluded(entry.name, rel_posix):
                     continue
                 if not self.flt.include_hidden and attributes & (
@@ -380,6 +492,7 @@ class _Scan:
                 if not is_on_device(status_from_attributes(attributes)):
                     self.totals.cloud_only += 1
                     self.totals.cloud_only_bytes += st.st_size
+                    self.totals.cloud_paths.append(path)
                     continue
                 self.totals.files += 1
                 self.totals.bytes += st.st_size
@@ -394,6 +507,41 @@ class _Scan:
         self.totals.folders += len(folders) - 1
         self.root_sizes.append((folders[0].total, root))
         self.folder_sizes.extend((f.total, f.path) for f in folders[1:] if f.total > 0)
+        self.tree_notes[_key(root)] = self.tree_lines(folders)
+
+    def tree_lines(self, folders: list[_Folder]) -> list[str]:
+        """``tree-size:`` notes for one root: the root, then each folder no deeper than
+        ``tree_depth`` and at least ``tree_min_share_pct`` of the root, depth first and largest
+        first. A parent is always at least as large as its child, so every listed folder's
+        parent is listed too."""
+        depth = [0] * len(folders)
+        kids: dict[int, list[int]] = {}
+        for index in range(1, len(folders)):
+            parent = folders[index].parent
+            depth[index] = depth[parent] + 1
+            kids.setdefault(parent, []).append(index)
+        root_total = folders[0].total
+
+        def listed(index: int) -> bool:
+            total = folders[index].total
+            return (
+                depth[index] <= self.tree_depth
+                and total > 0
+                and total * 100.0 >= self.tree_min_share_pct * root_total
+            )
+
+        lines: list[str] = []
+        stack = [0]
+        while stack:
+            index = stack.pop()
+            record = folders[index]
+            lines.append(f"{TREE_SIZE_PREFIX}{depth[index]} {record.total} {record.path}")
+            chosen = sorted(
+                (i for i in kids.get(index, []) if listed(i)),
+                key=lambda i: (-folders[i].total, _key(folders[i].path)),
+            )
+            stack.extend(reversed(chosen))
+        return lines
 
 
 def _attributes(path: Path, st: os.stat_result) -> int:
@@ -469,6 +617,8 @@ class DiskUsage:
     )
     category: Category = "Clean up"
     Options = DiskUsageOptions
+    # Capability read by the GUI: a tool with a size_tree(plan) function gets a size map tab.
+    size_tree = staticmethod(size_tree)
 
     def scan(self, opts: ToolOptions, ctx: RunContext) -> Plan:
         if not isinstance(opts, DiskUsageOptions):
@@ -495,7 +645,13 @@ class DiskUsage:
         )
         notes: list[str] = []
         scan = _Scan(
-            ctx=ctx, top_files=opts.top_files, flt=flt, recursive=opts.recursive, notes=notes
+            ctx=ctx,
+            top_files=opts.top_files,
+            flt=flt,
+            recursive=opts.recursive,
+            notes=notes,
+            tree_depth=opts.tree_depth,
+            tree_min_share_pct=opts.tree_min_share_pct,
         )
         for index, root in enumerate(roots, start=1):
             ctx.report(index - 1, len(roots), f"Measuring {root}")
@@ -531,6 +687,11 @@ class DiskUsage:
             biggest = sorted(scan.folder_sizes, key=lambda item: (-item[0], _key(item[1])))
             for size, folder in biggest[: opts.top_folders]:
                 plan.notes.append(f"{FOLDER_SIZE_PREFIX}{size} {folder}")
+        for _size, root in sorted(scan.root_sizes, key=lambda item: (-item[0], _key(item[1]))):
+            plan.notes.extend(scan.tree_notes.get(_key(root), []))
+        for cloud_path in totals.cloud_paths:
+            if cloud_path not in plan.cloud_only:
+                plan.cloud_only.append(cloud_path)
         if totals.cloud_only:
             plan.notes.append(
                 f"skipped: cloud-only: {totals.cloud_only} file(s) "

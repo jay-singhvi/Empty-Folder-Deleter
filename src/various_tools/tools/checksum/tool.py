@@ -34,6 +34,7 @@ from various_tools.core.fs import (
     FileInfo,
     destination_refusal,
     is_inside,
+    long_path,
     protected_reason,
     rename_no_replace,
     reparse_ancestor,
@@ -241,6 +242,12 @@ def _cloud_only(info: FileInfo) -> bool:
     return not is_on_device(status_from_attributes(info.attributes))
 
 
+def _remember_cloud_only(plan: Plan, path: Path) -> None:
+    """Record a file the scan skipped because it is cloud-only (once), for the download action."""
+    if path not in plan.cloud_only:
+        plan.cloud_only.append(path)
+
+
 def _size_label(size: int) -> str:
     value = float(size)
     for unit in ("bytes", "KB", "MB", "GB", "TB"):
@@ -344,6 +351,7 @@ def _plan_create(opts: ChecksumOptions, roots: list[Path], ctx: RunContext, plan
         for info in files:
             if _cloud_only(info):
                 detail_notes.append(f"skipped: cloud-only: {rel_posix(info.path, root)}")
+                _remember_cloud_only(plan, info.path)
         cloud_only += len(files) - len(readable)
         if not readable:
             detail_notes.append(f"No files to list in {root}; no manifest planned.")
@@ -353,7 +361,7 @@ def _plan_create(opts: ChecksumOptions, roots: list[Path], ctx: RunContext, plan
         total_bytes += size
         selected = True
         reason = f"write {name} listing {len(readable)} file(s), {_size_label(size)}"
-        if os.path.lexists(manifest):
+        if os.path.lexists(long_path(manifest)):
             selected = False
             reason += "; NOT written because the file already exists and is never replaced"
             detail_notes.append(
@@ -413,7 +421,7 @@ class _ManifestWriter:
         if dst is None:
             raise ValueError("the manifest has no output path")
         root = self._check_paths(dst)
-        if os.path.lexists(dst):
+        if os.path.lexists(long_path(dst)):
             raise FileExistsError(f"the manifest already exists, so it was not replaced: {dst}")
         refusal = destination_refusal(dst, root)
         if refusal is not None:
@@ -479,7 +487,9 @@ class _ManifestWriter:
     @staticmethod
     def _write(dst: Path, data: bytes) -> None:
         """Write to a temporary file in the same folder, then rename it in without replacing."""
-        fd, tmp_name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.", suffix=".tmp")
+        fd, tmp_name = tempfile.mkstemp(
+            dir=long_path(dst.parent), prefix=f".{dst.name}.", suffix=".tmp"
+        )
         tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -542,19 +552,20 @@ def _check_entry(root: Path, entry: mf.Entry, algorithm: str, chunk: int) -> tup
 
 
 def _verify_root(
-    root: Path, manifest: Path, opts: ChecksumOptions, ctx: RunContext, tally: _Tally
+    root: Path, manifest: Path, opts: ChecksumOptions, ctx: RunContext, tally: _Tally, plan: Plan
 ) -> list[str]:
     """Check one folder against its manifest. Returns that folder's notes (without the summary)."""
     notes: list[str] = []
-    if not os.path.lexists(manifest):
+    if not os.path.lexists(long_path(manifest)):
         tally.no_manifest += 1
         return [f"root: {root}", f"Manifest not found: {manifest}"]
     attributes = get_attributes(manifest) or 0
     if not is_on_device(status_from_attributes(attributes)):
         tally.no_manifest += 1
+        _remember_cloud_only(plan, manifest)
         return [f"root: {root}", f"skipped: cloud-only: manifest {manifest}"]
     try:
-        text = mf.decode(manifest.read_bytes())
+        text = mf.decode(mf.read_bytes(manifest))
     except (OSError, ValueError) as exc:
         tally.no_manifest += 1
         reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
@@ -587,6 +598,7 @@ def _verify_root(
         problems[status].append(note)
         if status == "cloud":
             tally.cloud_only += 1
+            _remember_cloud_only(plan, root.joinpath(*entry.path.split("/")))
         else:
             setattr(tally, status, getattr(tally, status) + 1)
     ctx.report(total, total, "Checked")
@@ -618,7 +630,7 @@ def _plan_verify(opts: ChecksumOptions, roots: list[Path], ctx: RunContext, plan
     body: list[str] = []
     for root in roots:
         manifest = Path(os.path.abspath(opts.manifest_file)) if opts.manifest_file else root / name
-        body.extend(_verify_root(root, manifest, opts, ctx, tally))
+        body.extend(_verify_root(root, manifest, opts, ctx, tally, plan))
 
     verdict = "OK" if tally.problems == 0 else "PROBLEMS FOUND"
     plan.notes.insert(

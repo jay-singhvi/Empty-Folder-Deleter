@@ -67,8 +67,13 @@ reports as new. Verify always checks every file the manifest lists, whatever tho
   line. Nothing outside the chosen folder is read.
 - **Protected folders are refused**, and apply checks the output path again: the manifest must be
   inside the selected folder, directly in it, and not behind a junction.
-- The manifest is one new file. **Undo cannot remove it**: History lists the write as "not
-  reversible by undo; restore manually". Delete the file if you do not want it.
+- The manifest is one new file. **Undo sends it to the Recycle Bin** when it is unchanged since the
+  run (same size and modified time). A manifest you edited is left alone and listed for manual
+  removal.
+- Cloud-only files (and a cloud-only manifest when verifying) are also listed in the plan's
+  cloud-only list, for the optional download action.
+- **Long paths work.** Files, and the manifest itself, are opened through `core/fs.long_path()`,
+  so a path past 260 characters is hashed and verified even when Windows long-path support is off.
 
 ## Verify notes
 

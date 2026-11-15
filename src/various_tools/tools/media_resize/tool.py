@@ -9,9 +9,16 @@ Rules that always hold:
 * a file is never enlarged unless the owner turns off the locked ``never_upscale`` option, and a
   file is resized only by the rule its mode names (for ``fit_box`` with ``never_upscale``, only
   when both sides are larger than the box);
-* originals are never changed or removed. The output goes to a new folder, or next to the original
-  with a suffix (``_resized`` by default). An existing file is never overwritten;
-* cloud-only OneDrive files are never read (AGENTS.md rule 3). They are reported as skipped;
+* by default originals are never changed or removed. The output goes to a new folder, or next to
+  the original with a suffix (``_resized`` by default). An existing file is never overwritten.
+  Only the advanced ``overwrite`` output (with its switch on) replaces an original, and only
+  through the Recycle Bin: the new file is written and checked first, the original goes to the
+  bin as its own journaled row, then the new file takes its name, so undo can restore it;
+* a RAW original is removed only when ``remove_raw_originals`` is on, and only after its JPEG
+  was written, checked and given the RAW's metadata (🔒 plan §3.5). It goes to the Recycle Bin
+  as its own journaled row;
+* cloud-only OneDrive files are never read (AGENTS.md rule 3). They are reported as skipped and
+  listed in ``plan.cloud_only``;
 * the selected folders are never changed, junctions are not followed (rule 4), and protected
   folders are refused (rule 6). The output folder is never scanned, so a second run does not
   resize its own output;
@@ -21,6 +28,7 @@ Rules that always hold:
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +51,14 @@ from various_tools.core.media import ffmpeg as ffmpeg_media
 from various_tools.core.media.ffmpeg import MediaError
 from various_tools.core.media.imaging import RAW_EXTS, is_raw
 from various_tools.core.onedrive import CloudOnlyFileError, is_on_device, status_from_attributes
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+    trash_extra,
+)
 from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.media_resize import images, videos
 from various_tools.tools.media_resize.geometry import (
@@ -59,6 +74,7 @@ from various_tools.tools.media_resize.geometry import (
 )
 from various_tools.tools.media_resize.images import (
     EXTRAS_SCAN_BYTES,
+    ImageError,
     ImageRules,
     Rendered,
     Resample,
@@ -67,6 +83,8 @@ from various_tools.tools.media_resize.images import (
 TOOL_ID = "media_resize"
 SUFFIX_TAG = "_resized"
 ESTIMATE_NOTE = "(estimate)"
+REPLACE_NOTE = "replaces the original, which goes to the Recycle Bin"
+RAW_REMOVED_REASON = "RAW original removed after its JPEG was checked and its metadata copied"
 MEDIA_OPTIONS = ("images", "videos", "both")
 MODE_LABELS: dict[str, str] = {
     "fit_box": "fit inside the box",
@@ -314,15 +332,27 @@ class MediaResizeOptions(ToolOptions):
     )
 
     # ----- output ----------------------------------------------------------------------
-    output: Literal["new_folder", "suffix"] = Field(
+    output: Literal["new_folder", "suffix", "overwrite"] = Field(
         default="new_folder",
         title="Where the copies go",
         description=(
             "Write the resized copies into a new folder inside each chosen folder, or next to "
-            "the original with a suffix added to the name. Originals are never replaced. "
-            "Default: new folder."
+            "the original with a suffix added to the name. overwrite replaces each original "
+            "with its resized version: the original goes to the Recycle Bin, and it needs "
+            "'Allow replacing the originals' (advanced). Default: new folder, originals kept."
         ),
         json_schema_extra=_hint("Output"),
+    )
+    allow_overwrite: bool = Field(
+        default=False,
+        title="Allow replacing the originals",
+        description=(
+            "Needed for the overwrite output. Each resized picture or video is written and "
+            "checked first, then the original goes to the Recycle Bin and the new file takes "
+            "its name. Undo restores the original from the Recycle Bin while it is still "
+            "there. RAW files are never replaced; they get a new JPEG. Default: off."
+        ),
+        json_schema_extra=_hint("Output", advanced=True, depends_on="output=overwrite"),
     )
     output_folder_name: str | None = Field(
         default=None,
@@ -349,9 +379,21 @@ class MediaResizeOptions(ToolOptions):
         title="Convert RAW (CR3) to JPEG",
         description=(
             "Also turn Canon RAW (CR3) files into resized JPEGs. Needs ExifTool to keep their "
-            "metadata. The RAW originals are kept. Default: off."
+            "metadata. The RAW originals are kept unless 'Remove RAW originals' is on. "
+            "Default: off."
         ),
         json_schema_extra=_hint("Output", advanced=True),
+    )
+    remove_raw_originals: bool = Field(
+        default=False,
+        title="Remove RAW originals",
+        description=(
+            "After a RAW file's JPEG is written, checked and given the RAW's metadata by "
+            "ExifTool, send the RAW to the Recycle Bin (undo restores it while it is there). "
+            "If the metadata copy fails, ExifTool is missing or 'Keep metadata' is off, the RAW "
+            "is kept and the plan says why. Default: off, RAW originals are kept."
+        ),
+        json_schema_extra=_hint("Output", advanced=True, depends_on="convert_raw_to_jpeg=true"),
     )
 
     @field_validator("image_extensions")
@@ -417,6 +459,11 @@ def _options_problem(opts: MediaResizeOptions, ctx: RunContext) -> str | None:
         return "Choose at least one folder."
     if opts.mode == "fit_box" and box_for(opts.size, opts.max_width, opts.max_height) is None:
         return "The custom size needs both a maximum width and a maximum height."
+    if opts.output == "overwrite" and not opts.allow_overwrite:
+        return (
+            "Replacing the originals needs 'Allow replacing the originals' (advanced) turned on. "
+            "Nothing was planned."
+        )
     if opts.output == "new_folder":
         return _folder_name_problem(_folder_name(opts, ctx))
     return None
@@ -461,8 +508,22 @@ def _output_path(
 ) -> Path:
     if opts.output == "suffix":
         return src.with_name(f"{src.stem}{opts.suffix_tag}{out_suffix}")
+    if opts.output == "overwrite":
+        # The original's own path. A RAW file cannot become a JPEG under its own name, so its
+        # JPEG goes next to it, and only a file that is not there yet is ever written.
+        return src if out_suffix == src.suffix.lower() else src.with_suffix(out_suffix)
     relative = src.relative_to(root) if opts.recursive else Path(src.name)
     return root / folder / relative.with_suffix(out_suffix)
+
+
+def _raw_removal_note(opts: MediaResizeOptions) -> str:
+    """What happens to a RAW original when ``remove_raw_originals`` is on (🔒 plan §3.5)."""
+    if not opts.keep_metadata:
+        return "RAW original kept: its metadata is not copied when 'Keep metadata' is off"
+    return (
+        "then the RAW original goes to the Recycle Bin, once the JPEG is checked and its "
+        "metadata copied"
+    )
 
 
 def _out_suffix(src: Path) -> str:
@@ -474,6 +535,8 @@ def _is_output(src: Path, root: Path, opts: MediaResizeOptions, folder: str) -> 
     """True for a file this tool wrote, so that a second run does not resize it again."""
     if opts.output == "suffix":
         return src.stem.endswith(opts.suffix_tag)
+    if opts.output == "overwrite":
+        return False  # an output has the original's name; never enlarging stops a second resize
     return is_inside(src, root / folder)
 
 
@@ -546,7 +609,10 @@ class _Planner:
         """
         key = os.path.normcase(str(dst)).casefold()
         conflict = None
-        if os.path.lexists(long_path(dst)):
+        in_place = _same(candidate.info.path, dst)
+        if in_place:
+            reason += f"; {REPLACE_NOTE}"
+        elif os.path.lexists(long_path(dst)):
             conflict = "the output file already exists"
         elif key in self.claimed:
             conflict = "another file in this batch takes this output name"
@@ -582,6 +648,7 @@ class _Planner:
             return
         if _cloud_only(candidate.info):
             self.skip("cloud-only, not read", src)
+            self.plan.cloud_only.append(src)
             return
         try:
             result = images.render(src, out_suffix, self.rules, self.opts.convert_raw_to_jpeg)
@@ -604,12 +671,15 @@ class _Planner:
             f"resize {_dims(width, height)} -> {_dims(target.width, target.height)}; "
             f"{_size_label(before)} -> {_size_label(after)}"
         )
+        if result.from_raw and self.opts.remove_raw_originals:
+            reason += f"; {_raw_removal_note(self.opts)}"
         self.add(candidate, dst, reason, before, after)
 
     def video(self, candidate: _Candidate, ffprobe: Path) -> None:
         src = candidate.info.path
         if _cloud_only(candidate.info):
             self.skip("cloud-only, not read", src)
+            self.plan.cloud_only.append(src)
             return
         try:
             width, height = ffmpeg_media.display_size(
@@ -657,10 +727,13 @@ def _video_target(opts: MediaResizeOptions, width: int, height: int) -> Target |
 class _Converter:
     """Runs the planned resizes at apply time. Each call checks the paths again first."""
 
-    def __init__(self, opts: MediaResizeOptions, roots: list[Path], ctx: RunContext) -> None:
+    def __init__(
+        self, opts: MediaResizeOptions, roots: list[Path], ctx: RunContext, notes: list[str]
+    ) -> None:
         self.opts = opts
         self.roots = roots
         self.ctx = ctx
+        self.notes = notes
         self.rules = _rules(opts)
 
     def __call__(self, action: PlannedAction) -> Path | None:
@@ -668,14 +741,19 @@ class _Converter:
         if src is None or dst is None:
             raise ValueError("the resize has no source or no output path")
         self._check_paths(src, dst)
-        if os.path.lexists(long_path(dst)):
+        in_place = _same(src, dst)
+        if self.opts.output == "overwrite" and not self.opts.allow_overwrite:
+            raise ValueError("replacing the originals needs 'Allow replacing the originals'")
+        if in_place and self.opts.output != "overwrite":
+            raise ValueError("only the overwrite output may replace an original")
+        if not in_place and os.path.lexists(long_path(dst)):
             raise FileExistsError(f"the output file already exists, so it was not replaced: {dst}")
         refusal = destination_refusal(dst, stop=self._root_of(dst))
         if refusal is not None:
             raise ValueError(refusal)
         if _is_video(src, self.opts):
-            return self._video(src, dst)
-        return self._image(src, dst)
+            return self._video(src, dst, in_place)
+        return self._image(src, dst, in_place)
 
     def _root_of(self, dst: Path) -> Path | None:
         return next((root for root in self.roots if is_inside(dst, root)), None)
@@ -692,46 +770,91 @@ class _Converter:
                 if reason:
                     raise ValueError(f"protected path ({reason}): {path}")
 
-    def _image(self, src: Path, dst: Path) -> Path:
-        if is_raw(src) and self.opts.keep_metadata and self.ctx.deps.exiftool() is None:
-            raise ValueError("ExifTool is needed to keep the metadata of a RAW conversion")
+    def _image(self, src: Path, dst: Path, in_place: bool) -> Path:
+        raw = is_raw(src)
+        removing_raw = raw and self.opts.remove_raw_originals
+        kept = "; the RAW original was kept" if removing_raw else ""
+        if raw and self.opts.keep_metadata and self.ctx.deps.exiftool() is None:
+            raise ValueError(f"ExifTool is needed to keep the metadata of a RAW conversion{kept}")
         result = images.render(src, _out_suffix(src), self.rules, self.opts.convert_raw_to_jpeg)
         if isinstance(result, str):
             raise ValueError(result)
-        images.write(
-            result,
-            dst,
-            src,
-            exiftool=self.ctx.deps.exiftool(),
-            keep_metadata=self.opts.keep_metadata,
-            exiftool_timeout=self.ctx.settings.exiftool_write_timeout_s,
-        )
+        if in_place:
+            images.replace_in_place(result, src)
+            return src
+        try:
+            images.write(
+                result,
+                dst,
+                src,
+                exiftool=self.ctx.deps.exiftool(),
+                keep_metadata=self.opts.keep_metadata,
+                exiftool_timeout=self.ctx.settings.exiftool_write_timeout_s,
+            )
+        except ImageError as exc:
+            if not kept:
+                raise
+            raise ImageError(f"{exc}{kept}") from exc
+        if removing_raw and result.from_raw:
+            self._remove_raw(src, dst, result)
         return dst
 
-    def _video(self, src: Path, dst: Path) -> Path:
+    def _remove_raw(self, src: Path, jpeg: Path, result: Rendered) -> None:
+        """🔒 plan §3.5: the RAW goes only after its JPEG is written, checked and given the
+        RAW's metadata. Without the metadata copy it is kept. A failure here keeps the RAW and
+        the JPEG both; it never fails the conversion that already succeeded."""
+        if not self.opts.keep_metadata:
+            return  # no metadata was copied; the plan's reason says the RAW is kept
+        try:
+            images.check_written(jpeg, result)
+            trash_extra(src, reason=RAW_REMOVED_REASON)
+        except Exception as exc:  # the RAW stays; report it
+            message = f"RAW original kept: {src} ({exc})"
+            self.notes.append(message)
+            self.ctx.log.warning("media_resize: %s", message)
+
+    def _video(self, src: Path, dst: Path, in_place: bool) -> Path:
         ffmpeg = self.ctx.deps.ffmpeg()
         ffprobe = self.ctx.deps.ffprobe()
         if ffmpeg is None or ffprobe is None:
             raise MediaError("ffmpeg and ffprobe are needed to resize a video")
-        width, height = ffmpeg_media.display_size(
-            ffprobe, src, timeout=self.ctx.settings.ffprobe_timeout_s
-        )
+        timeout = self.ctx.settings.ffprobe_timeout_s
+        width, height = ffmpeg_media.display_size(ffprobe, src, timeout=timeout)
         target = _video_target(self.opts, width, height)
         if isinstance(target, str):
             raise ValueError(target)
-        videos.transcode_resized(
-            ffmpeg,
-            src,
-            dst,
-            target,
-            crf=_crf(self.opts),
-            keep_metadata=self.opts.keep_metadata,
-            preset=self.opts.video_preset,
-            timeout=self.ctx.settings.transcode_timeout_s,
-        )
-        stat = os.stat(src)
-        os.utime(dst, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-        return dst
+        out = dst
+        if in_place:
+            # A name of our own that does not exist yet; the encode never replaces anything.
+            out = src.with_name(f".{src.stem}.resize-{uuid.uuid4().hex[:12]}{src.suffix}")
+        try:
+            videos.transcode_resized(
+                ffmpeg,
+                src,
+                out,
+                target,
+                crf=_crf(self.opts),
+                keep_metadata=self.opts.keep_metadata,
+                preset=self.opts.video_preset,
+                timeout=self.ctx.settings.transcode_timeout_s,
+            )
+            stat = os.stat(src)
+            os.utime(out, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            if not in_place:
+                return dst
+            if ffmpeg_media.display_size(ffprobe, out, timeout=timeout) != (
+                target.width,
+                target.height,
+            ):
+                raise MediaError("the resized video has the wrong size; it was not kept")
+            images.swap_into_place(out, src)
+        except images.KeptCopyError:
+            raise  # the original is in the Recycle Bin; the resized copy must stay
+        except BaseException:
+            if in_place and os.path.lexists(long_path(out)):
+                os.remove(long_path(out))
+            raise
+        return src
 
 
 class MediaResize:
@@ -740,7 +863,8 @@ class MediaResize:
     description = (
         "Reduce the resolution of images and videos to a box, a shorter or longer side, or a "
         "percentage. Files are never enlarged unless you turn that locked option off. "
-        "Originals stay as they are."
+        "Originals stay as they are, unless you choose to replace them (they then go to the "
+        "Recycle Bin)."
     )
     category: Category = "Media"
     Options = MediaResizeOptions
@@ -795,7 +919,7 @@ class MediaResize:
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
         opts = MediaResizeOptions.model_validate_json(plan.options_json)
-        converter = _Converter(opts, plan.roots, ctx)
+        converter = _Converter(opts, plan.roots, ctx, plan.notes)
         return apply_plan(plan, ctx, handlers={ActionKind.CONVERT: converter})
 
 

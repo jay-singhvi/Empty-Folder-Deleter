@@ -401,6 +401,7 @@ def test_cloud_only_files_are_skipped_and_never_opened(
     assert "noise.jpg" not in _names(plan, media)
     assert "skipped: cloud-only: noise.jpg" in plan.notes
     assert "1 skipped (cloud-only)" in plan.notes[0]
+    assert plan.cloud_only == [cloud]  # for the download action, once
     assert "noise.jpg" not in watch_image_opens
     assert "good.jpg" in watch_image_opens  # the other files were checked
 
@@ -422,6 +423,15 @@ def test_a_file_that_became_cloud_only_after_listing_is_skipped_not_opened(
     assert "noise.jpg" not in _names(plan, media) and "noise.jpg" not in watch_image_opens
     assert any(n.startswith("could not check: noise.jpg (cloud-only)") for n in plan.notes)
     assert "1 could not be checked" in plan.notes[0]
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    media: Path, tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    cloud_placeholder("noise.jpg", "sub")  # a placeholder file and a placeholder folder
+    plan = _scan(tmp_path, media)
+    assert _names(plan, media) == ["cut.jpg", "empty.png", "noise.jpg", "sub/cut2.jpg"]
+    assert plan.cloud_only == []  # the content is on the device, so it was really checked
 
 
 def test_junctions_are_not_followed(media: Path, tmp_path: Path) -> None:
@@ -520,12 +530,17 @@ def test_trash_goes_through_send2trash_only_for_ticked_files(
     plan = _scan(tmp_path, media, ctx=ctx, action="trash")
     target = next(a for a in plan.actions if a.src and a.src.name == "noise.jpg")
     target.selected = True
+    row_size = (media / "noise.jpg").stat().st_size  # the engine records it for undo
     result = TOOL.apply(plan, ctx)
     assert result.count("done") == 1
     assert sent_to_trash == [str(media / "noise.jpg")]
     assert not (media / "noise.jpg").exists() and (media / "cut.jpg").exists()
+    row = journal.actions(result.run_id)[0]
+    assert (row.kind, row.status, row.item_size) == ("trash", "done", row_size)
+    # Undo looks in the Recycle Bin; no bin of this user exists in tests, so the file is listed.
     report = undo_run(journal, result.run_id)
-    assert report.reverted == 0 and any("not reversible" in s for s in report.skipped)
+    assert report.reverted == 0 and report.failed == ()
+    assert any("restore manually from the Recycle Bin" in s for s in report.skipped)
 
 
 def test_apply_never_moves_a_file_outside_the_selected_folder(
@@ -594,6 +609,58 @@ def test_a_permission_error_is_a_note_not_a_corrupt_file(
         "could not check: locked.png (could not be read: Permission denied)" in n
         for n in plan.notes
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (MemoryError(), "not enough memory"),
+        (OSError(22, "Invalid argument"), "Invalid argument"),
+        (OSError(None, "Insufficient system resources", None, 1450), "Insufficient system"),
+        (OSError(None, "The specified network name is no longer available", None, 64), "network"),
+        (OSError(None, "The process cannot access the file", None, 32), "cannot access"),
+        (TimeoutError(110, "Connection timed out"), "timed out"),
+    ],
+    ids=["memory", "errno", "winerror-1450", "network", "sharing-violation", "timeout"],
+)
+def test_system_errors_mean_could_not_check_never_corrupt(
+    make_image: Maker,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    expected: str,
+) -> None:
+    path = make_image("media/fine.png", seed=3)
+    real_open = Image.open
+
+    def failing(fp: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(str(fp)).name == "fine.png":
+            raise error
+        return real_open(fp, *args, **kwargs)
+
+    monkeypatch.setattr(Image, "open", failing)
+    verdict = checks_module.check_image(path, "standard")
+    assert verdict.status == "skipped" and expected in verdict.detail, verdict
+    plan = _scan(tmp_path, path.parent)
+    assert plan.actions == []
+    assert any(n.startswith("could not check: fine.png") for n in plan.notes), plan.notes
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("image file is truncated"), OSError("broken data stream"), SyntaxError("bad")],
+    ids=["truncated", "broken-stream", "syntax"],
+)
+def test_pillow_decode_errors_without_an_errno_stay_corrupt(
+    make_image: Maker, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    path = make_image("media/bad.png", seed=3)
+
+    def failing(fp: Any, *args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(Image, "open", failing)
+    assert checks_module.check_image(path, "standard").status == "corrupt"
 
 
 # ----- videos ---------------------------------------------------------------------------------
@@ -701,6 +768,7 @@ def test_a_video_is_never_probed_when_cloud_only(
         _set_attributes(target, 0x80)
     assert "good.mp4" not in probed
     assert "skipped: cloud-only: good.mp4" in plan.notes
+    assert plan.cloud_only == [target]
 
 
 # ----- the checks on their own (ffprobe output faked) -----------------------------------------

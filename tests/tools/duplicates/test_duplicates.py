@@ -376,6 +376,53 @@ def test_cloud_only_images_are_never_read(tmp_path: Path, monkeypatch: pytest.Mo
     assert cloud not in read
     assert any("cloud-only" in note and "beach_copy" in note for note in plan.notes)
     assert all(a.src != cloud for a in plan.actions)
+    assert plan.cloud_only == [cloud]  # for the download action, once
+
+
+def test_cloud_only_videos_are_never_probed_and_are_listed(
+    tmp_path: Path, ffprobe_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "videos"
+    tree.mkdir()
+    cloud = tree / "cloud.mp4"
+    cloud.write_bytes(b"placeholder")
+    (tree / "local.mp4").write_bytes(b"not really a video")
+    real_walk = dup_tool.walk
+
+    def walk_with_one_cloud_file(*args: Any, **kwargs: Any) -> Iterator[Any]:
+        for info in real_walk(*args, **kwargs):
+            if info.path == cloud:
+                info = type(info)(info.path, info.size, info.mtime, 0x400000)
+            yield info
+
+    probed: list[Path] = []
+
+    def spy(ffprobe: Path, ffmpeg: Path | None, path: Path, *args: Any) -> VideoInfo:
+        probed.append(path)
+        raise RuntimeError("not a real video")
+
+    monkeypatch.setattr(dup_tool, "walk", walk_with_one_cloud_file)
+    monkeypatch.setattr(dup_tool, "read_video", spy)
+    plan = TOOL.scan(
+        DuplicatesOptions(roots=[tree], media="videos", use_cache=False), _ctx(tmp_path, None)
+    )
+    assert probed == [tree / "local.mp4"]  # the cloud-only file was never opened
+    assert plan.cloud_only == [cloud]
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    opts = DuplicatesOptions(roots=[tree], use_cache=False)
+    expected = [(a.src, a.dst, a.reason) for a in TOOL.scan(opts, _ctx(tmp_path, None)).actions]
+    assert expected  # the generated tree has duplicates to find
+    cloud_placeholder("beach_copy.png", "pics")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(opts, _ctx(tmp_path, None))
+    # Nothing was skipped as a link: the plan is the same as without the placeholder bits.
+    assert [(a.src, a.dst, a.reason) for a in plan.actions] == expected
+    assert plan.cloud_only == []
 
 
 def test_unreadable_images_are_reported_and_never_moved(tmp_path: Path) -> None:
@@ -1083,3 +1130,100 @@ def test_ollama_options_reach_the_verifier(
     assert verifier.confirms(a, a) is True
     assert seen == {"px": 64, "quality": 50}
     assert verifier.prompt == "Same?"
+
+
+# ---- a size of zero is "not comparable", never a crash ---------------------------------------
+
+
+@pytest.mark.parametrize(("w", "h"), [(0, 100), (100, 0), (0, 0)])
+def test_an_image_with_no_width_or_height_is_not_comparable(w: int, h: int) -> None:
+    ok = _crafted("ok.png")
+    broken = _crafted("broken.png", w=w, h=h)
+    assert images.cheap_match(ok, broken, ImageRules()) is False
+    assert images.cheap_match(broken, ok, ImageRules()) is False
+    assert images.cheap_match(broken, broken, ImageRules()) is False
+
+
+@pytest.mark.parametrize(("w", "h"), [(0, 1080), (1920, 0), (0, 0)])
+def test_a_video_with_no_width_or_height_is_not_comparable(w: int, h: int) -> None:
+    ok = _clip("ok.mp4", 10.0)
+    broken = VideoInfo(Path("broken.mp4"), 1, 1.0, 10.0, w, h, (0,) * 5)
+    assert same_video(ok, broken, VideoRules()) is False
+    assert same_video(broken, ok, VideoRules()) is False
+
+
+def test_the_zero_size_guard_changes_nothing_for_valid_sizes() -> None:
+    rules = ImageRules()
+    a, b = _crafted("a.png", w=1000, h=1000), _crafted("b.png", w=1010, h=1000)
+    assert images.cheap_match(a, b, rules) is True  # 1% apart: inside the 2% tolerance
+    assert images.cheap_match(a, _crafted("c.png", w=1030, h=1000), rules) is False
+    assert same_video(_clip("a.mp4", 10.0), _clip("b.mp4", 10.0), VideoRules()) is True
+
+
+def test_an_image_whose_size_is_zero_is_reported_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    broken = tree / "pics" / "flat.png"
+    broken.write_bytes(b"x")
+    real_open = images.open_image
+
+    def fake_open(path: Path) -> Image.Image:
+        return Image.new("RGB", (0, 10)) if path == broken else real_open(path)
+
+    monkeypatch.setattr(images, "open_image", fake_open)
+    plan = TOOL.scan(DuplicatesOptions(roots=[tree], use_cache=False), _ctx(tmp_path, None))
+    assert any("unreadable" in note and "flat.png" in note for note in plan.notes)
+    assert all(a.src is None or a.src.name != "flat.png" for a in plan.actions)
+
+
+def test_a_cached_image_with_no_size_is_read_again_not_compared(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    _make_image_tree(tree)
+    ctx = _ctx(tmp_path, None)
+    opts = DuplicatesOptions(roots=[tree], media="images")
+    params = opts.read_params(ctx)
+    victim = next(p for p in sorted((tree / "pics").iterdir()) if p.suffix == ".png")
+    stat = victim.stat()
+    from various_tools.core.cache import FileCache
+
+    broken = images.image_to_cache(read_image(victim, stat.st_size, stat.st_mtime, params))
+    broken["w"] = 0
+    cache_dir = ctx.settings.resolved_cache_folder()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = FileCache(
+        dup_tool.image_cache_path(cache_dir, params),
+        name=f"{dup_tool.IMAGE_CACHE_NAME}:{params.cache_identity()}",
+        version=dup_tool.IMAGE_CACHE_VERSION,
+    )
+    cache.put(victim, stat.st_size, stat.st_mtime, broken)
+    cache.close()
+
+    found = dup_tool.collect(opts, ctx)  # must not raise ZeroDivisionError
+    assert isinstance(found, dup_tool.Findings)
+    assert found.unreadable == 0  # the real file is fine, so it was read again
+
+
+def test_a_video_whose_probe_reports_no_size_is_reported_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core.media import ffmpeg as ffmpeg_module
+
+    tree = tmp_path / "videos"
+    tree.mkdir()
+    (tree / "clip.mp4").write_bytes(b"not really a video")
+    (tree / "other.mp4").write_bytes(b"not really a video either")
+    monkeypatch.setattr(ffmpeg_module, "probe_duration", lambda *_a, **_k: 10.0)
+    monkeypatch.setattr(ffmpeg_module, "display_size", lambda *_a, **_k: (1920, 0))
+
+    class FakeProbe(ExternalTools):
+        def path(self, tool: str) -> Path | None:
+            return tmp_path / "ffprobe.exe" if tool == "ffprobe" else None
+
+    plan = TOOL.scan(
+        DuplicatesOptions(roots=[tree], media="videos", exact_only=True, use_cache=False),
+        _ctx(tmp_path, None, deps=FakeProbe(env={}, ollama_probe=lambda _u: None)),
+    )
+    notes = [n for n in plan.notes if n.startswith("unreadable:")]
+    assert len(notes) == 2 and all("no usable video size" in n for n in notes)

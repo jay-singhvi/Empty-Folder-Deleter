@@ -12,6 +12,7 @@ never replaces an existing file.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -148,9 +149,15 @@ def convert(
     args: list[str],
     *,
     timeout: float = DEFAULT_TRANSCODE_TIMEOUT_S,
+    verify: Callable[[Path], None] | None = None,
 ) -> None:
-    """Write ``destination`` and give it the source's modified time. Raises ``MediaError``."""
-    ffmpeg_media.transcode(ffmpeg, source, destination, args, timeout=timeout)
+    """Write ``destination`` and give it the source's modified time. Raises ``MediaError``.
+
+    ``verify`` checks the encoded file while it still has its temporary name (see
+    ``core/media/ffmpeg.transcode``), so an output that fails it never appears as
+    ``destination`` and a later scan does not mistake it for a finished conversion.
+    """
+    ffmpeg_media.transcode(ffmpeg, source, destination, args, timeout=timeout, verify=verify)
     stat = os.stat(source)
     os.utime(destination, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 

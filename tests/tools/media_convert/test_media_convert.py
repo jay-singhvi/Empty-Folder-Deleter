@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import subprocess
+import uuid
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,7 @@ from PIL import Image, ImageCms
 from pydantic import ValidationError
 
 from various_tools.core import onedrive
+from various_tools.core import plan as plan_module
 from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal, undo_run
@@ -140,20 +144,39 @@ def _details(result: RunResult) -> list[str]:
     return [o.detail for o in result.outcomes]
 
 
-@pytest.fixture
-def fake_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Replace ``send2trash`` with a move into ``tmp_path/bin``. Returns the trashed paths."""
-    trashed: list[Path] = []
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+class FakeBin(list[Path]):
+    """Stands in for the Recycle Bin: trashing writes a ``$I``/``$R`` pair into a folder under
+    tmp_path. It is a list of the trashed paths, so ``bin == [src]`` checks what was recycled."""
 
-    def fake(path: str | os.PathLike[str]) -> None:
+    def __init__(self, folder: Path) -> None:
+        super().__init__()
+        self.folder = folder
+        folder.mkdir(parents=True, exist_ok=True)
+
+    def trash(self, path: str | os.PathLike[str]) -> None:
         source = Path(path)
-        trashed.append(source)
-        shutil.move(str(source), str(bin_dir / source.name))
+        size = source.stat().st_size
+        key = uuid.uuid4().hex[:6].upper()
+        when = int(datetime.now(UTC).timestamp() * 10_000_000) + 116444736000000000
+        text = str(source) + "\x00"
+        index = struct.pack("<qqqi", 2, size, when, len(text)) + text.encode("utf-16-le")
+        shutil.move(str(source), str(self.folder / f"$R{key}{source.suffix}"))
+        (self.folder / f"$I{key}{source.suffix}").write_bytes(index)
+        self.append(source)
 
-    monkeypatch.setattr(convert_tool, "send2trash", fake)
-    return trashed
+    def locate(self, _path: Path) -> Path | None:
+        return self.folder
+
+    def items(self) -> list[Path]:
+        return sorted(self.folder.glob("$R*"))
+
+
+@pytest.fixture
+def fake_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBin:
+    """Replace the engine's ``send2trash`` with a fake Recycle Bin. Lists the trashed paths."""
+    fake = FakeBin(tmp_path / "bin")
+    monkeypatch.setattr(plan_module, "send2trash", fake.trash)
+    return fake
 
 
 @pytest.fixture
@@ -161,7 +184,7 @@ def no_trash(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(path: object) -> None:
         raise AssertionError(f"the Recycle Bin must not be used here: {path}")
 
-    monkeypatch.setattr(convert_tool, "send2trash", refuse)
+    monkeypatch.setattr(plan_module, "send2trash", refuse)
 
 
 def _ffmpeg_make(ffmpeg: Path, path: Path, *args: str, seconds: str = "1") -> Path:
@@ -748,13 +771,13 @@ def test_output_created_between_scan_and_apply_is_never_replaced(
 
 
 def test_the_original_is_recycled_only_after_the_output_is_verified(
-    tmp_path: Path, journal: Journal, fake_trash: list[Path], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
     original = src.read_bytes()
     out = src.parent / "converted" / "a.jpg"
     state: dict[str, Any] = {}
-    real_fake = convert_tool.send2trash
+    real_fake = plan_module.send2trash
 
     def watching(path: str | os.PathLike[str]) -> None:
         state["output_ok"] = out.is_file()
@@ -762,16 +785,39 @@ def test_the_original_is_recycled_only_after_the_output_is_verified(
             state["size"] = image.size
         real_fake(path)
 
-    monkeypatch.setattr(convert_tool, "send2trash", watching)
+    monkeypatch.setattr(plan_module, "send2trash", watching)
     opts = MediaConvertOptions(roots=[src.parent], trash_originals=True, convert_mov=False)
     plan, result = _run(tmp_path, journal, opts)
     assert result.count("done") == 1, _details(result)
     assert state == {"output_ok": True, "size": (64, 48)}
     assert fake_trash == [src] and not src.exists()
-    assert (tmp_path / "bin" / "a.heic").read_bytes() == original
+    assert [item.read_bytes() for item in fake_trash.items()] == [original]
     assert "original goes to the Recycle Bin after the output is verified" in plan.actions[0].reason
     recorded = journal.actions(result.run_id)[0]
     assert "Recycle Bin" in recorded.reason  # the journal says what happened to the original
+    # Rule 5: the recycle is its own journal row, so that undo can bring the original back.
+    rows = [(r.kind, r.status, r.seq) for r in journal.actions(result.run_id)]
+    assert rows == [("convert", "done", 1), ("trash", "done", 1)]
+    assert journal.actions(result.run_id)[1].src == str(src)
+
+
+def test_undo_recycles_the_output_and_restores_the_recycled_original(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
+) -> None:
+    src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
+    original = src.read_bytes()
+    out = src.parent / "converted" / "a.jpg"
+    opts = MediaConvertOptions(roots=[src.parent], trash_originals=True, convert_mov=False)
+    _plan, result = _run(tmp_path, journal, opts)
+    assert result.count("done") == 1 and not src.exists() and out.is_file()
+
+    report = undo_run(
+        journal, result.run_id, send_to_trash=fake_trash.trash, locate_bin=fake_trash.locate
+    )
+    assert report.reverted == 2, (report.skipped, report.failed)
+    assert src.read_bytes() == original
+    assert not out.exists()
+    assert [a.status for a in journal.actions(result.run_id)] == ["undone", "undone"]
 
 
 def test_originals_are_kept_by_default(tmp_path: Path, journal: Journal, no_trash: None) -> None:
@@ -782,7 +828,7 @@ def test_originals_are_kept_by_default(tmp_path: Path, journal: Journal, no_tras
 
 
 def test_a_failed_verification_keeps_the_output_and_the_original(
-    tmp_path: Path, journal: Journal, fake_trash: list[Path], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
     original = src.read_bytes()
@@ -811,7 +857,7 @@ def test_the_verification_really_checks_the_size(tmp_path: Path) -> None:
 
 
 def test_a_conversion_that_fails_never_recycles_the_original(
-    tmp_path: Path, journal: Journal, fake_trash: list[Path]
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
     ctx = _ctx(tmp_path, journal)
@@ -834,11 +880,16 @@ def test_when_the_recycle_bin_refuses_the_original_stays_and_the_action_fails(
     def refuse(path: object) -> None:
         raise OSError("the Recycle Bin is not available")
 
-    monkeypatch.setattr(convert_tool, "send2trash", refuse)
+    monkeypatch.setattr(plan_module, "send2trash", refuse)
     opts = MediaConvertOptions(roots=[src.parent], trash_originals=True, convert_mov=False)
     _plan, result = _run(tmp_path, journal, opts)
     assert result.count("failed") == 1
     assert "left in place" in result.outcomes[0].detail
+    # Both rows say what happened: the recycle failed, so the convert row failed with it.
+    assert [(r.kind, r.status) for r in journal.actions(result.run_id)] == [
+        ("convert", "failed"),
+        ("trash", "failed"),
+    ]
     assert src.read_bytes() == original
     assert (src.parent / "converted" / "a.jpg").is_file()
 
@@ -870,10 +921,25 @@ def test_cloud_only_files_are_skipped_and_never_opened(
     )
     assert plan.actions == []
     assert any("skipped: cloud-only, not read" in n for n in plan.notes)
+    assert plan.cloud_only == [tmp_path / "pics" / "a.heic"]  # for the download action, once
+
+
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    _picture(tmp_path / "pics" / "a.heic", "HEIF")
+    _picture(tmp_path / "pics" / "sub" / "b.heic", "HEIF")
+    cloud_placeholder("a.heic", "sub")  # a placeholder file and a placeholder folder
+    plan = TOOL.scan(
+        MediaConvertOptions(roots=[tmp_path / "pics"], recursive=True, convert_mov=False),
+        _ctx(tmp_path, None),
+    )
+    assert sorted(a.src.name for a in plan.selected_actions() if a.src) == ["a.heic", "b.heic"]
+    assert plan.cloud_only == []  # on the device, so it is read like any other file
 
 
 def test_apply_never_reads_a_file_that_became_cloud_only_after_scan(
-    tmp_path: Path, journal: Journal, fake_trash: list[Path], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
     ctx = _ctx(tmp_path, journal)
@@ -936,7 +1002,8 @@ def test_output_through_a_junction_is_refused(
         pytest.skip("could not create a junction in this environment")
     try:
         result = TOOL.apply(plan, ctx)
-        assert result.count("done") == 0 and result.count("failed") == 1
+        # The engine's guard refuses it before the handler runs, and journals it as skipped.
+        assert result.count("done") == 0 and result.count("skipped") == 1
         assert "junction or symlink" in result.outcomes[0].detail
         assert list(outside.rglob("*")) == []
     finally:
@@ -944,7 +1011,7 @@ def test_output_through_a_junction_is_refused(
 
 
 def test_a_plan_cannot_reach_outside_the_selected_folders(
-    tmp_path: Path, journal: Journal, fake_trash: list[Path]
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
 ) -> None:
     src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
     elsewhere = _picture(tmp_path / "elsewhere" / "b.heic", "HEIF")
@@ -970,15 +1037,23 @@ def test_a_plan_cannot_pick_a_different_output_format(
     assert "does not match the chosen format" in result.outcomes[0].detail
 
 
-def test_apply_then_undo_says_outputs_are_manual(
-    tmp_path: Path, journal: Journal, no_trash: None
+def test_undo_recycles_an_unchanged_output_and_lists_a_changed_one(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
 ) -> None:
-    src = _picture(tmp_path / "pics" / "a.heic", "HEIF")
-    _plan, result = _run(tmp_path, journal, MediaConvertOptions(roots=[src.parent]))
-    report = undo_run(journal, result.run_id)
-    assert report.reverted == 0
-    assert any("not reversible" in line for line in report.skipped)
-    assert (src.parent / "converted" / "a.jpg").exists()
+    first = _picture(tmp_path / "pics" / "a.heic", "HEIF")
+    _picture(tmp_path / "pics" / "b.heic", "HEIF")
+    _plan, result = _run(tmp_path, journal, MediaConvertOptions(roots=[first.parent]))
+    assert result.count("done") == 2
+    untouched = first.parent / "converted" / "a.jpg"
+    edited = first.parent / "converted" / "b.jpg"
+    edited.write_bytes(b"the user changed this output")
+
+    report = undo_run(journal, result.run_id, send_to_trash=fake_trash.trash)
+    assert report.reverted == 1
+    assert not untouched.exists() and fake_trash == [untouched]
+    assert edited.read_bytes() == b"the user changed this output"
+    assert any("changed after the run" in line and "b.heic" in line for line in report.skipped)
+    assert first.exists()  # originals are never touched
 
 
 def test_saved_plan_can_be_applied_later(tmp_path: Path, journal: Journal, no_trash: None) -> None:
@@ -1110,19 +1185,19 @@ def test_mov_originals_are_recycled_only_after_the_length_is_verified(
     journal: Journal,
     ffmpeg_path: Path,
     ffprobe_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _ffmpeg_make(ffmpeg_path, tmp_path / "clips" / "a.mov", *COMPATIBLE)
     out = src.parent / "converted" / "a.mp4"
     seen: dict[str, Any] = {}
-    real_fake = convert_tool.send2trash
+    real_fake = plan_module.send2trash
 
     def watching(path: str | os.PathLike[str]) -> None:
         seen["duration"] = ffmpeg_media.probe_duration(ffprobe_path, out)
         real_fake(path)
 
-    monkeypatch.setattr(convert_tool, "send2trash", watching)
+    monkeypatch.setattr(plan_module, "send2trash", watching)
     opts = MediaConvertOptions(
         roots=[src.parent], convert_heic=False, convert_webp=False, trash_originals=True
     )
@@ -1138,13 +1213,18 @@ def test_a_video_that_fails_verification_keeps_the_original(
     journal: Journal,
     ffmpeg_path: Path,
     ffprobe_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _ffmpeg_make(ffmpeg_path, tmp_path / "clips" / "a.mov", *COMPATIBLE)
     original = src.read_bytes()
 
+    out = src.parent / "converted" / "a.mp4"
+    checked: list[Path] = []
+
     def bad_check(self: object, ffprobe: Path, dst: Path, expected: float) -> None:
+        checked.append(dst)
+        assert dst.is_file() and not out.exists()  # checked under its temporary name
         raise MediaError("the converted video is 0.20 s long, the original 1.00 s")
 
     monkeypatch.setattr(convert_tool._Converter, "_verify_video", bad_check)
@@ -1155,7 +1235,12 @@ def test_a_video_that_fails_verification_keeps_the_original(
     assert result.count("failed") == 1 and "0.20 s long" in result.outcomes[0].detail
     assert fake_trash == []
     assert src.read_bytes() == original
-    assert (src.parent / "converted" / "a.mp4").is_file()
+    # The broken output never got its final name, and the tool's temp file is gone.
+    assert len(checked) == 1 and checked[0] != out
+    assert not out.exists() and list(out.parent.iterdir()) == []
+    # So a new scan offers the conversion again instead of "output already exists".
+    again = TOOL.scan(opts, _ctx(tmp_path, journal))
+    assert len(again.actions) == 1 and again.actions[0].selected, again.actions
 
 
 def test_the_duration_check_uses_the_tolerance(
@@ -1188,7 +1273,7 @@ def test_apply_without_ffmpeg_fails_the_action_and_keeps_the_original(
     tmp_path: Path,
     journal: Journal,
     ffmpeg_path: Path,
-    fake_trash: list[Path],
+    fake_trash: FakeBin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = _ffmpeg_make(ffmpeg_path, tmp_path / "clips" / "a.mov", *COMPATIBLE)

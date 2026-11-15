@@ -38,7 +38,9 @@ def strip_python_comments(source: str) -> str:
             inside_string.update(range(token.start[0], token.end[0] + 1))
 
     kept: list[str] = []
-    for row, line in enumerate(source.splitlines(keepends=True), start=1):
+    # Split exactly as tokenize counts lines (only at "\n"). ``str.splitlines`` would also split
+    # at form feeds and other separators, and the row numbers above would no longer match.
+    for row, line in enumerate(io.StringIO(source).readlines(), start=1):
         if row in comment_at:
             ending = line[len(line.rstrip("\r\n")) :]
             line = line[: comment_at[row]] + ending

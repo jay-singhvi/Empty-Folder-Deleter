@@ -268,6 +268,22 @@ def test_junctions_are_never_followed_and_count_as_content(tmp_path: Path) -> No
     assert outside.is_dir()
 
 
+def test_a_onedrive_placeholder_that_shows_the_reparse_bit_is_not_a_link(
+    tmp_path: Path, cloud_placeholder: Callable[..., None]
+) -> None:
+    root = tmp_path / "root"
+    (root / "placeholder-folder").mkdir(parents=True)
+    (root / "holder").mkdir()
+    (root / "holder" / "placeholder-file.txt").write_text("on the device", encoding="utf-8")
+    cloud_placeholder("root", "placeholder-folder", "placeholder-file.txt")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, None))
+    # The root is accepted, and the empty placeholder folder is an ordinary empty folder.
+    assert plan.roots == [root]
+    assert [_rel(a.src, root) for a in plan.actions] == ["placeholder-folder"]
+    assert not any("Junction or symlink" in note for note in plan.notes)
+    assert plan.cloud_only == []  # empty_folders reads no file contents, so it has none
+
+
 def test_a_folder_that_cannot_be_read_stays_and_is_noted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -423,6 +439,69 @@ def test_a_file_added_deep_in_a_planned_tree_keeps_the_junk_files_above_it(
     TOOL.apply(plan, _ctx(tmp_path, journal))
     assert (root / "a" / "Thumbs.db").exists()
     assert not sent_to_trash
+
+
+def test_a_checked_junk_file_in_an_unchecked_folder_is_kept_and_journaled_skipped(
+    tmp_path: Path, sent_to_trash: list[str], journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    folder = root / "photos"
+    folder.mkdir(parents=True)
+    (folder / "desktop.ini").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    assert [_rel(a.src, root) for a in plan.actions] == ["photos/desktop.ini", "photos"]
+    plan.actions[1].selected = False  # a plan edited by hand: folder off, junk row still on
+    assert plan.actions[0].selected
+
+    result = TOOL.apply(plan, _ctx(tmp_path, journal))
+    assert (folder / "desktop.ini").exists() and folder.is_dir()
+    assert not sent_to_trash
+    assert result.count("done") == 0
+    junk = [o for o in result.outcomes if o.src == str(folder / "desktop.ini")]
+    assert [o.status for o in junk] == ["skipped"]
+    assert "not selected" in junk[0].detail
+    journaled = [a for a in journal.actions(result.run_id) if a.src == str(folder / "desktop.ini")]
+    assert [a.status for a in journaled] == ["skipped"]
+
+
+def test_ticking_a_junk_row_ticks_its_folder_and_the_folders_junk(
+    tmp_path: Path, journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "Thumbs.db").write_text("x", encoding="utf-8")
+    (root / "a" / "desktop.ini").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    for action in plan.actions:
+        action.selected = False
+
+    set_folder_selected(plan, root / "a" / "Thumbs.db", True)
+    assert [a.selected for a in plan.actions] == [True, True, True]
+
+
+def test_unticking_a_junk_row_unticks_its_folder_and_every_parent(
+    tmp_path: Path, sent_to_trash: list[str], journal: Journal
+) -> None:
+    root = tmp_path / "root"
+    (root / "a" / "b" / "c").mkdir(parents=True)
+    (root / "a" / "b" / "Thumbs.db").write_text("x", encoding="utf-8")
+    (root / "a" / "desktop.ini").write_text("x", encoding="utf-8")
+    plan = TOOL.scan(_opts(roots=[root]), _ctx(tmp_path, journal))
+    assert [_rel(a.src, root) for a in plan.actions] == [
+        "a/b/c",
+        "a/b/Thumbs.db",
+        "a/b",
+        "a/desktop.ini",
+        "a",
+    ]
+
+    set_folder_selected(plan, root / "a" / "b" / "Thumbs.db", False)
+    # The folder c below b stays selected, exactly as when b itself is unticked.
+    assert [a.selected for a in plan.actions] == [True, False, False, False, False]
+
+    TOOL.apply(plan, _ctx(tmp_path, journal))
+    assert (root / "a" / "b" / "Thumbs.db").exists() and (root / "a" / "desktop.ini").exists()
+    assert not (root / "a" / "b" / "c").exists()
 
 
 def test_a_parent_selected_by_hand_is_still_refused_while_its_child_remains(

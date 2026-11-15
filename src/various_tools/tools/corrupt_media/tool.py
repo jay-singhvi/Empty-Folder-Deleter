@@ -445,6 +445,8 @@ class CorruptMedia:
         cloud_only = [c for c in candidates if _cloud_only(c.info)]
         for candidate in cloud_only:
             notes.append(f"skipped: cloud-only: {_relative(candidate)}")
+            if candidate.info.path not in plan.cloud_only:
+                plan.cloud_only.append(candidate.info.path)
         to_check = [c for c in candidates if not _cloud_only(c.info)]
 
         verdicts = _run_checks(to_check, opts, programs, ctx)

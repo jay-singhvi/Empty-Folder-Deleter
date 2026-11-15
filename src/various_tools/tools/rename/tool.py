@@ -31,6 +31,7 @@ from pydantic import Field
 from various_tools.core.context import RunContext
 from various_tools.core.fs import (
     FileInfo,
+    is_case_only_rename,
     is_inside,
     long_path,
     root_refusal,
@@ -289,6 +290,9 @@ def _matching(roots: Iterable[Path], spec: RenameSpec, recursive: bool) -> list[
     return found
 
 
+CLOUD_ONLY_REASON = "cloud-only, not read"
+
+
 def _cloud_only(info: FileInfo) -> bool:
     return not is_on_device(status_from_attributes(info.attributes))
 
@@ -332,7 +336,7 @@ def _when(
         return datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime)), True
     # capture: the file's contents are read, so cloud-only files are never touched.
     if _cloud_only(info):
-        return "cloud-only, not read"
+        return CLOUD_ONLY_REASON
     when = _capture(info, ctx, rules.min_year)
     return (when, True) if when is not None else "no capture date"
 
@@ -343,8 +347,10 @@ def _dated(
     ctx: RunContext,
     rules: _DateRules,
     notes: list[str],
+    cloud_only: list[Path],
 ) -> list[_Dated]:
-    """Date every file. Files without a usable date are listed in ``notes`` and left out."""
+    """Date every file. Files without a usable date are listed in ``notes`` and left out.
+    Files that are not on this device are never read; they are also added to ``cloud_only``."""
     uses_time = "time" in template_fields(spec.template)
     dated: list[_Dated] = []
     total = len(infos)
@@ -354,6 +360,8 @@ def _dated(
         result = _when(info, spec, ctx, rules)
         if isinstance(result, str):
             notes.append(f"skipped: {result}: {info.path}")
+            if result == CLOUD_ONLY_REASON and info.path not in cloud_only:
+                cloud_only.append(info.path)
             continue
         when, has_time = result
         if uses_time and not has_time:
@@ -378,7 +386,10 @@ def _conflict(src: Path, dst: Path) -> str | None:
     if dst.name == src.name:
         return "it already has this name"
     if dst.name.casefold() == src.name.casefold():
-        return "only the letter case changes"
+        # Only the letter case changes: fine when the name that "exists" is this very file.
+        if not os.path.lexists(long_path(dst)) or is_case_only_rename(src, dst):
+            return None
+        return "a file with this name already exists"
     if os.path.lexists(long_path(dst)):
         return "a file with this name already exists"
     return None
@@ -538,7 +549,7 @@ class Rename:
         plan.roots = roots
 
         infos = _matching(roots, spec, opts.recursive)
-        dated = _dated(infos, spec, ctx, _date_rules(opts, ctx), plan.notes)
+        dated = _dated(infos, spec, ctx, _date_rules(opts, ctx), plan.notes, plan.cloud_only)
         actions = _actions(dated, spec, plan.notes)
         plan.actions = actions
         renamed = sum(1 for a in actions if a.selected)

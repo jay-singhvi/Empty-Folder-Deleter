@@ -10,9 +10,16 @@ browser caches without touching them. Category: Clean up.
 2. **Preview** lists every file that is older than the limit and matches the patterns, then the
    folders that will be left empty (deepest first, after their files). Everything is checked by
    default, and you can uncheck anything. Notes list the browser caches.
-3. **Apply** sends the checked items to the Recycle Bin. Each one is journaled and shows in
-   History. A file that is in use fails on its own and the rest carry on. Restore from the
-   Recycle Bin by hand; Various Tools cannot undo a trash.
+3. **Apply** checks every file again, then sends the checked items to the Recycle Bin. Each one
+   is journaled and shows in History. A file that is in use fails on its own and the rest carry
+   on. Undo from History puts trashed items back from the Recycle Bin when it finds them there (same path, same time, same size); an item it cannot find is listed to restore by hand.
+
+A plan can be saved and applied days later, so apply does not trust the scan: each file must
+still be a plain local file that matches the patterns, is not hidden (when those are kept), and has
+not changed (modified or created) within the age limit, counted from the moment of apply. A file
+that no longer qualifies (for example one created since the scan) is kept and journaled as
+**skipped**, with the reason. Folders are not re-aged at apply (trashing their files changes their
+time); the engine still refuses any folder that is not empty.
 
 ## Which folders
 
@@ -20,6 +27,20 @@ If you choose no folder, the tool uses your temp folder: the folders named by th
 variables, and `%LOCALAPPDATA%\Temp`, without repeats. The plan says which folders it picked. The
 default is worked out from the environment variables alone (`default_temp_roots(environ)`), so it
 is easy to test and never touches the disk until the scan itself.
+
+Folders are compared on their real long names. `%TEMP%` is often an 8.3 short path
+(`C:\Users\NAME~1\AppData\Local\Temp`) while `%LOCALAPPDATA%\Temp` is the long form of the same
+folder: they count as one folder, and a folder inside another chosen folder drops out, so no file
+is planned twice. The plan uses the long names.
+
+Some folders are always refused, with a note, because the default rules (every file not changed
+for a week) would trash program settings and data in them:
+
+- `%APPDATA%`, `%LOCALAPPDATA%` and `%PROGRAMDATA%` themselves;
+- any folder that holds the temp folder, such as `%USERPROFILE%\AppData` or
+  `%USERPROFILE%\AppData\Local`.
+
+`%TEMP%`, `%TMP%`, `%LOCALAPPDATA%\Temp` and folders inside them stay allowed.
 
 ## Options
 
@@ -30,7 +51,7 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 |---|---|---|
 | Folders to clean | (empty = your temp folder) | The folders to remove old files from. A drive root or protected folder is refused. The folders themselves are never removed. |
 | Include sub-folders | on | Also clean sub-folders. When off, no folder is removed either. |
-| Older than (days) | 7 (0 to 36500) | Only files last modified more than this many days ago are removed. 0 removes files of any age, including ones in use right now. |
+| Older than (days) | 7 (0 to 36500) | Only files that have not changed for more than this many days are removed. A file's age is the newer of its modified time and its creation time, because an installer that unpacks files into the temp folder gives them the archive's old modified times. 0 removes files of any age, including ones in use right now. |
 | Only these files | `*` | File names or relative paths (patterns allowed) that may be removed. Matched without regard to letter case. |
 | Never remove | (none) | Files or folders (patterns allowed) that are always kept. A kept folder stays with everything in it. |
 | Keep hidden and system files (advanced) | on | Hidden or system files and folders are kept, and so are the folders that hold them. |
@@ -85,7 +106,7 @@ you choose a browser cache itself as the folder to clean, it is refused.
 - The scan reads no file contents and writes nothing.
 - Nothing outside the chosen folders is touched, and the folders themselves are never removed.
 - Everything goes to the Recycle Bin. Nothing is ever deleted permanently.
-- Junctions and symlinks are never followed, and are never removed.
+- Junctions and symlinks are never followed, and are never removed. OneDrive files and folders are not links, even though Windows marks them as reparse points.
 - Cloud-only OneDrive files are skipped and never read. They are reported as
   "skipped: cloud-only".
 - Protected folders are refused, and a dry run (the preview) is always the first step.

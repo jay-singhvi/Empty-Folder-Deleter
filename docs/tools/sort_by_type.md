@@ -29,8 +29,17 @@ A rule is one line: `PATTERN=FOLDER`.
   `..` or `.`, no `< > : " | ? *`, no name ending in a dot, no Windows device names (`CON`,
   `NUL`, `COM1` and so on). Use `/` or `\` between folders. A bad rule is refused with a message
   naming it.
-- On the command line, give the rules as `--rules "*.pdf=Docs,*.jpg|*.png=Pictures"` (rules are
-  separated by commas, so a rule cannot hold one).
+- **A rule splits at its first `=` only**, so a folder may hold a comma:
+  `*.pdf=Letters/Smith, John` is one rule.
+- In the app the rules are a two-column table (Pattern(s), Folder). The field carries the hints
+  `widget: "pairs"`, `pair_separator: "="` and `pair_headers: ["Pattern(s)", "Folder"]`; each row
+  is stored as `<patterns>=<folder>`.
+- On the command line, give the rules as `--rules "*.pdf=Docs,*.jpg|*.png=Pictures"`. Rules there
+  are separated by commas, and the tool puts back a rule that a comma split: a piece without `=`
+  that looks like a pattern (has `*`, `?` or `[`) joins the next rule as another pattern
+  (`*.jpg,*.png=Pictures` becomes `*.jpg|*.png=Pictures`); any other piece joins the previous
+  rule's folder as `, <piece>` (`*.pdf=Smith, John` stays one rule). Text given as one string is
+  read one rule per line.
 
 Default rules:
 
@@ -74,8 +83,14 @@ the app settings, where the list can be changed.
 
 A name is "taken" when a file of that name (compared without regard to letter case) is already in
 the destination folder, or another file in the same plan is going there. The scan settles every
-clash up front, so the preview shows the real names. Existing files are never replaced. If a name
-is taken only after the scan, the moved file still gets a numbered name when you apply.
+clash up front, so the preview shows the real names. Existing files are never replaced.
+
+If a name is taken only after the scan (a saved plan applied later, or another program), apply
+checks every destination again before any move and follows the same options: with `rename` the
+file gets the next free name with **your** clash suffix (never a name another move in the plan is
+going to), and the journal records the name it really got; with `skip` it stays where it is and
+is journaled as **skipped** ("the name is taken ... since the scan"). The engine's own `_dup`
+fallback only covers a name taken in the moment between that check and the move.
 
 ## Sub-folders and destination folders
 
@@ -95,7 +110,7 @@ re-sorted whatever their type, and a second run finds nothing to do.
 - **Cloud-only OneDrive files are skipped, not moved.** A move on one drive is a rename that reads
   nothing, but a move that fails falls back to copy-and-delete, which would download the file. The
   safer choice is to leave it, and the plan says "skipped: cloud-only".
-- Junctions and symlinks inside the folder are never followed or moved.
+- Junctions and symlinks inside the folder are never followed or moved. OneDrive files and folders are not links, even though Windows marks them as reparse points.
 - Hidden, system and dot files, unfinished downloads and `.git` or `node_modules` are left alone by
   default.
 - Every move is journaled and can be undone from History.

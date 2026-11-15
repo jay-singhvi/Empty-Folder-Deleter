@@ -118,6 +118,12 @@ def _taken_text(im: Image.Image) -> str | None:
     return str(value).strip() if value else None
 
 
+def _require_size(path: Path, w: int, h: int) -> None:
+    """A picture with no width or height cannot be compared, so it counts as unreadable."""
+    if w <= 0 or h <= 0:
+        raise ValueError(f"no usable picture size ({w}x{h}) in {path.name}")
+
+
 def read_image(path: Path, size: int, mtime: float, params: ReadParams | None = None) -> ImageInfo:
     """Hash and measure one image. Raises on unreadable files, and for cloud-only files
     (``open_image`` and ``hashing.sha256`` both check OneDrive state first)."""
@@ -125,11 +131,13 @@ def read_image(path: Path, size: int, mtime: float, params: ReadParams | None = 
     sha = hashing.sha256(path, use.chunk_bytes)
     with open_image(path) as im:
         w, h = im.size
+        _require_size(path, w, h)
         taken = _taken_text(im)
         if path.suffix.lower() in use.visual_skip_ext:
             return ImageInfo(path, size, mtime, w, h, sha, None, None, None, taken, None)
         oriented = ImageOps.exif_transpose(im).convert("RGB")
         w, h = oriented.size
+        _require_size(path, w, h)
         phash = hashing.phash(oriented, use.phash_size)
         dhash = hashing.dhash(oriented, use.phash_size)
         grey = oriented.convert("L")
@@ -219,6 +227,8 @@ def hamming(a: int, b: int) -> int:
 def cheap_match(a: ImageInfo, b: ImageInfo, rules: ImageRules) -> bool:
     """Everything except the pixel check: aspect ratio and both hashes."""
     if a.phash is None or b.phash is None or a.dhash is None or b.dhash is None:
+        return False
+    if min(a.w, a.h, b.w, b.h) <= 0:  # no usable size: not comparable (and no division by zero)
         return False
     ar = a.w / a.h
     return (

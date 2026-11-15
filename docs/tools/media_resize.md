@@ -16,12 +16,19 @@ It replaces `app.py` (the resolution reducer) and the resize and CR3 conversion 
 
 - **Files are never enlarged** (🔒 locked option `never_upscale`, on by default). A file is
   resized only when the chosen rule makes it smaller. See the options for turning it off.
-- **Originals are never changed or removed.** The output goes to a new folder (`resized` by
-  default, inside each folder you chose), or next to the original with a suffix (`_resized` by
-  default).
-- **An existing file is never overwritten.** If the output name is taken, the file is listed and
-  left alone.
-- **Cloud-only OneDrive files are never read.** They are reported as skipped.
+- **By default, originals are never changed or removed.** The output goes to a new folder
+  (`resized` by default, inside each folder you chose), or next to the original with a suffix
+  (`_resized` by default).
+- **Replacing originals is an explicit, advanced choice** (output `overwrite`, plus *Allow
+  replacing the originals*). The new file is written next to the original and checked first (it
+  opens, in the expected format and size), the original goes to the **Recycle Bin** as its own
+  journaled row, then the new file takes its name and modified time. If a step fails, the original
+  is still in place, or it is in the Recycle Bin and the error says where the new copy is. Undo
+  restores the original from the Recycle Bin.
+- **An existing file is never overwritten** by a new output. If the output name is taken, the file
+  is listed and left alone.
+- **Cloud-only OneDrive files are never read.** They are reported as skipped and listed in the
+  plan's cloud-only list.
 - **Junctions and symlinks are not followed,** and protected folders are refused.
 - **The output folder is never scanned,** so a second run does not resize its own output.
 
@@ -64,10 +71,12 @@ tools. It is an advanced option, and the GUI warns before it is changed.
 | Keep metadata | on | Keeps the EXIF block. The orientation is reset, because the pixels are already turned. |
 | Video size estimate factor (`estimate_compression`) | 0.8 | Preview only: expected video size is the pixel ratio times this. |
 | Motion-photo scan size (`extras_scan_kb`) | 256 | How much of the start of each JPEG is searched for a motion-photo or HDR marker. |
-| Output | New folder | Or a suffix next to the original. |
+| Output | New folder | Or a suffix next to the original, or `overwrite` (replace the original; it goes to the Recycle Bin). |
+| Allow replacing the originals (`allow_overwrite`, advanced) | off | Needed for `overwrite`. RAW files are never replaced; their JPEG goes next to them under the same name with `.jpg`. |
 | Output folder name | the `default_output_folder` setting (`resized`) | Used by the new-folder output. |
 | File name suffix (`suffix_tag`) | `_resized` | Added before the extension by the suffix output. No `\ / : * ? " < > \|`, and no trailing dot or space. Files already ending in it are skipped. |
 | Convert RAW (CR3) to JPEG | off | Needs ExifTool to keep the metadata. See below. |
+| Remove RAW originals (`remove_raw_originals`, advanced) | off | Sends each CR3 to the Recycle Bin after its JPEG is written, checked and given the RAW's metadata (🔒 rule from the plan). If the metadata copy fails, ExifTool is missing or *Keep metadata* is off, the RAW is kept and the plan or the row says why. |
 
 These app-wide settings also apply (Settings page): the resized output folder name, the protected
 folders, the `ffprobe` timeout, the video encode timeout and the ExifTool write timeout.
@@ -81,12 +90,11 @@ folders, the `ffprobe` timeout, the video encode timeout and the ExifTool write 
 
 ## Limits in this version
 
-- **Overwriting the originals is not offered.** The undo log cannot restore a replaced file, so
-  the originals are always kept.
-- **RAW originals are kept.** Metadata-8 removed each CR3 after converting it. Removing originals
-  needs the same undo decision as the Duplicate Finder's trash action, so it is left for the owner.
-- **Undo cannot reverse a resize.** The output is a new file, and undo lists it as "not reversible
-  by undo; restore manually" instead of deleting it. No file is lost.
+- **Undo** sends each output that is unchanged since the run to the Recycle Bin, and restores
+  replaced or removed originals from the Recycle Bin while they are still there. An output you
+  changed afterwards is listed and kept.
+- **RAW conversion has not been run on a real CR3 file** in the tests (there is no sample); the
+  decode and the ExifTool metadata copy are faked there.
 - **Animated images** (animated GIF or WebP) and **motion photos or HDR JPEGs** are left as they
   are, because resizing them would drop frames or embedded data.
 - **HEIC and HEIF** are not resized in this version (the `app.py` list does not include them).

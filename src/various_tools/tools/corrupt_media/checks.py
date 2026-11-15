@@ -95,12 +95,32 @@ def check_image(path: Path, depth: CheckDepth) -> Verdict:
         return Verdict("skipped", "larger than the image safety limit, so it was not decoded")
     except (PermissionError, FileNotFoundError) as exc:
         return Verdict("skipped", f"could not be read: {exc.strerror or exc}")
+    except MemoryError:
+        return Verdict("skipped", "not enough memory to decode it, so it could not be checked")
     except Image.UnidentifiedImageError:
         return Verdict("corrupt", "not a readable picture (cannot identify the image format)")
     except Exception as exc:  # noqa: BLE001 - every decoder raises its own error types
+        if is_system_error(exc):
+            return Verdict("skipped", f"could not be read: {_short(_os_message(exc), path)}")
         message = _short(str(exc), path) or type(exc).__name__
         return Verdict("corrupt", f"picture does not decode: {message}")
     return OK
+
+
+def is_system_error(exc: BaseException) -> bool:
+    """True for an ``OSError`` raised by the system (it carries an ``errno`` or a ``winerror``):
+    a network glitch, a sharing violation, WinError 1450 and the like. That says nothing about
+    the file, so the check is skipped. Pillow's own decode errors (``image file is truncated``,
+    ``broken data stream``) are ``OSError`` without either, and stay corrupt."""
+    if not isinstance(exc, OSError):
+        return False
+    return exc.errno is not None or getattr(exc, "winerror", None) is not None
+
+
+def _os_message(exc: BaseException) -> str:
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    return str(exc) or type(exc).__name__
 
 
 def _duration(data: dict[str, Any], video: dict[str, Any]) -> float | None:

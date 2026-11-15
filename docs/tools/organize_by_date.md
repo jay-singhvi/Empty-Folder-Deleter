@@ -1,8 +1,9 @@
 # Organize photos and videos by date
 
 Moves photos and videos into `<destination>\<year>\<year> - <month>\` folders, by when they were
-taken. It replaces `python-extract_file_metadata-8.py`, without its Excel master log and its
-resize and CR3 options (those are covered by [Resize media](media_resize.md)).
+taken. It replaces `python-extract_file_metadata-8.py`. Its Excel master log becomes a SQLite
+catalog, which can be exported to Excel or CSV, and the old log can be imported once. Its
+`--resize` option is **Also resize pictures**; CR3 conversion is in [Resize media](media_resize.md).
 
 ## How it works
 
@@ -29,9 +30,10 @@ If none of them gives a plausible date, the file goes to the **Unknown Date** fo
 
 ## Rules that always hold
 
-- **Cloud-only OneDrive files are never read and never moved.** They are listed as "cloud-only,
-  skipped and not read", and nothing is downloaded. Their date is not guessed from the modified
-  time, because reading it would mean downloading the file.
+- **Cloud-only OneDrive files are never read during a scan.** By default (*Cloud-only files:
+  skip*) they are listed as "cloud-only, skipped and not read", nothing is downloaded, and they
+  are not moved. Their date is not guessed from the modified time, because reading it would mean
+  downloading the file. See [Cloud-only files](#cloud-only-files) for the download choices.
 - **A file that is already in its place is not moved.**
 - **Only files on this device are moved.** The source folders are never changed or deleted, and
   junctions and symlinks are not followed.
@@ -63,21 +65,67 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 | Worker threads (advanced) | the Settings value (CPU cores) | How many files are read at once while scanning. 1 to 256. |
 | Skip already processed files | off | Skips files an earlier run already moved, before reading them. |
 | Retry errors only | off | Scans only the files whose last run failed. |
-| Catalog file (advanced) | `catalog.sqlite` in the app data folder (Settings) | The SQLite catalog. |
+| Catalog file (advanced) | `catalog.sqlite` in the app data folder (Settings) | The SQLite catalog. The export and import buttons always use the default file. |
+| 🔒 Cloud-only files (`cloud_only`, advanced) | skip | `skip`, `ask` or `download`. See below. |
+| Download wait (`download_wait_seconds`, advanced) | 30 | Seconds to wait for OneDrive to download one file (1 to 3600). |
+| Keep downloaded files on this device (`keep_pinned`, advanced) | off | Off: the "always keep on this device" mark that a download sets is removed after the move, as the legacy script did. |
+| Also resize pictures (`also_resize`, advanced) | off | Resize each picture in place before it is moved. See below. |
+| Side to resize (`resize_mode`, advanced) | shorter side | Shorter side (the legacy rule) or longer side. |
+| Side length (`resize_px`, advanced) | 1080 | Pixels (16 to 16384), as in Resize media. |
+| JPEG quality (`resize_jpeg_quality`, advanced) | 85 | As in Resize media (the legacy script used 95). |
 
 The ffprobe and ExifTool timeouts come from the app settings. The date rules (capture date first,
-modified time only when plausible, cloud-only files never read or moved) are fixed and not options.
+modified time only when plausible, cloud-only files never read during a scan) are fixed and not
+options.
+
+## Cloud-only files
+
+| Choice | What happens |
+|---|---|
+| `skip` (default) | Not read, not downloaded, not moved. Listed as skipped, and in the plan's cloud-only list. |
+| `ask` | Each file is a row, **not ticked**, that says it will be downloaded first. Ticking a row is your consent: Apply downloads that file only. |
+| `download` | The same rows, already ticked. The option is 🔒 locked, because Apply then downloads every one of them. |
+
+Nothing is downloaded during the scan. At Apply, for a ticked row only, the file is downloaded
+(waiting up to *Download wait*), then its date and folder are worked out exactly as the scan
+does, and it is moved without replacing anything. The move is journaled as its own row with the
+real destination, so undo moves it back (the file stays downloaded). Unless *Keep downloaded
+files on this device* is on, the pin the download set is removed again afterwards. A download that
+fails or times out is a failed row with the reason, and the file stays where it is.
+
+## Also resize pictures
+
+The legacy `--resize` overwrote each picture. Here each JPEG, PNG, BMP, GIF, TIFF or WebP is
+resized **in place, before it is moved**, with Resize media's pipeline: the resized copy is written
+next to the original and checked, the original goes to the **Recycle Bin** as its own journaled
+row, and the copy takes its name. Undo moves the file back and restores the original from the
+Recycle Bin. Pictures are never enlarged (🔒), and motion photos, HDR JPEGs and animated images
+are left as they are. Videos, RAW (CR3), HEIC and downloaded files are only moved. Unticking a
+file's move also drops its resize.
+
+The resize runs before the move, at the source, because the original must go to the Recycle Bin
+from inside a selected folder (rule 4), and because a picture is then never resized at a
+destination whose name changed at the last moment.
 
 ## The media catalog
 
 The catalog replaces the Excel master log. It has one row per file: its path, capture date, where
 the date came from, camera make and model, size, dimensions, GPS, sync status, destination, and
-its status (`planned`, `moved`, `organized`, `skipped` or `error`). It is a SQLite file, so it can
-be written safely from several workers. A CSV export exists as a library function
-(`Catalog.export_csv`) only; the tool does not expose it yet, and a button or option for it is
-planned for a later phase.
+its status (`planned`, `moved`, `organized`, `skipped`, `error` or `imported`). It is a SQLite
+file, so it can be written safely from several workers. A problem writing it never stops a run:
+it is noted in the plan and logged.
 
-Excel export and importing the old `Photo_Metadata_Master.xlsx` are not in this version.
+Two buttons (and CLI subcommands) work on it:
+
+- **Export catalog…** (`catalog-export`) writes the catalog to a new `.xlsx` (sheet `Catalog`)
+  or `.csv` file. An existing file is never replaced. Text is always stored as text, so a file
+  name starting with `=` never becomes a formula.
+- **Import old master log…** (`catalog-import`) reads the `Metadata` sheet of the old
+  `Photo_Metadata_Master.xlsx` once, using its column names (`CurrentFullPath`, `FileName`,
+  `Action`, `DateTaken`, and so on). Paths the catalog already knows keep their catalog row,
+  which is newer. Rows without a path are skipped. A workbook without that sheet and those columns
+  is refused, and a cloud-only workbook is not read. Imported rows have no recorded modified time,
+  so the next scan reads each file once instead of skipping it.
 
 ## Programs it needs
 
@@ -88,8 +136,7 @@ Excel export and importing the old `Photo_Metadata_Master.xlsx` are not in this 
 
 ## Not in this version
 
-- **Downloading cloud-only files** from the scan. Every file that is not on the device is skipped.
-  The download needs its own journaled action, which the engine does not have yet.
-- **Resizing while organizing** (the legacy `--resize` option). Use [Resize media](media_resize.md)
-  after organizing, or wait for a later release. Resizing in place would overwrite the originals.
-- **Keeping the existing Excel master log**, and importing it.
+- **CR3 conversion while organizing.** The legacy `--resize` also turned CR3 files into JPEGs.
+  RAW files are only moved here; use [Resize media](media_resize.md) for the conversion.
+- **Writing back to the Excel master log.** The catalog is the log now; export it when you need a
+  workbook.

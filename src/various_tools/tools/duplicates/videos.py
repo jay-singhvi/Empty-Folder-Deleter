@@ -83,6 +83,8 @@ def read_video(
     use = params or VideoReadParams()
     dur = ffmpeg.probe_duration(ffprobe, path, timeout=use.probe_timeout_s)
     w, h = ffmpeg.display_size(ffprobe, path, timeout=use.probe_timeout_s)
+    if w <= 0 or h <= 0:
+        raise ffmpeg.MediaError(f"no usable video size in {path.name}")
     frames: tuple[int, ...] = ()
     if ffmpeg_exe is not None:
         frames = tuple(
@@ -105,6 +107,8 @@ def read_video(
 
 def same_video(a: VideoInfo, b: VideoInfo, rules: VideoRules) -> bool:
     if abs(a.dur - b.dur) > max(rules.dur_tol_s, rules.dur_tol_pct * max(a.dur, b.dur)):
+        return False
+    if min(a.w, a.h, b.w, b.h) <= 0:  # no usable size: not comparable (and no division by zero)
         return False
     ar = a.w / a.h
     if abs(ar - b.w / b.h) / ar > rules.aspect_tol:

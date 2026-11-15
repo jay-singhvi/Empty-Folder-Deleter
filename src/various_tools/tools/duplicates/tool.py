@@ -212,9 +212,15 @@ class DuplicatesOptions(ToolOptions):
         title="Ollama model",
         description=(
             "The Ollama vision model that checks borderline matches. It must already be pulled "
-            "(ollama pull). Default: lfm3-vl:latest."
+            "(ollama pull). Pick one of the models Ollama reports, or type a name. "
+            "Default: lfm3-vl:latest."
         ),
-        json_schema_extra=_hint("Ollama", advanced=True, depends_on="verify_with_ollama=true"),
+        json_schema_extra=_hint(
+            "Ollama",
+            advanced=True,
+            depends_on="verify_with_ollama=true",
+            choices_from="ollama_models",
+        ),
     )
     ollama_prompt: str = Field(
         default=verify_ollama.PROMPT,
@@ -602,6 +608,15 @@ class Findings:
     notes: list[str] = field(default_factory=list[str])
     cloud_only: int = 0
     unreadable: int = 0
+    # The cloud-only files themselves, for the plan's "download these files" list.
+    cloud_paths: list[Path] = field(default_factory=list[Path])
+
+    def skip_cloud_only(self, path: Path) -> None:
+        """Count a file that is not on this device and note it. It is never read (rule 3)."""
+        self.cloud_only += 1
+        self.notes.append(f"skipped: cloud-only, not read: {path}")
+        if path not in self.cloud_paths:
+            self.cloud_paths.append(path)
 
 
 def _cloud_only(info: FileInfo) -> bool:
@@ -656,14 +671,16 @@ def _image_infos(
     try:
         for info in files:
             if _cloud_only(info):
-                out.cloud_only += 1
-                out.notes.append(f"skipped: cloud-only, not read: {info.path}")
+                out.skip_cloud_only(info.path)
                 continue
             cached = cache.get(info.path, info.size, info.mtime) if cache else None
             if cached is not None:
-                results.append(image_from_cache(info.path, info.size, info.mtime, cached))
-            else:
-                todo.append(info)
+                image = image_from_cache(info.path, info.size, info.mtime, cached)
+                if image.w > 0 and image.h > 0:
+                    results.append(image)
+                    continue
+                # An old cache entry without a size: read the file again, which reports it.
+            todo.append(info)
 
         pool = ThreadPoolExecutor(max_workers=workers)
         try:
@@ -706,8 +723,7 @@ def _video_infos(
     for info in files:
         ctx.check_cancelled()
         if _cloud_only(info):
-            out.cloud_only += 1
-            out.notes.append(f"skipped: cloud-only, not read: {info.path}")
+            out.skip_cloud_only(info.path)
             continue
         try:
             results.append(
@@ -942,6 +958,7 @@ class Duplicates:
         findings = collect(opts, ctx)
         plan.roots = findings.roots
         plan.notes.extend(findings.notes)
+        plan.cloud_only.extend(findings.cloud_paths)
         if findings.roots:
             _to_plan(opts, findings, ctx, plan)
         return plan

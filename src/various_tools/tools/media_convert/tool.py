@@ -30,7 +30,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, field_validator
-from send2trash import send2trash
 
 from various_tools.core.context import RunContext
 from various_tools.core.deps import install_hint
@@ -45,7 +44,14 @@ from various_tools.core.fs import (
 )
 from various_tools.core.media.ffmpeg import MediaError
 from various_tools.core.onedrive import CloudOnlyFileError, is_on_device, status_from_attributes
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.plan import (
+    ActionKind,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+    trash_extra,
+)
 from various_tools.tools.base import Category, ToolOptions
 from various_tools.tools.media_convert import images, videos
 from various_tools.tools.media_convert.images import ImageRules
@@ -446,6 +452,12 @@ class _Planner:
         self.skipped += 1
         self.plan.notes.append(f"skipped: {reason}: {path}")
 
+    def skip_cloud_only(self, path: Path) -> None:
+        """A file that is not on this device: never read, and listed for the download action."""
+        self.skip("cloud-only, not read", path)
+        if path not in self.plan.cloud_only:
+            self.plan.cloud_only.append(path)
+
     def add(self, candidate: _Candidate, kind: Kind, dst: Path, reason: str) -> None:
         """Add one conversion. An output that cannot be written is listed, but not selected."""
         if self.opts.trash_originals:
@@ -476,12 +488,12 @@ class _Planner:
     def picture(self, candidate: _Candidate, kind: Kind) -> None:
         src = candidate.info.path
         if _cloud_only(candidate.info):
-            self.skip("cloud-only, not read", src)
+            self.skip_cloud_only(src)
             return
         try:
             inspected = images.inspect(src)
         except CloudOnlyFileError:
-            self.skip("cloud-only, not read", src)
+            self.skip_cloud_only(src)
             return
         except Exception as exc:  # one unreadable file must not stop the batch; it is reported
             self.skip(f"could not read the picture ({exc})", src)
@@ -505,11 +517,14 @@ class _Planner:
     def video(self, candidate: _Candidate, ffprobe: Path) -> None:
         src = candidate.info.path
         if _cloud_only(candidate.info):
-            self.skip("cloud-only, not read", src)
+            self.skip_cloud_only(src)
             return
         try:
             info = videos.probe(ffprobe, src, timeout=self.ctx.settings.ffprobe_timeout_s)
-        except (MediaError, OSError, CloudOnlyFileError) as exc:
+        except CloudOnlyFileError:
+            self.skip_cloud_only(src)
+            return
+        except (MediaError, OSError) as exc:
             self.skip(f"could not read the video ({exc})", src)
             return
         choice = videos.choose(info, self.opts.video_mode, self.opts.reencode_codec)
@@ -555,9 +570,15 @@ class _Converter:
         return dst
 
     def _trash_original(self, src: Path, dst: Path) -> None:
-        """Only reached after the output was written and verified."""
+        """Only reached after the output was written and verified.
+
+        The recycle is journaled as its own ``trash`` row (rule 5), so undo can bring the
+        original back from the Recycle Bin.
+        """
         try:
-            send2trash(str(src))
+            trash_extra(
+                src, reason=f"original recycled after the verified conversion to {dst.name}"
+            )
         except Exception as exc:  # the output stays; the action fails so it shows in History
             raise OSError(
                 f"converted to {dst.name}, but the original could not be moved to the "
@@ -611,14 +632,16 @@ class _Converter:
         choice = videos.choose(info, self.opts.video_mode, self.opts.reencode_codec)
         if isinstance(choice, str):
             raise ValueError(choice)
+        # The gate before an original may go: the encoded file is probed under its temporary
+        # name, so one that fails never becomes ``dst`` (a later scan would call it done).
         videos.convert(
             ffmpeg,
             src,
             dst,
             self._video_args(choice, info),
             timeout=settings.transcode_timeout_s,
+            verify=lambda encoded: self._verify_video(ffprobe, encoded, info.duration),
         )
-        self._verify_video(ffprobe, dst, info.duration)
 
     def _video_args(self, choice: Choice, info: SourceInfo) -> list[str]:
         return videos.ffmpeg_args(

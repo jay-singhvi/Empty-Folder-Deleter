@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, get_args
 
+from various_tools.core.fs import long_path
 from various_tools.core.onedrive import ensure_on_device
 
 Algorithm = Literal["sha256", "sha1", "md5", "sha512"]
@@ -37,6 +38,12 @@ _WINDOWS_FORBIDDEN = '<>:"|?*'
 _DRIVE = re.compile(r"^[A-Za-z]:")
 
 
+def read_bytes(path: Path) -> bytes:
+    """The whole file, opened through ``long_path`` so a path past 260 characters works."""
+    with open(long_path(path), "rb") as handle:
+        return handle.read()
+
+
 def default_name(algorithm: str) -> str:
     return DEFAULT_NAMES[algorithm]
 
@@ -51,7 +58,8 @@ def file_digest(path: Path, algorithm: str, chunk_size: int) -> str:
     """
     ensure_on_device(path)
     digest = hashlib.new(algorithm, usedforsecurity=False)
-    with path.open("rb") as handle:
+    # Through long_path, so a file past 260 characters opens even without LongPathsEnabled.
+    with open(long_path(path), "rb") as handle:
         for chunk in iter(lambda: handle.read(max(1, chunk_size)), b""):
             digest.update(chunk)
     return digest.hexdigest()

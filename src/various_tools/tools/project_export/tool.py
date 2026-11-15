@@ -162,6 +162,16 @@ class ProjectExportOptions(ToolOptions):
         ),
         json_schema_extra={"group": "Output"},
     )
+    copy_to_clipboard: bool = Field(
+        default=False,
+        title="Copy to clipboard",
+        description=(
+            "After the export is written, also copy its text to the clipboard, ready to paste "
+            "into an AI assistant. The app does this after Apply, not the export itself. Large "
+            "exports may be too big for some chat boxes. Default: off."
+        ),
+        json_schema_extra={"group": "Output"},
+    )
     separator: str = Field(
         default=SEPARATOR,
         min_length=1,
@@ -290,11 +300,19 @@ def _output_refusal(output: Path, ctx: RunContext) -> str | None:
 
 
 def _is_prior_export(path: Path, output: Path) -> bool:
-    """True for the output file and earlier exports beside it: ``stem``, ``stem_dupN`` with a
-    ``.txt`` or ``.md`` extension, plus their ``.partial`` leftovers."""
+    """True for the output file and earlier exports beside it: ``stem`` or ``stem_dupN`` with the
+    output's own extension (or ``.txt`` / ``.md``, which the format can change), plus the
+    ``.partial`` leftovers of either (``stem.ext.partial``, ``stem.ext_dupN.partial``)."""
     if _key(path.parent) != _key(output.parent):
         return False
-    pattern = re.escape(output.stem.casefold()) + r"(_dup\d+)?\.(txt|md)(\.partial)?"
+    stem = re.escape(output.stem.casefold())
+    extensions = {"txt", "md"}
+    if output.suffix:
+        extensions.add(output.suffix.lstrip(".").casefold())
+    ext = "|".join(sorted(re.escape(e) for e in extensions))
+    # A file with no extension at all only counts when the output itself has none.
+    dotted = rf"\.(?:{ext})" if output.suffix else rf"(?:\.(?:{ext}))?"
+    pattern = rf"{stem}(?:_dup\d+)?{dotted}(?:\.partial)?|{stem}\.(?:{ext})_dup\d+\.partial"
     return re.fullmatch(pattern, path.name.casefold()) is not None
 
 
@@ -332,8 +350,10 @@ def _gather(
     output: Path,
     ctx: RunContext,
     notes: list[str],
+    cloud_only: list[Path],
 ) -> list[_Entry]:
-    """Read the selected files. Skipped files are reported in ``notes``."""
+    """Read the selected files. Skipped files are reported in ``notes``, and files that are not
+    on this device are also added to ``cloud_only`` (they are never read)."""
     infos = _selected_files(root, opts, output)
     entries: list[_Entry] = []
     total = len(infos)
@@ -346,6 +366,8 @@ def _gather(
             continue
         if _cloud_only(info):
             notes.append(f"skipped: cloud-only, not downloaded: {rel.as_posix()}")
+            if info.path not in cloud_only:
+                cloud_only.append(info.path)
             continue
         if opts.max_file_kb is not None and info.size > opts.max_file_kb * 1024:
             notes.append(f"skipped: larger than {opts.max_file_kb} KB: {rel.as_posix()}")
@@ -432,7 +454,7 @@ def _render(root: Path, opts: ProjectExportOptions, entries: list[_Entry]) -> st
 
 def _export_text(root: Path, opts: ProjectExportOptions, output: Path, ctx: RunContext) -> str:
     """The whole export as text. Used by scan (to measure) and by apply (to write)."""
-    entries = _gather(root, opts, output, ctx, notes=[])
+    entries = _gather(root, opts, output, ctx, notes=[], cloud_only=[])
     return _render(root, opts, entries)
 
 
@@ -463,7 +485,7 @@ class ProjectExport:
             return plan
 
         plan.roots = [root]
-        entries = _gather(root, opts, output, ctx, plan.notes)
+        entries = _gather(root, opts, output, ctx, plan.notes, plan.cloud_only)
         text = _render(root, opts, entries)
         tokens = len(text) // opts.chars_per_token
         plan.actions = [

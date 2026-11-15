@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -226,11 +227,14 @@ def transcode(
     output_args: list[str],
     *,
     timeout: float = TRANSCODE_TIMEOUT_S,
+    verify: Callable[[Path], None] | None = None,
 ) -> None:
     """Encode ``source`` to ``destination`` with ``output_args`` (e.g. ``["-c:v", "libx264"]``).
 
     Writes to a temporary file in the destination folder and renames it at the end, so a failed
-    encode leaves no partial output.
+    encode leaves no partial output. ``verify``, when given, is called with the temporary file
+    (same folder, same extension) before the rename and raises to reject it: a rejected output
+    never gets its final name, and only this call's own temporary file is removed.
     """
     ensure_on_device(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +248,8 @@ def transcode(
             raise MediaError(f"transcode timed out for {source.name}") from exc
         if result.returncode != 0:
             raise MediaError(f"transcode failed for {source.name}: {result.stderr.strip()[:300]}")
+        if verify is not None:
+            verify(tmp_path)
         rename_no_replace(tmp_path, destination)
     finally:
         tmp_path.unlink(missing_ok=True)

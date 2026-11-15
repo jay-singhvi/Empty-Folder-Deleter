@@ -4,7 +4,7 @@
 declaration order. Each spec carries what a front end needs to draw the field: a label (``title``),
 help text (``description``), a ``kind`` (checkbox, number, text, path, dropdown, list, key/value
 table), bounds, the default and the UI hints from ``json_schema_extra`` (``group``, ``advanced``,
-``locked``, ``widget``, ``depends_on``).
+``locked``, ``widget``, ``depends_on``, ``choices_from``, ``pair_separator``, ``pair_headers``).
 
 ``parse_value(spec, text)`` turns text typed by a person (a CLI flag, a config value) into a
 value that pydantic accepts for that field, and :func:`format_value` does the reverse for display.
@@ -66,6 +66,14 @@ class FieldSpec:
     locked: bool
     widget: str | None
     depends_on: str | None
+    # Name of a source in ``core/choices.py`` that lists suggestions at run time (for example
+    # ``ollama_models``). The field stays free text; a front end may show an editable dropdown
+    # and fill it in a worker thread with ``dynamic_choices(choices_from, ctx)``.
+    choices_from: str | None = None
+    # ``widget = "pairs"``: each list item is two cells joined by ``pair_separator`` (split at
+    # its first occurrence), shown under ``pair_headers`` (exactly two titles, or empty).
+    pair_separator: str | None = None
+    pair_headers: tuple[str, ...] = ()
 
     @property
     def has_bounds(self) -> bool:
@@ -210,6 +218,7 @@ def describe(model: type[BaseModel]) -> list[FieldSpec]:
         extra = _extra(info)
         widget = extra.get("widget")
         depends_on = extra.get("depends_on")
+        choices_from = extra.get("choices_from")
         specs.append(
             FieldSpec(
                 name=name,
@@ -231,9 +240,25 @@ def describe(model: type[BaseModel]) -> list[FieldSpec]:
                 locked=bool(extra.get("locked", False)),
                 widget=str(widget) if widget else None,
                 depends_on=str(depends_on) if depends_on else None,
+                choices_from=str(choices_from) if choices_from else None,
+                pair_separator=_pair_separator(extra),
+                pair_headers=_pair_headers(extra),
             )
         )
     return specs
+
+
+def _pair_separator(extra: Mapping[str, Any]) -> str | None:
+    value = extra.get("pair_separator")
+    return value if isinstance(value, str) and value else None
+
+
+def _pair_headers(extra: Mapping[str, Any]) -> tuple[str, ...]:
+    value: Any = extra.get("pair_headers")
+    if not isinstance(value, list | tuple):
+        return ()
+    items = [str(item) for item in cast("list[Any] | tuple[Any, ...]", value)]
+    return tuple(items) if len(items) == 2 else ()
 
 
 # ----- parsing ---------------------------------------------------------------------------

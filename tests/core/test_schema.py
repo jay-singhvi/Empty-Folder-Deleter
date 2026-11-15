@@ -39,6 +39,7 @@ class Sample(BaseModel):
     extra: dict[str, str] = Field(default_factory=dict)
     limits: dict[str, int] = Field(default_factory=dict)
     annotated: Annotated[int, Field(ge=2)] = 5
+    model_name: str = Field(default="m:1", json_schema_extra={"choices_from": "models"})
     needed: str = Field(
         title="Needed",
         json_schema_extra={
@@ -105,6 +106,76 @@ def test_choices_defaults_and_requirements() -> None:
     assert not _spec("mode").required
     assert _spec("needed").required
     assert _spec("needed").default is None
+
+
+def test_choices_from_names_a_dynamic_source_and_stays_free_text() -> None:
+    spec = _spec("model_name")
+    assert spec.choices_from == "models"
+    assert (spec.kind, spec.choices, spec.default) == ("str", (), "m:1")
+    assert parse_value(spec, "anything:else") == "anything:else"  # not limited to the list
+    assert _spec("name").choices_from is None
+    assert _spec("mode").choices_from is None
+
+
+def test_a_blank_choices_from_hint_is_no_source() -> None:
+    class Blank(BaseModel):
+        value: str = Field(default="", json_schema_extra={"choices_from": ""})
+
+    assert describe(Blank)[0].choices_from is None
+
+
+def test_the_duplicate_finders_model_field_uses_the_ollama_source() -> None:
+    from various_tools.tools.duplicates import DuplicatesOptions
+
+    spec = next(s for s in describe(DuplicatesOptions) if s.name == "ollama_model")
+    assert spec.choices_from == "ollama_models"
+    assert (spec.kind, spec.choices, spec.default) == ("str", (), "lfm3-vl:latest")
+    assert all(
+        s.choices_from is None for s in describe(DuplicatesOptions) if s.name != "ollama_model"
+    )
+
+
+def test_pair_hints_are_carried_through_describe() -> None:
+    class Rules(BaseModel):
+        rules: list[str] = Field(
+            default_factory=list,
+            json_schema_extra={
+                "widget": "pairs",
+                "pair_separator": "=",
+                "pair_headers": ["Pattern(s)", "Folder"],
+            },
+        )
+        plain: list[str] = Field(default_factory=list)
+
+    rules, plain = describe(Rules)
+    assert (rules.widget, rules.pair_separator, rules.pair_headers) == (
+        "pairs",
+        "=",
+        ("Pattern(s)", "Folder"),
+    )
+    assert (plain.pair_separator, plain.pair_headers) == (None, ())
+
+
+def test_bad_pair_headers_are_ignored() -> None:
+    class Odd(BaseModel):
+        one: list[str] = Field(
+            default_factory=list,
+            json_schema_extra={"widget": "pairs", "pair_separator": "", "pair_headers": "x"},
+        )
+
+    spec = describe(Odd)[0]
+    assert (spec.pair_separator, spec.pair_headers) == (None, ())
+
+
+def test_sort_by_type_rules_are_a_pairs_field() -> None:
+    from various_tools.tools.sort_by_type import TOOL as SORT
+
+    spec = next(s for s in describe(SORT.Options) if s.name == "rules")
+    assert (spec.widget, spec.pair_separator, spec.pair_headers) == (
+        "pairs",
+        "=",
+        ("Pattern(s)", "Folder"),
+    )
 
 
 def test_nullable_and_bounds() -> None:

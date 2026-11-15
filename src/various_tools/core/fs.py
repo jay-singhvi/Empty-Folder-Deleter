@@ -1,7 +1,15 @@
-"""File-system helpers: walking with filters, reparse-point safety, collision-safe names.
+"""File-system helpers: walking with filters, link safety, collision-safe names and moves.
 
-Nothing in this module opens file contents. Directory listings use ``os.scandir`` and the
-attributes it already has, so cloud-only OneDrive placeholders are not recalled here.
+Nothing in this module opens file contents, except :func:`move_no_replace` when it has to copy
+a file to another drive, and it checks OneDrive state first. Directory listings use
+``os.scandir`` and the attributes it already has, so cloud-only OneDrive placeholders are not
+recalled here.
+
+**What counts as a link** (AGENTS.md rule 4) is decided in one place, :func:`stat_is_link`: a
+symlink or a junction (``IO_REPARSE_TAG_SYMLINK``, ``IO_REPARSE_TAG_MOUNT_POINT``) is a link,
+and so is any reparse point with a tag this module does not know (the safer side). Cloud-files
+placeholders (the ``IO_REPARSE_TAG_CLOUD_*`` family, which OneDrive uses for every file and
+folder it syncs) are ordinary files and folders, not links.
 """
 
 from __future__ import annotations
@@ -10,7 +18,10 @@ import fnmatch
 import logging
 import os
 import re
+import shutil
+import stat as stat_module
 import sys
+import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +32,47 @@ log = logging.getLogger(__name__)
 
 FILE_ATTRIBUTE_DIRECTORY = 0x10
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # a junction (or a mounted volume folder)
+IO_REPARSE_TAG_SYMLINK = 0xA000000C
+# IO_REPARSE_TAG_CLOUD is 0x9000001A; CLOUD_1 to CLOUD_F set bits 12-15 (0x9000101A...0x9000F01A).
+IO_REPARSE_TAG_CLOUD = 0x9000001A
+_CLOUD_TAG_MASK = 0xFFFF0FFF
 # Windows refuses many calls on paths at or past MAX_PATH unless they use the \\?\ prefix.
 MAX_PATH = 240
+_COPY_CHUNK = 1024 * 1024
+
+
+def is_cloud_reparse_tag(tag: int) -> bool:
+    """True for the cloud-files placeholder tags (``IO_REPARSE_TAG_CLOUD`` to ``CLOUD_F``)."""
+    return (tag & _CLOUD_TAG_MASK) == IO_REPARSE_TAG_CLOUD
+
+
+def stat_is_link(st: os.stat_result) -> bool:
+    """True when a no-follow stat result is a symlink, a junction or an unknown reparse point.
+
+    A cloud-files placeholder is not a link. Pure function, no I/O.
+    """
+    if stat_module.S_ISLNK(st.st_mode):
+        return True
+    attributes: int = getattr(st, "st_file_attributes", 0)
+    if not attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    tag: int = getattr(st, "st_reparse_tag", 0)
+    return not is_cloud_reparse_tag(tag)
+
+
+def stat_no_follow(path: Path) -> os.stat_result | None:
+    """``os.lstat`` of ``path`` (long paths allowed), or ``None`` when it cannot be read."""
+    try:
+        return os.lstat(long_path(path))
+    except OSError:
+        return None
+
+
+def is_link(path: Path) -> bool:
+    """True when ``path`` itself is a junction, a symlink or an unknown reparse point."""
+    st = stat_no_follow(path)
+    return st is not None and stat_is_link(st)
 
 
 def long_path(path: Path | str) -> str:
@@ -59,6 +109,10 @@ def _matches_any(name: str, rel_posix: str, globs: Iterable[str]) -> bool:
 
 def _load_gitignore(folder: Path) -> pathspec.GitIgnoreSpec | None:
     ignore_file = folder / ".gitignore"
+    # AGENTS.md rule 4: a .gitignore that is a link could point anywhere, so it is not read.
+    if is_link(ignore_file):
+        log.warning("Skipped %s: it is a link, so its rules are not applied", ignore_file)
+        return None
     # AGENTS.md rule 3: a cloud-only .gitignore is never recalled just to read its rules.
     from various_tools.core.onedrive import get_sync_status, is_on_device
 
@@ -103,12 +157,16 @@ def walk(
     * ``include_globs``: when given, a file must match one of them (by name or relative path).
     * ``exclude_globs``: matching files *and* folders are skipped (``.git``, ``node_modules``).
     * ``exts``: lower-case extensions with a dot, e.g. ``{".jpg", ".png"}``.
-    * ``respect_gitignore``: honour ``.gitignore`` files from ``root`` down.
-    * ``skip_reparse_points``: never follow junctions or symlinks, so nothing outside ``root``
-      is reached. Enabled by default and required by AGENTS.md rule 4.
+    * ``respect_gitignore``: honour ``.gitignore`` files from ``root`` down. A ``.gitignore``
+      that is a link is not read.
+    * ``skip_reparse_points``: kept for compatibility and has no effect. Junctions, symlinks
+      and unknown reparse points (see :func:`stat_is_link`) are always skipped and never
+      followed, so nothing outside ``root`` is reached (AGENTS.md rule 4). Cloud placeholders
+      are listed like any other file or folder.
 
     ``root`` itself is never yielded. Folders that cannot be listed are logged and skipped.
     """
+    del skip_reparse_points  # rule 4 is not optional
     includes = tuple(include_globs)
     excludes = tuple(exclude_globs)
     extensions = {e.lower() for e in exts} if exts is not None else None
@@ -141,9 +199,8 @@ def walk(
             except OSError as exc:
                 log.warning("Skipping %s: %s", path, exc)
                 continue
-            attrs = getattr(st, "st_file_attributes", 0)
-            is_link = entry.is_symlink() or bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-            if skip_reparse_points and is_link:
+            attrs: int = getattr(st, "st_file_attributes", 0)
+            if entry.is_symlink() or entry.is_junction() or stat_is_link(st):
                 continue
             is_dir = entry.is_dir(follow_symlinks=False)
 
@@ -194,26 +251,200 @@ def unique_destination(folder: Path, name: str) -> Path:
         counter += 1
 
 
-def rename_no_replace(source: Path, destination: Path) -> None:
-    """Move ``source`` to ``destination``, never replacing a file that is already there.
+def is_case_only_rename(source: Path, destination: Path) -> bool:
+    """True when ``destination`` is ``source`` spelled with different letter case.
 
-    Raises :class:`FileExistsError` when ``destination`` exists. On Windows ``os.rename`` itself
-    refuses an existing target, so the check and the move are one atomic step. Elsewhere a hard
-    link is made first, which also fails when the target exists.
+    That is, the two paths compare equal the way Windows compares them, the names differ, and
+    the existing entry at ``destination`` is ``source`` itself (same file id), so renaming
+    replaces nothing. Reads attributes only.
     """
-    if os.path.lexists(destination):
+    if source.name == destination.name or not same_path(source, destination):
+        return False
+    a, b = stat_no_follow(source), stat_no_follow(destination)
+    return a is not None and b is not None and os.path.samestat(a, b)
+
+
+def rename_no_replace(source: Path, destination: Path) -> None:
+    """Rename ``source`` to ``destination``, never replacing a file that is already there.
+
+    Raises :class:`FileExistsError` when ``destination`` exists, unless it is ``source`` itself
+    under a different letter case (:func:`is_case_only_rename`). On Windows ``os.rename`` itself
+    refuses an existing target, so the check and the rename are one atomic step. Elsewhere a
+    hard link is made first, which also fails when the target exists. Same volume only.
+    """
+    case_only = is_case_only_rename(source, destination)
+    if not case_only and os.path.lexists(long_path(destination)):
         raise FileExistsError(
             f"the output file already exists, so it was not replaced: {destination}"
         )
-    if sys.platform == "win32":
+    if sys.platform == "win32" or case_only:
         os.rename(long_path(source), long_path(destination))
     else:
         os.link(long_path(source), long_path(destination))
         os.unlink(long_path(source))
 
 
+def _existing_ancestor(path: Path) -> Path | None:
+    current = Path(os.path.abspath(path))
+    while not os.path.lexists(long_path(current)):
+        if current.parent == current:
+            return None
+        current = current.parent
+    return current
+
+
+def same_volume(a: Path, b: Path) -> bool:
+    """True when ``a`` and the nearest existing folder at or above ``b`` are on one volume.
+
+    Compares the volume ids that ``os.lstat`` reports. When either cannot be read, the answer
+    is False, so the caller takes the careful copy path or refuses.
+    """
+    there = _existing_ancestor(b)
+    sa = stat_no_follow(a)
+    sb = stat_no_follow(there) if there is not None else None
+    return sa is not None and sb is not None and sa.st_dev == sb.st_dev
+
+
+def move_no_replace(source: Path, destination: Path) -> None:
+    """Move ``source`` to ``destination``. Never replaces anything, on any volume.
+
+    * Same volume: :func:`rename_no_replace` (atomic on Windows).
+    * Another volume, a file: refuses a cloud-only file (AGENTS.md rule 3), copies the contents
+      to an exclusively created ``.partial`` file next to the destination, renames that into
+      place with :func:`rename_no_replace`, checks the size and only then removes the source.
+    * Another volume, a folder or a link: refused with :class:`OSError`.
+
+    The destination folder must exist. Raises :class:`FileExistsError` when the destination
+    exists or appears during the move; the source is then left as it was.
+    """
+    if same_volume(source, destination.parent):
+        rename_no_replace(source, destination)
+        return
+    st = stat_no_follow(source)
+    if st is None:
+        raise FileNotFoundError(f"source is gone: {source}")
+    if stat_is_link(st):
+        raise OSError(f"a junction or symlink is not moved to another drive: {source}")
+    if stat_module.S_ISDIR(st.st_mode):
+        raise OSError(
+            f"moving a folder to another drive is not supported; move its files instead: {source}"
+        )
+    if os.path.lexists(long_path(destination)):
+        raise FileExistsError(
+            f"the output file already exists, so it was not replaced: {destination}"
+        )
+    from various_tools.core.onedrive import ensure_on_device
+
+    ensure_on_device(source)  # raises CloudOnlyFileError before anything is opened
+    partial = destination.parent / f".{destination.name}.{uuid.uuid4().hex[:8]}.partial"
+    try:
+        with (
+            open(long_path(source), "rb") as reader,
+            open(long_path(partial), "xb") as writer,
+        ):
+            shutil.copyfileobj(reader, writer, _COPY_CHUNK)
+        shutil.copystat(long_path(source), long_path(partial))
+        rename_no_replace(partial, destination)
+    except BaseException:
+        if os.path.lexists(long_path(partial)):
+            os.remove(long_path(partial))
+        raise
+    copied = os.lstat(long_path(destination)).st_size
+    if copied != st.st_size:
+        os.remove(long_path(destination))  # our own incomplete copy; the source is untouched
+        raise OSError(f"the copy of {source} has {copied} bytes, not {st.st_size}; not moved")
+    os.remove(long_path(source))
+
+
+_PREFIX_UNC = "\\\\?\\UNC\\"
+_PREFIXES = ("\\\\?\\", "\\\\.\\")
+
+
+def _strip_prefix(text: str) -> str:
+    """``text`` without a ``\\\\?\\`` (or ``\\\\?\\UNC\\``) prefix."""
+    if text[: len(_PREFIX_UNC)].upper() == _PREFIX_UNC:
+        return "\\\\" + text[len(_PREFIX_UNC) :]
+    for prefix in _PREFIXES:
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return text
+
+
+def _get_long_path_name(text: str) -> str | None:
+    """``GetLongPathNameW`` of an existing path, or None."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    func = kernel32.GetLongPathNameW
+    func.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    func.restype = ctypes.c_uint32
+    size = 512
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        needed = int(func(text, buffer, size))
+        if needed == 0:
+            return None
+        if needed < size:
+            return str(buffer.value)
+        size = needed + 1
+
+
+def short_path_name(path: Path) -> str | None:
+    """The 8.3 short form of an existing path (``GetShortPathNameW``), or None."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    func = kernel32.GetShortPathNameW
+    func.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    func.restype = ctypes.c_uint32
+    buffer = ctypes.create_unicode_buffer(1024)
+    needed = int(func(str(path), buffer, 1024))
+    return str(buffer.value) if 0 < needed < 1024 else None
+
+
+def _expand_short_names(text: str) -> str:
+    """Replace 8.3 short names (``PROGRA~1``) with long ones, for the part of ``text`` that
+    exists. Only called when a ``~`` is present, so most paths cost nothing."""
+    head, tail = text, list[str]()
+    while True:
+        expanded = _get_long_path_name(head)
+        if expanded is not None:
+            return os.path.join(expanded, *reversed(tail))
+        parent, name = os.path.split(head)
+        if not name or parent == head:
+            return text
+        tail.append(name)
+        head = parent
+
+
 def _norm(path: str | os.PathLike[str]) -> str:
-    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
+    """The comparable form of a path: no long-path prefix, absolute, normalised, 8.3 names
+    expanded, and case-folded on Windows."""
+    text = os.path.normpath(os.path.abspath(_strip_prefix(os.fspath(path))))
+    if sys.platform == "win32" and "~" in text:
+        text = _expand_short_names(text)
+    return os.path.normcase(text)
+
+
+def comparable_path(path: str | os.PathLike[str]) -> str:
+    """The form in which two paths can be compared for equality (see :func:`same_path`)."""
+    return _norm(path)
+
+
+def strip_long_prefix(text: str) -> str:
+    """``text`` without a ``\\\\?\\`` or ``\\\\?\\UNC\\`` prefix (the inverse of
+    :func:`long_path` for display and comparison)."""
+    return _strip_prefix(text)
+
+
+def same_path(a: Path | str, b: Path | str) -> bool:
+    """True when two paths name the same place, compared the way Windows does. No links are
+    resolved, but ``\\\\?\\`` prefixes and 8.3 short names are."""
+    return _norm(a) == _norm(b)
 
 
 # Folders that, with everything inside them, are protected targets (AGENTS.md rule 6) 🔒.
@@ -269,19 +500,26 @@ def _expand(template: str, environ: Mapping[str, str]) -> str | None:
     return None if missing or not expanded.strip() else expanded
 
 
+def _is_drive_root(normalized: str) -> bool:
+    """True for ``c:\\``, ``\\\\server\\share`` and ``/``, given a :func:`_norm` result."""
+    drive, rest = os.path.splitdrive(normalized)
+    return not rest.strip("\\/") and (bool(drive) or rest != "")
+
+
 def protected_reason(
     path: Path, env: Mapping[str, str] | None = None, rules: ProtectedPaths | None = None
 ) -> str | None:
     """Why ``path`` is a protected target (AGENTS.md rule 6), or ``None`` if it is not.
 
     Default rules: drive roots, the user profile folder itself, and everything inside the
-    Windows and Program Files folders. ``rules`` (from settings) can change the list.
+    Windows and Program Files folders. ``rules`` (from settings) can change the list. Paths are
+    compared without ``\\\\?\\`` prefixes and with 8.3 short names expanded, so neither can be
+    used to slip past the list.
     """
     environ = os.environ if env is None else env
     active = rules or DEFAULT_PROTECTION
     target = _norm(path)
-    anchor = _norm(Path(path).anchor or path)
-    if active.drive_roots and target == anchor:
+    if active.drive_roots and _is_drive_root(target):
         return "drive root"
 
     user_profile = environ.get("USERPROFILE")
@@ -312,17 +550,12 @@ def reparse_ancestor(path: Path, stop: Path | None = None) -> Path | None:
     writing to a destination, so output never lands outside the chosen folder through a
     junction (AGENTS.md rule 4). Reads attributes only and opens no file.
     """
-    current = Path(os.path.abspath(path))
+    current = Path(os.path.abspath(_strip_prefix(os.fspath(path))))
     stop_norm = _norm(stop) if stop is not None and is_inside(current, stop) else None
     while True:
-        try:
-            st = os.stat(long_path(current), follow_symlinks=False)
-        except OSError:
-            st = None
-        if st is not None:
-            attributes = getattr(st, "st_file_attributes", 0)
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT or os.path.islink(current):
-                return current
+        st = stat_no_follow(current)
+        if st is not None and stat_is_link(st):
+            return current
         if stop_norm is not None and _norm(current) == stop_norm:
             return None
         parent = current.parent
@@ -354,12 +587,10 @@ def root_refusal(root: Path, allow_protected: bool | ProtectedPaths = False) -> 
     if not root.is_dir():
         return f"Not a folder: {root}"
     try:
-        attributes = getattr(
-            os.stat(long_path(root), follow_symlinks=False), "st_file_attributes", 0
-        )
+        st = os.lstat(long_path(_strip_prefix(os.fspath(root))))
     except OSError as exc:
         return f"Could not read the folder: {exc.strerror or exc}"
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+    if stat_is_link(st):
         return f"Junction or symlink, not followed: {root}"
     reason = protected_reason(root, rules=rules)
     if reason and not rules.allowed:

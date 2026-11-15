@@ -16,6 +16,7 @@ import pillow_heif
 import rawpy
 from PIL import Image
 
+from various_tools.core.fs import rename_no_replace
 from various_tools.core.onedrive import ensure_on_device
 
 # Makes Image.open() read .heic and .heif. Safe to call more than once.
@@ -53,8 +54,9 @@ def save_jpeg(
 ) -> None:
     """Save as JPEG through a temporary file, then rename it into place.
 
-    A failed save never leaves a half-written file at ``destination``. ``exif`` is copied over
-    when given, so metadata survives the conversion.
+    A failed save never leaves a half-written file at ``destination``, and an existing file
+    there is never replaced: :class:`FileExistsError` is raised instead. ``exif`` is copied
+    over when given, so metadata survives the conversion.
     """
     options: dict[str, Any] = {"format": "JPEG", "quality": quality}
     if exif:
@@ -65,7 +67,7 @@ def save_jpeg(
     tmp_path = Path(tmp_name)
     try:
         image.convert("RGB").save(tmp_path, **options)
-        os.replace(tmp_path, destination)
+        rename_no_replace(tmp_path, destination)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise

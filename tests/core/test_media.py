@@ -59,6 +59,15 @@ def test_save_jpeg_writes_atomically_and_keeps_no_temp_files(tmp_path: Path) -> 
     assert [p.name for p in target.parent.iterdir()] == ["small.jpg"]
 
 
+def test_save_jpeg_never_replaces_an_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "taken.jpg"
+    target.write_bytes(b"someone else's file")
+    with pytest.raises(FileExistsError):
+        imaging.save_jpeg(Image.new("RGB", (8, 8)), target)
+    assert target.read_bytes() == b"someone else's file"
+    assert [p.name for p in tmp_path.iterdir()] == ["taken.jpg"]
+
+
 def test_save_jpeg_failure_leaves_nothing_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,6 +260,56 @@ def test_transcode_failure_leaves_no_partial_output(tmp_path: Path) -> None:
         ffmpeg.transcode(failing, source, out, [])
     assert not out.exists()
     assert list(out.parent.iterdir()) == []
+
+
+def _fake_encode(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    """An encoder stand-in that writes its output file (the last argument) and succeeds."""
+    command = args[0]
+    assert isinstance(command, list)
+    Path(str(command[-1])).write_bytes(b"encoded")
+    return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
+
+
+def test_transcode_verifies_the_temp_output_before_it_gets_its_final_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "in.mov"
+    source.write_bytes(b"x")
+    out = tmp_path / "out" / "photo.mp4"
+    checked: list[Path] = []
+
+    def verify(candidate: Path) -> None:
+        checked.append(candidate)
+        assert candidate.read_bytes() == b"encoded"
+        assert not out.exists()  # still under its temporary name
+
+    monkeypatch.setattr(ffmpeg, "run_tool", _fake_encode)
+    ffmpeg.transcode(tmp_path / "ffmpeg.exe", source, out, [], verify=verify)
+    assert len(checked) == 1 and checked[0] != out and checked[0].parent == out.parent
+    assert checked[0].suffix == ".mp4"
+    assert out.read_bytes() == b"encoded"
+    assert sorted(p.name for p in out.parent.iterdir()) == ["photo.mp4"]
+
+
+def test_a_failed_verify_leaves_no_output_and_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "in.mov"
+    source.write_bytes(b"x")
+    out = tmp_path / "out" / "photo.mp4"
+    out.parent.mkdir()
+    neighbour = out.parent / "other.mp4"
+    neighbour.write_bytes(b"not ours")
+
+    def verify(_candidate: Path) -> None:
+        raise ffmpeg.MediaError("the converted video is 0.20 s long")
+
+    monkeypatch.setattr(ffmpeg, "run_tool", _fake_encode)
+    with pytest.raises(ffmpeg.MediaError, match="0.20 s long"):
+        ffmpeg.transcode(tmp_path / "ffmpeg.exe", source, out, [], verify=verify)
+    assert not out.exists()
+    assert sorted(p.name for p in out.parent.iterdir()) == ["other.mp4"]
+    assert neighbour.read_bytes() == b"not ours"
 
 
 # ----- degrade on timeouts and malformed output ------------------------------------------------

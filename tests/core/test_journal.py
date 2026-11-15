@@ -132,7 +132,7 @@ def test_undo_reports_os_errors_per_action(
     def locked(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("file in use")
 
-    monkeypatch.setattr("various_tools.core.journal.shutil.move", locked)
+    monkeypatch.setattr("various_tools.core.fs.move_no_replace", locked)
     report = undo_run(journal, run_id)
     assert report.reverted == 0
     assert "file in use" in report.failed[0]

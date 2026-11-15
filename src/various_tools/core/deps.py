@@ -8,8 +8,12 @@ Lookup order, first valid match wins (plan §3.5):
 1. user override from settings (``external_tools.<tool>.path``, or the Ollama URL)
 2. environment variables ``VARIOUS_TOOLS_FFMPEG``, ``VARIOUS_TOOLS_FFPROBE``,
    ``VARIOUS_TOOLS_EXIFTOOL`` and ``VARIOUS_TOOLS_OLLAMA_URL``
-3. ``PATH`` (``shutil.which``)
-4. known install locations (data in :data:`TOOL_SPECS`)
+3. ``PATH`` (:func:`find_on_path`: like ``shutil.which``, but the current folder and relative
+   ``PATH`` entries are never searched)
+4. known install locations (data in :data:`TOOL_SPECS`), expanded from the given environment
+
+Overrides and environment paths must be full paths; a relative one is reported and ignored
+rather than resolved against the current folder.
 
 A candidate counts only when its version command succeeds. An override that stopped working
 is logged and the lookup continues. A tool that is still missing yields ``valid=False``, and
@@ -24,7 +28,7 @@ import glob
 import json
 import logging
 import os
-import shutil
+import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -140,10 +144,64 @@ class ToolLocation:
         return self.valid
 
 
-def _windows_path_exts() -> tuple[str, ...]:
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_ENV_VAR = re.compile(r"%([^%]+)%")
+
+
+def _env_get(env: Mapping[str, str], name: str) -> str | None:
+    """``env[name]``, compared case-insensitively as Windows does."""
+    if name in env:
+        return env[name]
+    lowered = name.lower()
+    return next((value for key, value in env.items() if key.lower() == lowered), None)
+
+
+def _windows_path_exts(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """The extensions Windows tries for a bare program name (``PATHEXT``)."""
-    raw = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    raw = _env_get(os.environ if env is None else env, "PATHEXT") or _DEFAULT_PATHEXT
     return tuple(ext.lower() for ext in raw.split(";") if ext)
+
+
+def _expand(template: str, env: Mapping[str, str]) -> str | None:
+    """``%VAR%`` expanded from ``env``, or None when a variable is unset (so an unexpanded
+    template never turns into a path relative to the current folder)."""
+    missing = False
+
+    def sub(match: re.Match[str]) -> str:
+        nonlocal missing
+        value = _env_get(env, match.group(1))
+        if not value:
+            missing = True
+            return ""
+        return value
+
+    expanded = _ENV_VAR.sub(sub, template)
+    if missing or not os.path.isabs(expanded):
+        return None
+    return expanded
+
+
+def find_on_path(exe_name: str, env: Mapping[str, str]) -> Path | None:
+    """Search the ``PATH`` in ``env`` for ``exe_name``, like ``shutil.which`` but safer.
+
+    Unlike ``shutil.which`` on Windows, the current folder is never searched, and relative or
+    empty ``PATH`` entries are ignored, so a program dropped in the working folder (for
+    example a downloads folder) is never picked up.
+    """
+    raw = _env_get(env, "PATH") or ""
+    exts = _windows_path_exts(env) if os.name == "nt" else ("",)
+    for folder in raw.split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or not os.path.isabs(folder):
+            continue
+        for ext in exts:
+            candidate = Path(folder) / f"{exe_name}{ext}"
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+    return None
 
 
 def run_tool(args: list[str], timeout: float = 60) -> subprocess.CompletedProcess[str]:
@@ -300,22 +358,35 @@ class ExternalTools:
 
         override = self._overrides.get(tool)
         if override:
-            found = self._validate_exe(Path(override), spec)
-            if found is not None:
-                return self._location(spec, found, ToolSource.OVERRIDE, problems)
-            msg = f"saved path for {tool} no longer works: {override}; falling back"
-            log.warning(msg)
-            problems.append(msg)
+            if not os.path.isabs(override):
+                msg = f"saved path for {tool} is not a full path, so it is ignored: {override}"
+                log.warning(msg)
+                problems.append(msg)
+            else:
+                found = self._validate_exe(Path(override), spec)
+                if found is not None:
+                    return self._location(spec, found, ToolSource.OVERRIDE, problems)
+                msg = f"saved path for {tool} no longer works: {override}; falling back"
+                log.warning(msg)
+                problems.append(msg)
 
-        env_value = self._env.get(spec.env_var)
+        env_value = _env_get(self._env, spec.env_var)
         if env_value:
-            found = self._validate_exe(Path(env_value), spec)
-            if found is not None:
-                return self._location(spec, found, ToolSource.ENVIRONMENT, problems)
+            if not os.path.isabs(env_value):
+                msg = f"{spec.env_var} is not a full path, so it is ignored: {env_value}"
+                log.warning(msg)
+                problems.append(msg)
+            else:
+                found = self._validate_exe(Path(env_value), spec)
+                if found is not None:
+                    return self._location(spec, found, ToolSource.ENVIRONMENT, problems)
 
-        which = shutil.which(spec.exe_name)
-        if which:
-            found = self._validate_exe(Path(which), spec)
+        # PATH comes from ``env`` when it sets one; otherwise from the process environment, so
+        # ``env={}`` (used to hide the VARIOUS_TOOLS_* variables) still finds installed tools.
+        path_env = self._env if _env_get(self._env, "PATH") is not None else os.environ
+        on_path = find_on_path(spec.exe_name, path_env)
+        if on_path is not None:
+            found = self._validate_exe(on_path, spec)
             if found is not None:
                 return self._location(spec, found, ToolSource.PATH, problems)
 
@@ -343,13 +414,15 @@ class ExternalTools:
             if sibling is not None:
                 folders.append(str(sibling.parent))
         for template in spec.known_locations:
-            expanded = os.path.expandvars(template)
+            expanded = _expand(template, self._env)
+            if expanded is None:
+                continue  # a variable is unset in this environment
             if "*" in expanded:
                 folders.extend(sorted(glob.glob(expanded, recursive=True)))
             else:
                 folders.append(expanded)
 
-        exts = _windows_path_exts() if os.name == "nt" else ("",)
+        exts = _windows_path_exts(self._env) if os.name == "nt" else ("",)
         seen: set[str] = set()
         candidates: list[Path] = []
         for folder in folders:
@@ -447,6 +520,8 @@ SYSTEM_TOOLS: dict[str, str] = {
     # Windows' own tool, used to pin and unpin OneDrive files. It is not one of the four
     # external programs, but its name lives here too, so that only this module names executables.
     "attrib": "attrib.exe",
+    # Windows Task Scheduler's command-line client, used by scheduled runs (core/schedule.py).
+    "schtasks": "schtasks.exe",
 }
 
 

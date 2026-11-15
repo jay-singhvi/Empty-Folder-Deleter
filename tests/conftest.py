@@ -22,6 +22,32 @@ from various_tools.core.deps import ExternalTools  # noqa: E402
 ImageMaker = Callable[..., Path]
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_recycle_bin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """No test may reach the real Recycle Bin, even one that forgets to fake it.
+
+    Apply and undo send items to a throwaway folder instead, and undo finds no real bin to
+    restore from. Tests that check trashing install their own fakes on top of this.
+    """
+    import shutil
+    import uuid
+
+    from various_tools.core import journal, plan, recycle
+
+    def fake_send2trash(path: object) -> None:
+        bin_folder = tmp_path_factory.mktemp("recycle-bin")
+        source = Path(str(path))
+        if not os.path.lexists(source):
+            raise OSError(f"cannot send a missing item to the Recycle Bin: {source}")
+        shutil.move(str(source), str(bin_folder / f"{uuid.uuid4().hex}-{source.name}"))
+
+    monkeypatch.setattr(plan, "send2trash", fake_send2trash)
+    monkeypatch.setattr(journal, "send2trash", fake_send2trash)
+    monkeypatch.setattr(recycle, "current_user_bin", lambda _path: None)
+
+
 @pytest.fixture
 def make_image(tmp_path: Path) -> ImageMaker:
     """Write a seeded noise image (distinct per seed) and return its path.

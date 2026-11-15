@@ -38,7 +38,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, s
     # Known-location templates are expanded from os.environ, so the variables must be real.
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setattr(deps.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(deps, "find_on_path", lambda _name, _env: None)
     return env
 
 
@@ -87,7 +87,7 @@ def test_path_lookup_is_used_when_no_override_or_env(
 ) -> None:
     on_path = fake_exe(tmp_path / "bin", "ffmpeg", output="ffmpeg version 7.0")
     monkeypatch.setattr(
-        deps.shutil, "which", lambda name: str(on_path) if name == "ffmpeg" else None
+        deps, "find_on_path", lambda name, _env: on_path if name == "ffmpeg" else None
     )
     location = ExternalTools(env=isolated_env).resolve("ffmpeg")
     assert location.source is ToolSource.PATH
@@ -314,6 +314,65 @@ def test_ollama_preferred_url_that_is_down_falls_back_and_says_so(
     location = tools.resolve_ollama("http://192.0.2.1:9999")
     assert location.valid and location.url == DEFAULT_OLLAMA_URL
     assert any("not responding" in p for p in location.problems)
+
+
+def test_path_search_never_uses_the_current_folder(
+    tmp_path: Path, fake_exe: FakeExe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planted = tmp_path / "downloads"
+    fake_exe(planted, "exiftool", output="planted")
+    monkeypatch.chdir(planted)
+    env = {"PATH": str(tmp_path / "empty-path"), "PATHEXT": ".BAT;.EXE"}
+    assert deps.find_on_path("exiftool", env) is None
+    env["PATH"] = f".;{tmp_path / 'empty-path'};relative\\bin;"
+    assert deps.find_on_path("exiftool", env) is None
+    real = fake_exe(tmp_path / "bin", "exiftool", output="13.0")
+    env["PATH"] = f".;{tmp_path / 'bin'}"
+    assert deps.find_on_path("exiftool", env) == real
+
+
+def test_path_lookup_uses_the_given_environment(
+    tmp_path: Path, fake_exe: FakeExe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on_path = fake_exe(tmp_path / "bin", "ffprobe", output="ffprobe version 7")
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing-here"))
+    env = {"PATH": str(tmp_path / "bin"), "PATHEXT": ".BAT"}
+    location = ExternalTools(env=env).resolve("ffprobe")
+    assert location.source is ToolSource.PATH
+    assert location.path == on_path
+
+
+def test_relative_override_and_env_paths_are_rejected(
+    tmp_path: Path, fake_exe: FakeExe, isolated_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_exe(tmp_path / "cwd", "exiftool", output="planted")
+    monkeypatch.chdir(tmp_path / "cwd")
+    isolated_env["VARIOUS_TOOLS_EXIFTOOL"] = "exiftool.bat"
+    location = ExternalTools({"exiftool": "exiftool.bat"}, env=isolated_env).resolve("exiftool")
+    assert not location.valid
+    assert any("full path" in p for p in location.problems)
+
+
+def test_known_locations_expand_from_the_given_environment(
+    tmp_path: Path, fake_exe: FakeExe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "real-programfiles"))
+    exe = fake_exe(tmp_path / "given" / "ExifTool", "exiftool", output="13.3")
+    env = {"PATH": "", "PATHEXT": ".BAT", "ProgramFiles": str(tmp_path / "given")}
+    location = ExternalTools(env=env).resolve("exiftool")
+    assert location.source is ToolSource.KNOWN_LOCATION
+    assert location.path == exe
+
+
+def test_unset_variables_in_known_locations_are_skipped_not_made_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    candidates = ExternalTools(env={"PATHEXT": ".BAT"})._known_candidates(
+        deps.TOOL_SPECS["exiftool"]
+    )
+    assert all(c.is_absolute() for c in candidates)
+    assert not any("%" in str(c) for c in candidates)
 
 
 def test_ollama_preferred_url_equal_to_default_is_the_plain_result(

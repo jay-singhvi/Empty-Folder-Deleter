@@ -1079,9 +1079,13 @@ def test_video_options_and_timeouts_reach_ffmpeg(
     (folder / "clip.mp4").write_bytes(b"x" * 1000)
     seen: dict[str, Any] = {"probe_timeouts": []}
 
-    def display_size(_ffprobe: Path, _path: Path, *, timeout: float) -> tuple[int, int]:
+    def display_size(_ffprobe: Path, path: Path, *, timeout: float) -> tuple[int, int]:
         seen["probe_timeouts"].append(timeout)
-        return (3840, 2160)
+        return (3840, 2160) if path.name == "clip.mp4" and path.parent == folder else (1920, 1080)
+
+    def probe_duration(_ffprobe: Path, _path: Path, *, timeout: float) -> float:
+        seen["probe_timeouts"].append(timeout)
+        return 30.0
 
     def transcode(_ffmpeg: Path, _src: Path, dst: Path, args: list[str], *, timeout: float) -> None:
         seen["args"], seen["timeout"] = args, timeout
@@ -1089,6 +1093,7 @@ def test_video_options_and_timeouts_reach_ffmpeg(
         dst.write_bytes(b"out")
 
     monkeypatch.setattr(resize_tool.ffmpeg_media, "display_size", display_size)
+    monkeypatch.setattr(resize_tool.ffmpeg_media, "probe_duration", probe_duration)
     monkeypatch.setattr(resize_tool.videos.ffmpeg_media, "transcode", transcode)
     settings = Settings.model_validate(
         {"onedrive_root": tmp_path, "ffprobe_timeout_s": 7, "transcode_timeout_s": 99}
@@ -1111,7 +1116,9 @@ def test_video_options_and_timeouts_reach_ffmpeg(
     assert args[args.index("-crf") + 1] == "31"  # the override beats video_quality "high" (18)
     assert args[args.index("-preset") + 1] == "veryfast"
     assert seen["timeout"] == 99
-    assert seen["probe_timeouts"] == [7, 7]  # once in the scan and once in the apply
+    # The size once in the scan and once in the apply, then the output check: its size and
+    # both lengths.
+    assert seen["probe_timeouts"] == [7, 7, 7, 7, 7]
 
 
 def test_crf_follows_the_quality_preset_unless_overridden() -> None:

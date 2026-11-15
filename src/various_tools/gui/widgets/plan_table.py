@@ -11,6 +11,10 @@ optional ``plan_view`` attribute):
 Toggling a check box sets
 ``PlannedAction.selected`` (a per-tool hook may do more, see ``SELECTION_HOOKS``). The table
 never touches the disk: sizes are computed by the caller in a worker and passed in.
+
+With a text or kind filter active, ticking a group or folder row changes only the rows below it
+that the filter shows, never the hidden ones; the row's tri-state still counts every row below
+it, shown or not. :meth:`PlanTable.set_shown_checked` ("Select all shown") works the same way.
 """
 
 from __future__ import annotations
@@ -155,6 +159,7 @@ class PlanModel(QAbstractItemModel):
         self._editable = True
         self._mode = GROUPED
         self._columns = ["Kind", "Source", "Destination", "Reason", "Size"]
+        self._shown: Callable[[Node], bool] | None = None
 
     # ----- loading ------------------------------------------------------------------
 
@@ -367,17 +372,30 @@ class PlanModel(QAbstractItemModel):
             return Qt.CheckState.Checked
         return Qt.CheckState.PartiallyChecked
 
+    def set_shown_filter(self, shown: Callable[[Node], bool] | None) -> None:
+        """``shown(node)`` says whether the view's filter shows a row; None means all rows.
+
+        Ticking a group or folder row changes only the rows below it that are shown, so a
+        filter never lets a click change rows the person cannot see.
+        """
+        self._shown = shown
+
     def set_node_checked(self, node: Node, checked: bool) -> None:
         """Check or uncheck one row, as a user click does. A group or folder row sets every
-        action below it (and its own action, in the folder tree). Each action goes through the
-        tool's selection hook, the same in both views.
+        action below it that the filter shows (and its own action, in the folder tree). Each
+        action goes through the tool's selection hook, the same in both views.
 
         Does nothing while the table is not editable.
         """
+        shown = self._shown
+        targets = [n for n in _subtree_actions(node) if n is node or shown is None or shown(n)]
+        self.set_actions_checked(targets, checked)
+
+    def set_actions_checked(self, targets: Iterable[Node], checked: bool) -> None:
+        """Check or uncheck these action rows, each through the tool's selection hook."""
         plan = self._plan
         if plan is None or not self._editable:
             return
-        targets = _subtree_actions(node)
         hook = SELECTION_HOOKS.get(self._tool_id)
         for target in targets:
             action = target.action
@@ -554,6 +572,17 @@ class _PlanProxy(QSortFilterProxyModel):
         self._kind = kind
         self.endFilterChange()
 
+    @property
+    def active(self) -> bool:
+        """True while a text or kind filter hides rows (or could)."""
+        return bool(self._text or self._kind)
+
+    def shows(self, node: Node) -> bool:
+        """The row is shown by the current filter (its parents too)."""
+        if not self.active:
+            return True
+        return self.mapFromSource(self._model.index_of(node)).isValid()
+
     def filterAcceptsRow(self, source_row: int, source_parent: AnyIndex) -> bool:
         node = self._model.node_at(self._model.index(source_row, 0, source_parent))
         if node is None:
@@ -587,6 +616,7 @@ class PlanTable(QWidget):
 
     selectionChanged = Signal()
     currentActionChanged = Signal(object)
+    filterChanged = Signal(bool)  # True while a filter hides rows
 
     MAX_AUTO_EXPAND_GROUPS = 400
 
@@ -594,6 +624,7 @@ class PlanTable(QWidget):
         super().__init__(parent)
         self._model = PlanModel(self)
         self._proxy = _PlanProxy(self._model, self)
+        self._model.set_shown_filter(self._proxy.shows)
 
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter by path or reason")
@@ -735,6 +766,31 @@ class PlanTable(QWidget):
         if node is not None:
             self._model.set_node_checked(node, checked)
 
+    def filter_active(self) -> bool:
+        """True while the text or kind filter is set, so some rows may be hidden."""
+        return self._proxy.active
+
+    def shown_action_indices(self) -> list[int]:
+        """The plan positions of the action rows the filter shows (all of them without one)."""
+        return [
+            node.index
+            for node in self._model.all_nodes()
+            if node.action is not None and self._proxy.shows(node)
+        ]
+
+    def set_shown_checked(self, checked: bool) -> int:
+        """Check or uncheck every action row the filter shows, each through the tool's
+        selection hook. Returns how many actions of the plan changed."""
+        plan = self._model.plan
+        if plan is None or not self._model.editable:
+            return 0
+        before = [a.selected for a in plan.actions]
+        nodes = [
+            n for n in (self._model.node_for_action(i) for i in self.shown_action_indices()) if n
+        ]
+        self._model.set_actions_checked(nodes, checked)
+        return sum(1 for was, a in zip(before, plan.actions, strict=True) if was != a.selected)
+
     def editable(self) -> bool:
         return self._model.editable
 
@@ -860,6 +916,7 @@ class PlanTable(QWidget):
             self._proxy.rowCount() <= self.MAX_AUTO_EXPAND_GROUPS
         ):
             self.view.expandAll()
+        self.filterChanged.emit(self._proxy.active)
 
     def _on_checks_changed(self) -> None:
         self.totals_label.setText(self._model.totals_text())

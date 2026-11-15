@@ -66,7 +66,7 @@ uv run various-tools --help   # command line
 
 ### Build the installer yourself
 
-To build the Windows app and the installer yourself, see [packaging/README.md](packaging/README.md). The exact local build commands are in that file.
+With [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed (`winget install JRSoftware.InnoSetup`), `uv run python packaging/build.py --installer` builds the app, the portable zip and `dist\Various-Tools-<version>-setup.exe`. Details are in [packaging/README.md](packaging/README.md).
 
 ## Tools
 
@@ -172,7 +172,7 @@ Every documented use of the original scripts has a command. All of them preview 
 | `python-find_duplicates.py --verify --model M` (Ollama check of borderline pairs) | `various-tools duplicates scan FOLDER... --media images --verify-with-ollama --ollama-model M`; Ollama address: `--ollama-url URL` (before the command) or `config set ollama_url URL`. |
 | `python-find_duplicates.py --explain A B` | `various-tools duplicates explain A B` (the same checks table and a verdict; `--phash-max`, `--dhash-max`, `--aspect-tol`, `--pixel-block-max` to experiment). |
 | `find_duplicate_videos.py` (video duplicates; `--move`) | `various-tools duplicates scan FOLDER... --media videos`, then `apply` for `--move`. Thresholds: `--dur-tol-s`, `--dur-tol-pct`, `--frame-mean-max`, `--frame-worst-max`, `--sample-at 0.1,0.5,0.9`. Needs ffmpeg and ffprobe (`various-tools doctor`). |
-| `python-extract_file_metadata-8.py` (organize by date; `--move`, `--dry-run-move`, `--recursive`, `--workers`, `--errors-only`, `--skip-processed`) | `various-tools organize_by_date scan SOURCE...` for `--dry-run-move`, `apply` for `--move`. `--recursive`, `--workers N`, `--errors-only`, `--skip-processed` keep their names. Destination: `--dest-root`; folder layout: `--folder-template "{year}/{year} - {month:02d}"`; date sources: `--date-priority`. Resizing while organizing: `--also-resize` with `--resize-mode`, `--resize-px`, `--resize-jpeg-quality`. CR3 conversion and removal of the CR3 originals: `media_resize` (`--convert-raw-to-jpeg`, `--remove-raw-originals`). Cloud-only OneDrive files: `--cloud-only skip\|ask\|download` (default `skip`; replaces `--y` and `--N`), with `--download-wait-seconds` and `--keep-pinned`. The Excel master log is the media catalog: `organize_by_date catalog-export PATH` writes it as `.xlsx` or `.csv`, and `organize_by_date catalog-import PATH` imports the old `Photo_Metadata_Master.xlsx` once. |
+| `python-extract_file_metadata-8.py` (organize by date; `--move`, `--dry-run-move`, `--recursive`, `--workers`, `--errors-only`, `--skip-processed`) | `various-tools organize_by_date scan SOURCE...` for `--dry-run-move`, `apply` for `--move`. `--recursive`, `--workers N`, `--errors-only`, `--skip-processed` keep their names. Destination: `--dest-root`; folder layout: `--folder-template "{year}/{year} - {month:02d}"`; date sources: `--date-priority`. Resizing while organizing: `--also-resize` with `--resize-mode`, `--resize-px`, `--resize-jpeg-quality`. CR3 conversion and removal of the CR3 originals: `media_resize` (`--convert-raw-to-jpeg`, `--remove-raw-originals`). Cloud-only OneDrive files: `--cloud-only skip\|ask\|download` (default `skip`; replaces the old script's yes/no download answers), with `--download-wait-seconds` and `--keep-pinned`. The Excel master log is the media catalog: `organize_by_date catalog-export PATH` writes it as `.xlsx` or `.csv`, and `organize_by_date catalog-import PATH` imports the old `Photo_Metadata_Master.xlsx` once. |
 | `rename_snapchat.py` | `various-tools rename scan FOLDER --opt-preset snapchat`, then `apply`. Other built-in presets: `whatsapp`, `screenshot`. Your own pattern: `--match "IMG_*.jpg" --template "Trip-{date:%Y%m%d}-{counter:03}{ext}"`. Name clashes are listed and never overwritten. |
 | `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`, `--copy-to-clipboard`. |
 | `python-v1-Extract_Project_Structure.py` (list project files with filters) | `various-tools project_export scan FOLDER --mode tree --exts .py,.md --exclude-globs .git,.venv`, then `apply` to write the listing. |
@@ -204,7 +204,7 @@ Each tool's page in [docs/tools/](docs/tools/) lists every option.
 
 ### Scheduled runs
 
-`various-tools schedule add|list|remove|run` runs a saved preset through Windows Task Scheduler. A scheduled run is the same as `TOOL apply --preset NAME --yes`, so it is journaled and can be undone. See [docs/scheduled-runs.md](docs/scheduled-runs.md).
+`various-tools schedule add|list|remove|run` runs a saved preset through Windows Task Scheduler. A scheduled run applies the preset without asking, so it is journaled and can be undone, and it refuses presets that delete permanently, change a locked value, or replace or remove originals. See [docs/scheduled-runs.md](docs/scheduled-runs.md).
 
 ### Reports
 

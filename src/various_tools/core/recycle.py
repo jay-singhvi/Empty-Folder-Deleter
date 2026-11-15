@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import stat as stat_module
 import struct
 import sys
 from collections.abc import Callable
@@ -187,6 +189,156 @@ def current_user_bin(original: Path) -> Path | None:
     return folder
 
 
+@dataclass(frozen=True)
+class BinPolicy:
+    """A volume's Recycle Bin settings. ``max_capacity_mb`` is None when it cannot be read."""
+
+    nuke_on_delete: bool
+    max_capacity_mb: int | None
+
+
+_BITBUCKET = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
+_EXPLORER_POLICIES = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+# Without a recorded limit, assume the smallest share of the volume Windows gives the bin.
+_DEFAULT_BIN_SHARE = 0.05
+
+
+def _volume_guid(root: str) -> str | None:
+    """``{guid}`` of the volume mounted at ``root`` (``C:\\``), or None."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    func = kernel32.GetVolumeNameForVolumeMountPointW
+    func.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    func.restype = ctypes.c_int
+    buffer = ctypes.create_unicode_buffer(64)
+    if not func(root, buffer, 64):
+        return None
+    name = str(buffer.value)  # \\?\Volume{guid}\
+    start, end = name.find("{"), name.find("}")
+    return name[start : end + 1] if 0 <= start < end else None
+
+
+def _read_dword(hive: int, key: str, value: str) -> int | None:
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    try:
+        with winreg.OpenKey(hive, key) as handle:
+            data, kind = winreg.QueryValueEx(handle, value)
+    except OSError:
+        return None
+    return int(data) if kind == winreg.REG_DWORD else None
+
+
+def bin_policy(root: str) -> BinPolicy:
+    """The Recycle Bin settings of the volume at ``root``, read from the registry.
+
+    ``NukeOnDelete`` and ``MaxCapacity`` (MB) come from the current user's
+    ``Explorer\\BitBucket\\Volume\\{guid}`` key; the "do not move files to the Recycle Bin"
+    policy (``NoRecycleFiles``, per user or per machine) also counts as delete-immediately.
+    """
+    if sys.platform != "win32":
+        return BinPolicy(nuke_on_delete=True, max_capacity_mb=None)
+    import winreg
+
+    no_recycle = any(
+        _read_dword(hive, _EXPLORER_POLICIES, "NoRecycleFiles") == 1
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE)
+    )
+    guid = _volume_guid(root)
+    nuke = max_mb = None
+    if guid is not None:
+        key = f"{_BITBUCKET}\\{guid}"
+        nuke = _read_dword(winreg.HKEY_CURRENT_USER, key, "NukeOnDelete")
+        max_mb = _read_dword(winreg.HKEY_CURRENT_USER, key, "MaxCapacity")
+    return BinPolicy(nuke_on_delete=no_recycle or nuke == 1, max_capacity_mb=max_mb)
+
+
+def _volume_size(root: str) -> int | None:
+    try:
+        return shutil.disk_usage(root).total
+    except OSError:
+        return None
+
+
+def can_recycle(
+    path: Path,
+    *,
+    drive_type: Callable[[str], int] | None = None,
+    locate_bin: BinLocator | None = None,
+    policy: Callable[[str], BinPolicy] | None = None,
+    volume_size: Callable[[str], int | None] | None = None,
+) -> str | None:
+    """Why sending ``path`` to the Recycle Bin could delete it for good, or None when it is safe.
+
+    send2trash asks Windows to recycle without confirmation and without the "delete
+    permanently?" warning, so where there is no bin Windows deletes silently. Call this first.
+    Safe means all of:
+
+    * the item's real path is on a **fixed local drive** with a drive letter (no network,
+      mapped, removable, optical or RAM drive; a subst or junction is resolved first);
+    * the **current user's bin folder** exists on that drive (:func:`current_user_bin`);
+    * the bin is **not set to delete immediately** (``NukeOnDelete``, or the
+      ``NoRecycleFiles`` policy);
+    * the item's size is **under the bin's size limit** (``MaxCapacity``). A folder counts as
+      0 bytes, because only empty folders are ever recycled. When the limit cannot be read,
+      it is taken as 5% of the volume's size, the smallest default Windows uses; when that
+      cannot be read either, the item is refused.
+
+    The lookups are injectable for tests; they default to the real ones.
+    """
+    drive_kind = drive_type or _drive_type
+    locator = locate_bin or current_user_bin
+    read_policy = policy or bin_policy
+    sizer = volume_size or _volume_size
+    nothing = "so nothing was removed"
+
+    def letter(text: str) -> str | None:
+        drive = os.path.splitdrive(text)[0].upper()
+        return drive if len(drive) == 2 and drive[1] == ":" and drive[0].isalpha() else None
+
+    network = f"this is a network location, which has no Recycle Bin, {nothing}"
+    text = os.path.abspath(fs.strip_long_prefix(str(path)))
+    drive = letter(text)
+    if drive is None:  # checked before touching the disk, so a far server cannot stall this
+        return network
+    st = fs.stat_no_follow(path)
+    if st is None:
+        return f"the item is gone, {nothing}"
+    try:
+        real = fs.real_path(Path(text).parent)
+    except OSError:
+        return f"the item's real place could not be read, {nothing}"
+    real_drive = letter(real)
+    if real_drive is None:
+        return network
+    if real_drive != drive:
+        return f"the item's real place is on drive {real_drive}, not {drive}; {nothing}"
+    root = drive + "\\"
+    if drive_kind(root) != _DRIVE_FIXED:
+        return f"drive {drive} is not a fixed local drive, so it has no Recycle Bin; {nothing}"
+    if locator(Path(root)) is None:
+        return f"no Recycle Bin of this user was found on drive {drive}, {nothing}"
+    settings = read_policy(root)
+    if settings.nuke_on_delete:
+        return f"the Recycle Bin on drive {drive} deletes items immediately, {nothing}"
+    size = 0 if stat_module.S_ISDIR(st.st_mode) else st.st_size
+    if settings.max_capacity_mb is not None:
+        limit = settings.max_capacity_mb * 1024 * 1024
+    else:
+        total = sizer(root)
+        if total is None:
+            return f"the Recycle Bin size limit on drive {drive} could not be checked, {nothing}"
+        limit = int(total * _DEFAULT_BIN_SHARE)
+    if size >= limit:
+        return f"the item is too big for the Recycle Bin on drive {drive}, {nothing}"
+    return None
+
+
 def _entries(folder: Path) -> list[tuple[Path, IndexEntry]]:
     found: list[tuple[Path, IndexEntry]] = []
     try:
@@ -220,13 +372,17 @@ def restore(
     deleted_after: datetime,
     deleted_before: datetime,
     size: int | None = None,
+    mtime_ns: int | None = None,
     locate_bin: BinLocator | None = None,
 ) -> RestoreResult:
     """Move the recycled item that used to be at ``original`` back there, if found exactly.
 
     Only entries deleted within ``[deleted_after, deleted_before]`` (timezone-aware) and, when
-    ``size`` is given, of that size are considered; the newest wins. Never replaces anything.
-    ``locate_bin`` defaults to :func:`current_user_bin`.
+    ``size`` is given, of that size are considered. When ``mtime_ns`` is given, a file's
+    ``$R`` item must also have exactly that modification time (recycling is a rename, so it
+    keeps it); a folder's is not compared, because Windows may touch it while recycling, and
+    only empty folders are recycled. The newest remaining entry wins. Never replaces
+    anything. ``locate_bin`` defaults to :func:`current_user_bin`.
     """
     if os.path.lexists(fs.long_path(original)):
         return RestoreResult(False, "the original location is occupied")
@@ -244,6 +400,16 @@ def restore(
     ]
     if not matches:
         return RestoreResult(False, "no matching item in the Recycle Bin")
+
+    def same_time(index: Path) -> bool:
+        st = fs.stat_no_follow(index.with_name("$R" + index.name[2:]))
+        if st is None or mtime_ns is None or stat_module.S_ISDIR(st.st_mode):
+            return True  # a missing item is reported below; folders are not compared
+        return st.st_mtime_ns == mtime_ns
+
+    matches = [m for m in matches if same_time(m[0])]
+    if not matches:
+        return RestoreResult(False, "the item in the Recycle Bin has a different modified time")
     index, _entry = max(matches, key=lambda m: m[1].deleted)
     item = index.with_name("$R" + index.name[2:])
     st = fs.stat_no_follow(item)

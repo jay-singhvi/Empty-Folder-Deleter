@@ -94,12 +94,12 @@ class FakeBin:
         self.folder.mkdir(parents=True, exist_ok=True)
         content = path.read_bytes()
         key = uuid.uuid4().hex[:6].upper()
-        (self.folder / f"$R{key}{path.suffix}").write_bytes(content)
+        item = self.folder / f"$R{key}{path.suffix}"
         text = str(path) + "\x00"
         when = int(datetime.now(UTC).timestamp() * 10_000_000) + _EPOCH_AS_FILETIME
         header = struct.pack("<qqqi", 2, len(content), when, len(text))
         (self.folder / f"$I{key}{path.suffix}").write_bytes(header + text.encode("utf-16-le"))
-        path.unlink()
+        path.replace(item)  # a move keeps the modified time, as the real bin does
         self.trashed.append(path)
 
     def locate(self, _path: Path) -> Path | None:

@@ -446,6 +446,7 @@ class _Undo:
             deleted_after=when - RECYCLE_SLACK,
             deleted_before=min(when + RECYCLE_SLACK, self.started),
             size=action.item_size,
+            mtime_ns=action.item_mtime_ns,
             locate_bin=self.locate_bin,
         )
         return None if result.restored else result.detail
@@ -501,7 +502,7 @@ class _Undo:
         if not unchanged:
             self.skipped.append(f"{label} (the output changed after the run; {manual})")
             return
-        refusal = self.refusal(dst)
+        refusal = self.refusal(dst) or recycle.can_recycle(dst)
         if refusal is not None:
             self.skipped.append(f"{label} ({refusal}; {manual})")
             return
@@ -573,6 +574,10 @@ class _Undo:
 
 
 def _default_trash(path: Path) -> None:
+    """Recycle ``path``, only where the Recycle Bin really keeps it (see recycle.can_recycle)."""
+    refusal = recycle.can_recycle(path)
+    if refusal is not None:
+        raise OSError(refusal)
     send2trash(str(path))
 
 

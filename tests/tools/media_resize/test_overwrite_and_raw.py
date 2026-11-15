@@ -46,12 +46,12 @@ class FakeBin:
         self.folder.mkdir(parents=True, exist_ok=True)
         content = path.read_bytes()
         key = uuid.uuid4().hex[:6].upper()
-        (self.folder / f"$R{key}{path.suffix}").write_bytes(content)
+        item = self.folder / f"$R{key}{path.suffix}"
         text = str(path) + "\x00"
         when = int(datetime.now(UTC).timestamp() * 10_000_000) + _EPOCH_AS_FILETIME
         header = struct.pack("<qqqi", 2, len(content), when, len(text))
         (self.folder / f"$I{key}{path.suffix}").write_bytes(header + text.encode("utf-16-le"))
-        path.unlink()
+        path.replace(item)  # a move keeps the modified time, as the real bin does
         self.trashed.append(path)
 
     def locate(self, _path: Path) -> Path | None:
@@ -267,6 +267,7 @@ def test_overwrite_video_replaces_the_original_through_the_bin(
             handle.write(b"small")
 
     monkeypatch.setattr(resize_tool.ffmpeg_media, "display_size", display_size)
+    monkeypatch.setattr(resize_tool.ffmpeg_media, "probe_duration", lambda *_a, **_k: 12.0)
     monkeypatch.setattr(resize_tool.videos.ffmpeg_media, "transcode", transcode)
     ctx = _ctx(tmp_path, journal, _VideoDeps(ollama_probe=lambda _u: None))
     plan = TOOL.scan(_overwrite(folder, media="videos"), ctx)
@@ -275,6 +276,79 @@ def test_overwrite_video_replaces_the_original_through_the_bin(
     assert clip.read_bytes() == b"small"
     assert fake_bin.trashed == [clip]
     assert _leftovers(folder) == ["clip.mp4"]
+
+
+def _truncating_encoder(
+    monkeypatch: pytest.MonkeyPatch, clip: Path, *, source_s: float, output_s: float
+) -> None:
+    """ffprobe sees the right size on the output but a shorter length (a truncated encode)."""
+
+    def display_size(_ffprobe: Path, path: Path, *, timeout: float) -> tuple[int, int]:
+        return (3840, 2160) if path == clip else (1920, 1080)
+
+    def probe_duration(_ffprobe: Path, path: Path, *, timeout: float) -> float:
+        return source_s if path == clip else output_s
+
+    def transcode(_ffmpeg: Path, _src: Path, dst: Path, _args: list[str], **_kw: Any) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with open(dst, "xb") as handle:
+            handle.write(b"truncated")
+
+    monkeypatch.setattr(resize_tool.ffmpeg_media, "display_size", display_size)
+    monkeypatch.setattr(resize_tool.ffmpeg_media, "probe_duration", probe_duration)
+    monkeypatch.setattr(resize_tool.videos.ffmpeg_media, "transcode", transcode)
+
+
+def test_overwrite_video_keeps_the_original_when_the_encode_is_truncated(
+    tmp_path: Path, journal: Journal, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    clip = folder / "clip.mp4"
+    clip.write_bytes(b"original" * 100)
+    _truncating_encoder(monkeypatch, clip, source_s=60.0, output_s=4.0)
+    ctx = _ctx(tmp_path, journal, _VideoDeps(ollama_probe=lambda _u: None))
+    plan = TOOL.scan(_overwrite(folder, media="videos"), ctx)
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 0 and result.count("failed") == 1
+    assert "s long" in (result.outcomes[0].detail or "")
+    assert fake_bin.trashed == []
+    assert clip.read_bytes() == b"original" * 100
+    assert _leftovers(folder) == ["clip.mp4"]  # the bad encode was removed
+
+
+def test_overwrite_video_within_the_shared_duration_tolerance_is_kept(
+    tmp_path: Path, journal: Journal, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.tools.media_convert import MediaConvertOptions
+
+    tolerance = MediaConvertOptions.model_fields["duration_tolerance_s"].default
+    assert tolerance == resize_tool.VIDEO_DURATION_TOLERANCE_S  # one source, not a new number
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    clip = folder / "clip.mp4"
+    clip.write_bytes(b"original")
+    _truncating_encoder(monkeypatch, clip, source_s=60.0, output_s=60.0 - tolerance / 2)
+    ctx = _ctx(tmp_path, journal, _VideoDeps(ollama_probe=lambda _u: None))
+    result = TOOL.apply(TOOL.scan(_overwrite(folder, media="videos"), ctx), ctx)
+    assert result.count("done") == 1, result.outcomes
+    assert fake_bin.trashed == [clip]
+
+
+def test_a_truncated_video_in_a_new_folder_is_not_kept(
+    tmp_path: Path, journal: Journal, fake_bin: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    clip = folder / "clip.mp4"
+    clip.write_bytes(b"original")
+    _truncating_encoder(monkeypatch, clip, source_s=60.0, output_s=4.0)
+    ctx = _ctx(tmp_path, journal, _VideoDeps(ollama_probe=lambda _u: None))
+    plan = TOOL.scan(MediaResizeOptions(roots=[folder], media="videos"), ctx)
+    result = TOOL.apply(plan, ctx)
+    assert result.count("failed") == 1
+    assert clip.read_bytes() == b"original" and fake_bin.trashed == []
+    assert not any((folder / "resized").glob("*.mp4"))
 
 
 # ----- RAW originals ----------------------------------------------------------------------------

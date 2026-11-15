@@ -25,6 +25,7 @@ from various_tools.cli.state import (
 from various_tools.core.context import make_deps
 from various_tools.core.deps import TOOL_SPECS, ToolLocation
 from various_tools.core.journal import UNDOABLE_KINDS, Journal, undo_run
+from various_tools.gui.undo_rules import in_progress_message, run_in_progress, stale_after
 from various_tools.tools.base import Tool
 
 
@@ -105,7 +106,18 @@ def undo(
         run = journal.run(run_id)
         if run is None:
             fail(f"No run with id {run_id}. List runs with: various-tools history")
-        done = [a for a in journal.actions(run_id) if a.status == "done"]
+        actions = journal.actions(run_id)
+        limit = stale_after(state.settings().transcode_timeout_s)
+        times = [t for t in (run.started, *(a.ts for a in actions)) if t]
+        last_write = max(times) if times else None
+        if run_in_progress(run.status, run.finished, last_write, limit=limit):
+            fail(in_progress_message(run_id, limit))
+        if not run.finished or run.status == "running":
+            note(
+                f"Run {run_id} never finished, and nothing was written to its journal for "
+                f"{limit.total_seconds() / 3600:g} hours, so it is treated as stopped."
+            )
+        done = [a for a in actions if a.status == "done"]
         reversible = [a for a in done if a.kind in UNDOABLE_KINDS]
         console = out()
         console.print(

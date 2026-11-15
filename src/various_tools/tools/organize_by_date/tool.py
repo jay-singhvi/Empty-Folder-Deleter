@@ -303,7 +303,12 @@ class OrganizeByDateOptions(ToolOptions):
             "by its date. download: the same rows, already ticked, so Apply downloads every one "
             "of them, which uses disk space and network. Nothing is downloaded during the scan."
         ),
-        json_schema_extra={"group": "Cloud-only files", "advanced": True, "locked": True},
+        json_schema_extra={
+            "group": "Cloud-only files",
+            "advanced": True,
+            "locked": True,
+            "replaces_originals": True,  # downloads files; never unattended
+        },
     )
     download_wait_seconds: int = Field(
         default=DOWNLOAD_WAIT_SECONDS,
@@ -344,7 +349,7 @@ class OrganizeByDateOptions(ToolOptions):
             "the original goes to the Recycle Bin, and undo restores it. Pictures are never "
             "enlarged. Videos, RAW, HEIC and downloaded files are only moved. Default: off."
         ),
-        json_schema_extra={"group": "Resize", "advanced": True},
+        json_schema_extra={"group": "Resize", "advanced": True, "replaces_originals": True},
     )
     resize_mode: ResizeSide = Field(
         default="shorter_side",

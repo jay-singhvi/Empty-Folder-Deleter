@@ -33,7 +33,14 @@ one.
 ## Build the installer
 
 Needs [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`).
-Build the app first, then:
+One command builds the app, the portable zip and the installer, with the version from
+`pyproject.toml`:
+
+```
+uv run python packaging/build.py --installer
+```
+
+Or, with the app already built, compile the script yourself:
 
 ```
 iscc /DAppVersion=<version from pyproject.toml> packaging\installer.iss

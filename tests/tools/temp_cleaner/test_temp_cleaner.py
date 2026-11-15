@@ -1001,3 +1001,94 @@ def test_the_temp_folders_themselves_stay_allowed(tmp_path: Path) -> None:
     )
     assert plan.roots == [temp, tmp]
     assert sorted(a.src.name for a in plan.actions if a.src) == ["a.tmp", "b.tmp", "c.tmp"]
+
+
+# --- Apply re-checks every plan root (a saved or edited plan) -----------------------------------
+
+
+def _plan_for(root: Path, tmp_path: Path, ctx: RunContext) -> Plan:
+    """A plan scanned for ``root`` with an empty environment (so nothing is refused yet)."""
+    return TempCleaner(environ={}).scan(_opts(root), ctx)
+
+
+@pytest.mark.parametrize("variable", ["LOCALAPPDATA", "APPDATA", "PROGRAMDATA"])
+def test_apply_refuses_a_plan_whose_root_is_an_app_data_folder(
+    tmp_path: Path, journal: Journal, sent_to_trash: list[str], variable: str
+) -> None:
+    folder = tmp_path / variable.lower()
+    settings_db = _write(folder / "SomeApp" / "settings.db", age_days=30)
+    ctx = _ctx(tmp_path, journal)
+    plan = Plan.from_json(_plan_for(folder, tmp_path, ctx).to_json())  # saved, then loaded
+    assert plan.selected_actions(), "the edited plan must have something to refuse"
+    tool = TempCleaner(environ={variable: str(folder)})
+    result = tool.apply(plan, ctx)
+    assert sent_to_trash == [] and settings_db.exists()
+    assert result.count("done") == 0
+    assert result.count("skipped") == len(plan.selected_actions())
+    assert all(f"%{variable}%" in (o.detail or "") for o in result.outcomes)
+    rows = journal.actions(result.run_id)
+    assert rows and all(r.status == "skipped" for r in rows)
+
+
+def test_apply_refuses_a_plan_root_that_holds_the_temp_folder(
+    tmp_path: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    profile_appdata = tmp_path / "AppData"
+    temp = profile_appdata / "Local" / "Temp"
+    _write(temp / "old.tmp")
+    data = _write(profile_appdata / "Roaming" / "App" / "data.db")
+    ctx = _ctx(tmp_path, journal)
+    plan = _plan_for(profile_appdata, tmp_path, ctx)
+    result = TempCleaner(environ={"TEMP": str(temp)}).apply(plan, ctx)
+    assert sent_to_trash == [] and data.exists()
+    assert result.count("done") == 0
+    assert all("holds the temp folder" in (o.detail or "") for o in result.outcomes)
+
+
+def test_apply_refuses_a_plan_root_inside_a_browser_cache(
+    tmp_path: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    local = tmp_path / "local"
+    caches = _browsers(local)
+    ctx = _ctx(tmp_path, journal)
+    plan = _plan_for(caches["chrome"], tmp_path, ctx)
+    assert plan.selected_actions()
+    result = TempCleaner(environ={"LOCALAPPDATA": str(local)}).apply(plan, ctx)
+    assert sent_to_trash == [] and (caches["chrome"] / "data_0").exists()
+    assert result.count("done") == 0
+    assert all("browser cache" in (o.detail or "").casefold() for o in result.outcomes)
+
+
+def test_apply_refuses_rows_inside_a_browser_cache_under_an_allowed_root(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    local = tmp_path / "local"
+    caches = _browsers(local)
+    user_data = local / "Google" / "Chrome" / "User Data"  # holds caches, is not one
+    ordinary = _write(user_data / "old.tmp")
+    ctx = _ctx(tmp_path, journal)
+    plan = _plan_for(user_data, tmp_path, ctx)  # an empty environment: the caches are planned
+    assert any(a.src is not None and is_under(a.src, caches["chrome"]) for a in plan.actions)
+    result = TempCleaner(environ={"LOCALAPPDATA": str(local)}).apply(plan, ctx)
+    assert sent_to_trash == [str(ordinary)]
+    assert (caches["chrome"] / "data_0").exists() and (caches["chrome2"] / "data_0").exists()
+    assert any("browser cache" in (o.detail or "") for o in result.outcomes)
+
+
+def is_under(path: Path, folder: Path) -> bool:
+    try:
+        path.relative_to(folder)
+    except ValueError:
+        return False
+    return True
+
+
+def test_apply_still_cleans_an_allowed_root(
+    tmp_path: Path, root: Path, journal: Journal, sent_to_trash: list[str]
+) -> None:
+    _write(root / "a.tmp")
+    ctx = _ctx(tmp_path, journal)
+    plan = _plan_for(root, tmp_path, ctx)
+    other = tmp_path / "elsewhere"
+    result = TempCleaner(environ={"LOCALAPPDATA": str(other)}).apply(plan, ctx)
+    assert result.count("done") == 1 and not (root / "a.tmp").exists()

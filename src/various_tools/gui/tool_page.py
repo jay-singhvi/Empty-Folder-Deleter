@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -62,13 +63,19 @@ from various_tools.cli.clipboard import (
     wants_clipboard,
     written_file,
 )
+from various_tools.cli.toolcmds import download_actions, is_download
 from various_tools.core import onedrive
 from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
 from various_tools.gui.state import AppState
-from various_tools.gui.undo_rules import UndoInfo, read_undo_info
+from various_tools.gui.undo_rules import (
+    UndoInfo,
+    in_progress_message,
+    read_undo_info,
+    stale_after,
+)
 from various_tools.gui.widgets.plan_table import FOLDER_TREE, PlanTable
 from various_tools.gui.widgets.schema_form import SchemaForm
 from various_tools.gui.widgets.size_map import SizeMapView, actions_under
@@ -105,9 +112,17 @@ def missing_programs(notes: list[str]) -> list[str]:
 def apply_summary(plan: Plan, permanent_delete: bool) -> str:
     """The confirmation text shown before Apply."""
     selected = plan.selected_actions()
-    counts = Counter(str(a.kind) for a in selected)
+    downloads = download_actions(plan)
+    counts = Counter(str(a.kind) for a in selected if not is_download(a))
     lines = [f"Apply {len(selected)} selected action(s)?", ""]
     lines += [f"  {kind}: {count}" for kind, count in sorted(counts.items())]
+    if downloads:
+        lines.append(f"  download from OneDrive: {len(downloads)}")
+        lines += [
+            "",
+            f"This will download {len(downloads)} cloud-only file(s) from OneDrive to this "
+            "device as part of this apply. That uses disk space and network.",
+        ]
     lines.append("")
     if counts.get(str(ActionKind.TRASH)):
         lines.append("Trashed items go to the Recycle Bin, where you can restore them.")
@@ -388,6 +403,7 @@ class ToolPage(QWidget):
         self.form.changed.connect(self._form_changed)
         self.table.selectionChanged.connect(self._update_buttons)
         self.table.currentActionChanged.connect(lambda _a: self._update_buttons())
+        self.table.filterChanged.connect(self._label_select_buttons)
 
         self.reload_presets()
         self._update_buttons()
@@ -557,13 +573,41 @@ class ToolPage(QWidget):
         self.scan(quiet=True)
 
     def select_all(self, selected: bool = True) -> int:
-        """Check (or uncheck) every action of the plan. Returns how many changed."""
+        """Check (or uncheck) every action of the plan. Returns how many changed.
+
+        While a filter is active only the rows it shows change ("Select all shown"), so a
+        filtered view never ticks rows the person cannot see.
+        """
         if self.plan is None or self._applied or self.busy or self._apply_pending:
             return 0
-        changed = self.plan.select_all(selected)
+        if self.table.filter_active():
+            changed = self.table.set_shown_checked(selected)
+        else:
+            changed = self.plan.select_all(selected)
         self.table.refresh()
         self._update_buttons()
         return changed
+
+    def _label_select_buttons(self, filtered: bool) -> None:
+        """Say on the buttons whether they act on every row or only on the shown ones."""
+        if filtered:
+            self.select_all_button.setText("Select all shown")
+            self.select_all_button.setToolTip(
+                "Check every action the filter shows, including ones the tool left unchecked. "
+                "Hidden rows are not changed. Apply still asks first."
+            )
+            self.select_none_button.setText("Select none shown")
+            self.select_none_button.setToolTip(
+                "Uncheck every action the filter shows. Hidden rows are not changed."
+            )
+        else:
+            self.select_all_button.setText("Select all")
+            self.select_all_button.setToolTip(
+                "Check every action, including ones the tool left unchecked. Apply still asks "
+                "first."
+            )
+            self.select_none_button.setText("Select none")
+            self.select_none_button.setToolTip("Uncheck every action.")
 
     # ----- apply ------------------------------------------------------------------------------
 
@@ -695,11 +739,16 @@ class ToolPage(QWidget):
             return None
         journal_path = self.state.settings.journal_path()
         protection = self.state.settings.protected_paths()
+        limit = stale_after(self.state.settings.transcode_timeout_s)
 
         def job(_worker: Worker) -> tuple[UndoReport, UndoInfo]:
+            # Checked again here, off the UI thread: never undo a run that is still applying.
+            before = read_undo_info(journal_path, run_id, limit=limit)
+            if before.in_progress:
+                raise ValueError(in_progress_message(run_id, limit))
             with Journal(journal_path) as journal:
                 report = undo_run(journal, run_id, protection=protection)
-            return report, read_undo_info(journal_path, run_id)
+            return report, read_undo_info(journal_path, run_id, limit=limit)
 
         worker = Worker(job, writes=True)
         worker.succeeded.connect(self._undo_done)
@@ -722,7 +771,8 @@ class ToolPage(QWidget):
         if run_id != self.last_run_id or self._closing:
             return None
         journal_path = self.state.settings.journal_path()
-        worker = Worker(lambda _worker: read_undo_info(journal_path, run_id))
+        limit = stale_after(self.state.settings.transcode_timeout_s)
+        worker = Worker(lambda _worker: read_undo_info(journal_path, run_id, limit=limit))
         worker.succeeded.connect(self._undo_info_read)
         worker.start()
         return worker
@@ -957,13 +1007,27 @@ class ToolPage(QWidget):
             return None
         if self._closing:
             return None
-        paths = list(plan.cloud_only)
+        # Files only: downloading a folder would pin and download everything inside it, far
+        # more than the count the question shows. Reading the attributes downloads nothing.
+        paths = [p for p in plan.cloud_only if not os.path.isdir(p)]
+        folders = len(plan.cloud_only) - len(paths)
+        skipped = (
+            f"\n\n{folders} folder(s) in the list are not downloaded: download files only."
+            if folders
+            else ""
+        )
         count = len(paths)
+        if not count:
+            self._set_status(
+                f"Nothing was downloaded: the list holds only {folders} folder(s), and only "
+                "files are downloaded."
+            )
+            return None
         if not self.confirm(
             "Download cloud-only files",
             f"Download {count} cloud-only file(s) from OneDrive to this device?\n\n"
             "They take space on this disk afterwards. Nothing else is changed, and you can "
-            "cancel at any time.",
+            f"cancel at any time.{skipped}",
         ):
             self._set_status("Nothing was downloaded.")
             return None

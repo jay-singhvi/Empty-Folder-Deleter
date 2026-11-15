@@ -85,6 +85,10 @@ SUFFIX_TAG = "_resized"
 ESTIMATE_NOTE = "(estimate)"
 REPLACE_NOTE = "replaces the original, which goes to the Recycle Bin"
 RAW_REMOVED_REASON = "RAW original removed after its JPEG was checked and its metadata copied"
+# How far (in seconds) a rewritten video's length may differ from the original's before it is
+# rejected. The one source of the default for media_convert and metadata_strip too, and the
+# value an in-place resize checks before the original goes to the Recycle Bin.
+VIDEO_DURATION_TOLERANCE_S = 0.5
 MEDIA_OPTIONS = ("images", "videos", "both")
 MODE_LABELS: dict[str, str] = {
     "fit_box": "fit inside the box",
@@ -341,7 +345,7 @@ class MediaResizeOptions(ToolOptions):
             "with its resized version: the original goes to the Recycle Bin, and it needs "
             "'Allow replacing the originals' (advanced). Default: new folder, originals kept."
         ),
-        json_schema_extra=_hint("Output"),
+        json_schema_extra=_hint("Output", replaces_originals=True),
     )
     allow_overwrite: bool = Field(
         default=False,
@@ -393,7 +397,12 @@ class MediaResizeOptions(ToolOptions):
             "If the metadata copy fails, ExifTool is missing or 'Keep metadata' is off, the RAW "
             "is kept and the plan says why. Default: off, RAW originals are kept."
         ),
-        json_schema_extra=_hint("Output", advanced=True, depends_on="convert_raw_to_jpeg=true"),
+        json_schema_extra=_hint(
+            "Output",
+            advanced=True,
+            depends_on="convert_raw_to_jpeg=true",
+            replaces_originals=True,
+        ),
     )
 
     @field_validator("image_extensions")
@@ -824,6 +833,7 @@ class _Converter:
         if isinstance(target, str):
             raise ValueError(target)
         out = dst
+        written = False
         if in_place:
             # A name of our own that does not exist yet; the encode never replaces anything.
             out = src.with_name(f".{src.stem}.resize-{uuid.uuid4().hex[:12]}{src.suffix}")
@@ -838,23 +848,45 @@ class _Converter:
                 preset=self.opts.video_preset,
                 timeout=self.ctx.settings.transcode_timeout_s,
             )
+            written = True
             stat = os.stat(src)
             os.utime(out, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            # Checked in every output mode, and always before an original goes to the bin.
+            self._verify_video(ffprobe, src, out, target, timeout)
             if not in_place:
                 return dst
-            if ffmpeg_media.display_size(ffprobe, out, timeout=timeout) != (
-                target.width,
-                target.height,
-            ):
-                raise MediaError("the resized video has the wrong size; it was not kept")
             images.swap_into_place(out, src)
         except images.KeptCopyError:
             raise  # the original is in the Recycle Bin; the resized copy must stay
         except BaseException:
-            if in_place and os.path.lexists(long_path(out)):
+            # After a finished encode ``out`` is this run's own new file (the encode never
+            # replaces anything), so a copy that failed its check is removed. The in-place
+            # temporary name is unique, so it is removed whatever failed.
+            if (written or in_place) and os.path.lexists(long_path(out)):
                 os.remove(long_path(out))
             raise
         return src
+
+    @staticmethod
+    def _verify_video(ffprobe: Path, src: Path, out: Path, target: Target, timeout: float) -> None:
+        """Raise ``MediaError`` unless ``out`` has the target size and the source's length.
+
+        The length must match within :data:`VIDEO_DURATION_TOLERANCE_S`, the tolerance that
+        media_convert and metadata_strip use before they recycle an original, so a truncated
+        encode never replaces one.
+        """
+        if ffmpeg_media.display_size(ffprobe, out, timeout=timeout) != (
+            target.width,
+            target.height,
+        ):
+            raise MediaError("the resized video has the wrong size; it was not kept")
+        before = ffmpeg_media.probe_duration(ffprobe, src, timeout=timeout)
+        after = ffmpeg_media.probe_duration(ffprobe, out, timeout=timeout)
+        if abs(before - after) > VIDEO_DURATION_TOLERANCE_S:
+            raise MediaError(
+                f"the resized video is {after:.2f} s long, the original {before:.2f} s (more than "
+                f"{VIDEO_DURATION_TOLERANCE_S:g} s apart); it was not kept"
+            )
 
 
 class MediaResize:

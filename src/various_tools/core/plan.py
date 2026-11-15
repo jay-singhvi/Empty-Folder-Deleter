@@ -47,7 +47,7 @@ from typing import Any
 
 from send2trash import send2trash
 
-from various_tools.core import fs
+from various_tools.core import fs, recycle
 from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import (
     destination_refusal,
@@ -270,6 +270,16 @@ def _guard(
         if refusal is not None:
             return refusal
 
+    if (
+        kind is ActionKind.TRASH
+        and action.src is not None
+        and os.path.lexists(long_path(action.src))
+    ):
+        # Rule 2: never where Windows would delete it for good instead (no bin, too big...).
+        refusal = _recycle_refusal(action.src)
+        if refusal is not None:
+            return refusal
+
     if kind in (ActionKind.MOVE, ActionKind.RENAME):
         if action.dst is None:
             return "no destination path"
@@ -333,8 +343,32 @@ def _file_stat(path: Path | None) -> tuple[int, int] | None:
     return st.st_size, st.st_mtime_ns
 
 
+class NotRecyclable(OSError):
+    """Raised before anything is removed when the Recycle Bin would delete the item for good."""
+
+
+class _RecycledDespiteError(Exception):
+    """send2trash raised, but the item is gone: it was recycled. Carries the error text."""
+
+
+def _recycle_refusal(path: Path) -> str | None:
+    """Why ``path`` must not be sent to the Recycle Bin (see ``recycle.can_recycle``)."""
+    return recycle.can_recycle(path)
+
+
 def _send_to_trash(path: Path) -> None:
-    send2trash(str(path))
+    """Recycle ``path``, only where Windows really keeps it (rule 2). send2trash recycles with
+    no confirmation and no "delete permanently?" warning, so without this check a drive with
+    no Recycle Bin would delete the item for good, silently."""
+    refusal = _recycle_refusal(path)
+    if refusal is not None:
+        raise NotRecyclable(refusal)
+    try:
+        send2trash(str(path))
+    except Exception as exc:
+        if os.path.lexists(long_path(path)):
+            raise
+        raise _RecycledDespiteError(str(exc) or type(exc).__name__) from exc
 
 
 def _execute(
@@ -383,11 +417,13 @@ def extra_action(
         with extra_action(ActionKind.TRASH, original, reason="replaced by the output"):
             ...  # do it
 
-    The guard rules run first; a refusal is journaled as skipped and raises
-    :class:`ActionRefused`. Otherwise the row is written as pending, then marked done when the
-    block finishes, or failed (and the error re-raised) when it raises. For a ``trash`` row the
-    size and ``mtime_ns`` of ``src`` are recorded first. Raises :class:`RuntimeError` outside
-    :func:`apply_plan`.
+    The guard rules run first (for a ``trash``, that includes the check that the drive's
+    Recycle Bin would really keep the item); a refusal is journaled as skipped and raises
+    :class:`ActionRefused`, before anything is removed. Otherwise the row is written as
+    pending, then marked done when the block finishes, or failed (and the error re-raised) when
+    it raises. A recycle that raised although the item is gone did happen: it is marked done,
+    with the error kept, and nothing is raised. For a ``trash`` row the size and ``mtime_ns``
+    of ``src`` are recorded first. Raises :class:`RuntimeError` outside :func:`apply_plan`.
     """
     running = _RUNNING.get()
     if running is None:
@@ -407,6 +443,10 @@ def extra_action(
             journal.set_item_stat(row, *before)
     try:
         yield
+    except _RecycledDespiteError as exc:
+        journal.set_action(row, "done", error=f"recycled, but the Recycle Bin reported: {exc}")
+        running.ctx.log.warning("%s was recycled, but the Recycle Bin reported: %s", src, exc)
+        return
     except BaseException as exc:
         journal.set_action(row, "failed", error=str(exc) or type(exc).__name__)
         raise
@@ -498,6 +538,13 @@ def apply_plan(
             token = _RUNNING.set(_Running(plan, ctx, journal, run_id, seq, refused_roots))
             try:
                 produced = _execute(action, final_dst, handler_map)
+            except _RecycledDespiteError as exc:  # it did go to the Recycle Bin: done
+                detail = f"recycled, but the Recycle Bin reported: {exc}"
+                journal.set_action(action_id, "done", error=detail)
+                result.outcomes.append(
+                    ActionOutcome(seq, str(action.kind), "done", src, None, detail)
+                )
+                continue
             except Exception as exc:  # one failed action must not stop the rest
                 journal.set_action(action_id, "failed", error=str(exc) or type(exc).__name__)
                 result.outcomes.append(

@@ -58,8 +58,11 @@ class FakeBin:
     def trash(self, path: Path | str) -> None:
         path = Path(path)
         content = None if path.is_dir() else path.read_bytes()
+        before = os.lstat(path)
         key = uuid.uuid4().hex[:6].upper()
-        self.writer(self.folder, key, path, datetime.now(UTC), content)
+        item = self.writer(self.folder, key, path, datetime.now(UTC), content)
+        # Windows recycles by renaming, so the item keeps its times; so does this fake.
+        os.utime(item, ns=(before.st_atime_ns, before.st_mtime_ns))
         if content is None:
             path.rmdir()
         else:

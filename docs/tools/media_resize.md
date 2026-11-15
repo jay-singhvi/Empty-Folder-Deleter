@@ -20,11 +20,15 @@ It replaces `app.py` (the resolution reducer) and the resize and CR3 conversion 
   (`resized` by default, inside each folder you chose), or next to the original with a suffix
   (`_resized` by default).
 - **Replacing originals is an explicit, advanced choice** (output `overwrite`, plus *Allow
-  replacing the originals*). The new file is written next to the original and checked first (it
-  opens, in the expected format and size), the original goes to the **Recycle Bin** as its own
+  replacing the originals*). The new file is written next to the original and checked first (a
+  picture opens, in the expected format and size; a video has the expected size and the same
+  length as the original within 0.5 s, the tolerance media_convert and metadata_strip use, so a
+  truncated encode never replaces it), the original goes to the **Recycle Bin** as its own
   journaled row, then the new file takes its name and modified time. If a step fails, the original
   is still in place, or it is in the Recycle Bin and the error says where the new copy is. Undo
-  restores the original from the Recycle Bin.
+  restores the original from the Recycle Bin. A video in the other outputs gets the same check,
+  and a copy that fails it is removed again. A preset that replaces originals (or removes RAW
+  originals) cannot be scheduled.
 - **An existing file is never overwritten** by a new output. If the output name is taken, the file
   is listed and left alone.
 - **Cloud-only OneDrive files are never read.** They are reported as skipped and listed in the

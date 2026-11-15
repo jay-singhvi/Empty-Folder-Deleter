@@ -1,8 +1,9 @@
 """Scheduled runs: run a saved preset on a schedule through Windows Task Scheduler.
 
-A scheduled task runs ``various-tools <tool> apply --preset <P> --yes``, so every run goes through
-the same preview-free apply path as the command line and is journaled (and can be undone from
-History) like any other apply.
+A scheduled task runs ``various-tools <tool> apply --preset <P> --scheduled`` (``schedule add``
+puts the hidden ``--scheduled`` marker where :func:`build_task_argv` has ``--yes``), so every run
+goes through the same preview-free apply path as the command line, with the run-time checks of a
+scheduled run, and is journaled (and can be undone from History) like any other apply.
 
 Everything here is plain logic plus one injected process runner: the functions build the
 ``schtasks`` command lines and parse its output, and a :class:`TaskScheduler` runs them. Tests
@@ -218,11 +219,15 @@ def command_line(argv: Sequence[str]) -> str:
 
 
 def parse_task_command(text: str) -> tuple[str, str] | None:
-    """``(tool id, preset)`` from a command made by :func:`build_task_argv`, else ``None``."""
+    """``(tool id, preset)`` from a command made by :func:`build_task_argv`, else ``None``.
+
+    The last word is ``--yes``, or ``--scheduled``, which ``schedule add`` puts in its place
+    (it answers the confirmation too and adds the run-time checks of a scheduled run).
+    """
     tokens = [quoted or bare for quoted, bare in _TOKEN_RE.findall(text)]
     try:
         at = tokens.index("apply")
-        if tokens[tokens.index("--preset", at) + 2] != "--yes" or at == 0:
+        if tokens[tokens.index("--preset", at) + 2] not in ("--yes", "--scheduled") or at == 0:
             return None
         return tokens[at - 1], tokens[tokens.index("--preset", at) + 1]
     except ValueError, IndexError:

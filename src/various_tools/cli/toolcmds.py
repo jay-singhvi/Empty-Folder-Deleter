@@ -50,7 +50,7 @@ from various_tools.cli.state import (
     out,
     usage_error,
 )
-from various_tools.core.plan import ActionKind, Plan, RunResult
+from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult
 from various_tools.core.schema import FieldSpec, describe, format_value, parse_value
 from various_tools.tools.base import Tool, ToolOptions
 
@@ -69,6 +69,7 @@ RESERVED_FLAGS = frozenset(
         "export-format",
         "force",
         "allow-locked",
+        "scheduled",
         "config",
         "exiftool",
         "ffmpeg",
@@ -80,7 +81,24 @@ RESERVED_FLAGS = frozenset(
 # Kinds that change files inside the plan's roots. A plan with any of them must name its roots.
 ROOTED_KINDS = frozenset({ActionKind.MOVE, ActionKind.RENAME, ActionKind.TRASH, ActionKind.DELETE})
 FOLDER_WIDGETS = ("folders", "folder")
+# The hidden flag 'schedule add' puts on every task's command line (see ``schedule_cmd``).
+SCHEDULED_FLAG = "--scheduled"
 _P = inspect.Parameter
+
+
+def is_download(action: PlannedAction) -> bool:
+    """A row whose tick is the consent to download a cloud-only file (AGENTS.md rule 3).
+
+    Structural, not by wording: a ``convert`` with a source and no destination. That is how a
+    tool offers a cloud-only file for download at apply (organize_by_date's ``ask`` and
+    ``download`` choices); every other convert names the file it writes.
+    """
+    return action.kind is ActionKind.CONVERT and action.src is not None and action.dst is None
+
+
+def download_actions(plan: Plan) -> list[PlannedAction]:
+    """The selected actions that download a cloud-only file from OneDrive when applied."""
+    return [a for a in plan.selected_actions() if is_download(a)]
 
 
 @dataclass(frozen=True)
@@ -318,6 +336,59 @@ def locked_changes(
 
 def option_values(opts: ToolOptions, specs: list[FieldSpec]) -> dict[str, Any]:
     return {spec.name: getattr(opts, spec.name) for spec in specs if hasattr(opts, spec.name)}
+
+
+def originals_changes(
+    specs: list[FieldSpec], values: Mapping[str, Any]
+) -> list[tuple[FieldSpec, Any]]:
+    """The ``replaces_originals`` fields whose value differs from the default: options that
+    replace, remove or download the user's own files."""
+    return [
+        (spec, values[spec.name])
+        for spec in specs
+        if spec.replaces_originals
+        and spec.name in values
+        and not _same_value(values[spec.name], spec.default)
+    ]
+
+
+def _changes_text(changes: list[tuple[FieldSpec, Any]], word: str) -> str:
+    return "\n".join(
+        f"  {flag_for(spec.name)} = {format_value(value)} ({word}: {format_value(spec.default)})"
+        for spec, value in changes
+    )
+
+
+def unattended_refusal(opts: ToolOptions, specs: list[FieldSpec]) -> str | None:
+    """Why these options must never run unattended (a scheduled run), or None.
+
+    Refused, in this order: a permanent ``delete_mode``; a 🔒 locked option changed from its
+    tuned default; an option marked ``replaces_originals`` changed from its default (an
+    in-place output, recycling originals, downloading cloud-only files). The text completes the
+    sentence "the preset P ...".
+    """
+    if getattr(opts, "delete_mode", None) == "permanent":
+        return (
+            "deletes permanently (delete_mode = permanent). Scheduled runs only ever use the "
+            "Recycle Bin. Save a preset with delete_mode trash instead."
+        )
+    values = option_values(opts, specs)
+    locked = locked_changes(specs, values)
+    if locked:
+        return (
+            "changes 🔒 locked options away from their tuned defaults, and a scheduled run "
+            "cannot ask you about that. Save a preset without them:\n"
+            + _changes_text(locked, "tuned default")
+        )
+    originals = originals_changes(specs, values)
+    if originals:
+        return (
+            "replaces, removes or downloads original files, and a scheduled run would do that "
+            "again on every run without asking (for example shrinking the same pictures again "
+            "and recycling the previous version each time, until the true original is gone from "
+            "the Recycle Bin). Save a preset without them:\n" + _changes_text(originals, "default")
+        )
+    return None
 
 
 def confirm_locked(changes: list[tuple[FieldSpec, Any]], *, allow: bool) -> None:
@@ -561,9 +632,15 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
 
     def apply(**kw: Any) -> None:
         state = state_with_programs(get_state(kw["ctx"]), kw)
-        yes: bool = kw["yes"]
+        scheduled: bool = kw["scheduled"]
+        yes: bool = kw["yes"] or scheduled  # a scheduled run has nobody to answer
         check_export_target(kw["export"], kw["export_format"], force=kw["force"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
+        if scheduled and (kw["plan"] or overrides or not kw["preset"] or kw["select_all"]):
+            usage_error(
+                "--scheduled runs exactly one saved --preset, with no --plan, option flags, "
+                "PATHS or --select-all. It is added by 'schedule add'."
+            )
         if kw["plan"]:
             if overrides or kw["preset"]:
                 usage_error(
@@ -573,6 +650,12 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             plan = _read_plan(kw["plan"], tool)
         else:
             opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
+            if scheduled:
+                # The preset (or the settings) may have changed since 'schedule add' checked it,
+                # so the same rules run again now, before anything is scanned or changed.
+                refusal = unattended_refusal(opts, specs)
+                if refusal is not None:
+                    fail(f"refusing this scheduled run: the preset {kw['preset']!r} {refusal}")
             confirm_locked(
                 locked_changes(specs, option_values(opts, specs)), allow=kw["allow_locked"]
             )
@@ -583,6 +666,11 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         if kw["select_all"]:
             plan.select_all()
         selected = plan.selected_actions()
+        if scheduled and permanent_delete_requested(plan):
+            fail(
+                "refusing this scheduled run: the plan deletes permanently, and a scheduled run "
+                "only ever uses the Recycle Bin. Nothing was changed."
+            )
         console = out()
         if not selected:
             print_plan(console, plan, show_table=False)
@@ -603,6 +691,13 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
                 "[bold yellow]warning:[/bold yellow] this plan deletes permanently, but "
                 "'delete_mode' in the settings is 'trash', so those actions will be skipped. "
                 "Change it with: various-tools config set delete_mode permanent"
+            )
+        downloads = download_actions(plan)
+        if downloads:
+            console.print(
+                f"[bold yellow]Downloads:[/bold yellow] this will download {len(downloads)} "
+                "cloud-only file(s) from OneDrive to this device as part of this apply. That "
+                "uses disk space and network."
             )
         if not confirm(f"Apply {len(selected)} action(s) with {tool.name}?", yes=yes):
             note("Nothing was changed.")
@@ -671,6 +766,21 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         ),
         *_export_params(),
         _allow_locked_param(),
+        _param(
+            "scheduled",
+            Annotated[
+                bool,
+                typer.Option(
+                    SCHEDULED_FLAG,
+                    hidden=True,
+                    help=(
+                        "Set by 'schedule add' instead of --yes: answers the question, and "
+                        "refuses anything a scheduled run must not do."
+                    ),
+                ),
+            ],
+            False,
+        ),
         *program_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]

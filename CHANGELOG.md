@@ -10,6 +10,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 7.8 and 8.5 and §5. User-facing text is in
 `README.md`, `docs/tools/` and `docs/scheduled-runs.md`.
 
+#### Final safety review (same day)
+An independent review of the whole change set found these; all are fixed, with tests.
+- **Recycle only where a Recycle Bin exists.** On a network or mapped drive, a removable drive
+  without a bin, a bin set to delete immediately, or an item larger than the bin's limit, Windows
+  deletes for good without asking. `core/recycle.py: can_recycle()` now runs before every recycle
+  (plan rows, `trash_extra`, undo). When it refuses, nothing is removed and the row says why.
+- A recycle that reported an error after the item was already gone is journaled as done, so undo
+  can still restore it. A Recycle Bin restore also matches the item's modified time.
+- `root_refusal` refuses a root below a junction and compares the real path with the protected
+  list, including administrative shares.
+- Scheduled runs use a hidden `--scheduled` marker instead of `--yes`. `schedule add` and each
+  run refuse presets that delete permanently, change a 🔒 value, or set an option marked
+  `replaces_originals` (overwrite, in-place strip, recycle originals, remove RAW originals,
+  also-resize, cloud-only download). Tasks created before this change must be removed and added
+  again.
+- With a filter on, ticking a folder or group in the plan changes only the rows shown.
+- `temp_cleaner` re-checks its root refusals at apply. `media_resize` checks a video's duration
+  as well as its size before the output replaces anything.
+- A run that is still applying cannot be undone until it finishes or goes stale.
+- The Apply confirmation says when ticked rows will download cloud-only files;
+  `various-tools download` refuses folders.
+- `packaging/build.py --installer` compiles the installer. Version 0.2.0.
+
 #### Added
 - Undo restores Recycle Bin items while they are still there (`core/recycle.py`), sends an
   unchanged output file (write or convert) to the Recycle Bin, and undoes rows a crash left

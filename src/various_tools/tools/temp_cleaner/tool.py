@@ -680,7 +680,9 @@ class TempCleaner:
             plan.notes.append(f"{BROWSER_CACHE_PREFIX}{cache.name} | {cache.path} | {text}")
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
-        checked, refused = _recheck(plan, ctx)
+        # A saved or edited plan can name any folder as a root, so the scan's root refusals
+        # (app data folders, folders that hold the temp folder, browser caches) run again here.
+        checked, refused = _recheck(plan, ctx, self.environ())
         result = apply_plan(checked, ctx)
         _journal_refused(ctx, result, refused)
         return result
@@ -741,13 +743,57 @@ def _file_refusal(
     return None
 
 
-def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
-    """Unselect the files that no longer qualify. Returns the plan to run and the refused rows."""
+def _refused_roots(
+    roots: list[Path], environ: Mapping[str, str], caches: list[BrowserCache]
+) -> list[tuple[Path, str]]:
+    """The plan roots the scan would refuse now, each with the reason (as ``scan`` refuses)."""
+    refused: list[tuple[Path, str]] = []
+    for root in roots:
+        reason = dangerous_root_reason(root, environ)
+        if reason is None and any(is_inside(root, cache.path) for cache in caches):
+            reason = f"Browser caches are listed, never cleaned; refused: {root}"
+        if reason is not None:
+            refused.append((root, reason))
+    return refused
+
+
+def _location_refusal(
+    src: Path | None, refused_roots: list[tuple[Path, str]], caches: list[BrowserCache]
+) -> str | None:
+    """Why a row may not be removed because of where it is: under a refused root or a cache."""
+    if src is None:
+        return None
+    for root, reason in refused_roots:
+        if is_inside(src, root):
+            return f"{reason} Nothing under it was removed."
+    for cache in caches:
+        if is_inside(src, cache.path):
+            return (
+                f"is inside the browser cache {cache.path}; browser caches are listed, never "
+                "cleaned, so it was kept"
+            )
+    return None
+
+
+def _recheck(
+    plan: Plan, ctx: RunContext, environ: Mapping[str, str]
+) -> tuple[Plan, list[ActionOutcome]]:
+    """Unselect the files that no longer qualify. Returns the plan to run and the refused rows.
+
+    Every plan root is checked again as the scan checks it (:func:`dangerous_root_reason` and
+    the browser caches), so a saved or edited plan whose root is, for example, %LOCALAPPDATA%
+    removes nothing. Rows under a refused root, or inside a browser cache, are skipped with the
+    reason.
+    """
     try:
         opts = TempCleanerOptions.model_validate_json(plan.options_json)
     except ValueError:
         opts = None
     cutoff = time.time() - (opts.min_age_days if opts else 0) * SECONDS_PER_DAY
+    caches = find_browser_caches(environ)
+    refused_roots = _refused_roots(list(plan.roots), environ, caches)
+    for _root, reason in refused_roots:
+        ctx.log.warning("temp_cleaner apply: %s", reason)
     kept: list[PlannedAction] = []
     refused: list[ActionOutcome] = []
     for action in plan.actions:
@@ -755,9 +801,10 @@ def _recheck(plan: Plan, ctx: RunContext) -> tuple[Plan, list[ActionOutcome]]:
         if not action.selected:
             kept.append(action)
             continue
-        if opts is None:
-            why: str | None = "the plan's options could not be read, so nothing was removed"
-        else:
+        why = _location_refusal(action.src, refused_roots, caches)
+        if why is None and opts is None:
+            why = "the plan's options could not be read, so nothing was removed"
+        elif why is None and opts is not None:
             why = _file_refusal(action, opts, plan.roots, cutoff)
         if why is None:
             kept.append(action)

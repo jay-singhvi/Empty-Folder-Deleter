@@ -1,10 +1,18 @@
 """``various-tools schedule``: run a saved preset on a schedule through Windows Task Scheduler.
 
 ``schedule add NAME --tool T --preset P (--daily HH:MM | --weekly DAYS HH:MM | --monthly DAY
-HH:MM)`` creates a per-user task that runs ``various-tools T apply --preset P --yes``. A schedule is
-a standing "apply", so adding one is guarded (safety rule 1): it refuses presets that delete
-permanently or change a 🔒 locked option, shows exactly what will run and how often, says that
-every run is journaled and can be undone, and asks first. ``--yes`` answers that one question only.
+HH:MM)`` creates a per-user task that runs ``various-tools T apply --preset P --scheduled``.
+A schedule is a standing "apply", so adding one is guarded (safety rule 1): it refuses presets that
+delete permanently, change a 🔒 locked option, or replace, remove or download originals (a field
+marked ``replaces_originals`` away from its default), shows exactly what will run and how often,
+says that every run is journaled and can be undone, and asks first. ``--yes`` answers that one
+question only.
+
+The hidden ``--scheduled`` marker (in place of ``--yes``, which it implies) makes each run check
+the preset again with the same rules, and
+refuse any permanent delete, so a preset or setting changed after ``schedule add`` cannot make an
+unattended run do what ``schedule add`` would have refused. ``schedule run`` refuses a task made
+without the marker (by an older version).
 
 The Task Scheduler calls live in ``core/schedule.py``; tests replace :func:`make_scheduler` with a
 fake runner, so no real task is ever created.
@@ -34,10 +42,10 @@ from various_tools.cli.state import (
     out,
     usage_error,
 )
-from various_tools.cli.toolcmds import flag_for, locked_changes, option_values
+from various_tools.cli.toolcmds import SCHEDULED_FLAG, unattended_refusal
 from various_tools.core import schedule as sched
 from various_tools.core.schedule import ScheduleError, TaskScheduler, Trigger
-from various_tools.core.schema import describe, format_value
+from various_tools.core.schema import describe
 from various_tools.core.settings import default_settings_path
 from various_tools.tools.base import Tool
 
@@ -73,23 +81,9 @@ def _check_preset(tools: Mapping[str, Tool], state: CliState, tool_id: str, pres
             f"{'.'.join(str(p) for p in e['loc']) or 'options'}: {e['msg']}" for e in exc.errors()
         )
         fail(f"the preset {preset!r} is not complete enough to run unattended: {problems}")
-    if getattr(opts, "delete_mode", None) == "permanent":
-        fail(
-            f"the preset {preset!r} deletes permanently (delete_mode = permanent). Scheduled runs "
-            "only ever use the Recycle Bin. Save a preset with delete_mode trash instead."
-        )
-    specs = describe(tool.Options)
-    changed = locked_changes(specs, option_values(opts, specs))
-    if changed:
-        lines = "\n".join(
-            f"  {flag_for(spec.name)} = {format_value(value)} "
-            f"(tuned default: {format_value(spec.default)})"
-            for spec, value in changed
-        )
-        fail(
-            f"the preset {preset!r} changes 🔒 locked options away from their tuned defaults, "
-            "and a scheduled run cannot ask you about that. Save a preset without them:\n" + lines
-        )
+    refusal = unattended_refusal(opts, describe(tool.Options))
+    if refusal is not None:
+        fail(f"the preset {preset!r} {refusal}")
     return tool
 
 
@@ -167,13 +161,18 @@ def build_schedule_app(tools: Mapping[str, Tool]) -> typer.Typer:
             bool, typer.Option("--yes", help="Do not ask for confirmation (for scripts).")
         ] = False,
     ) -> None:
-        """Create a scheduled run of ``TOOL apply --preset PRESET --yes``. Asks first."""
+        """Create a scheduled run of ``TOOL apply --preset PRESET``. Asks first."""
         state = get_state(ctx)
         clean = _check_name(name)
         trigger = _build_trigger(daily, weekly, monthly)
         _check_preset(tools, state, tool, preset)
         try:
+            # ``--scheduled`` takes the place of ``--yes`` (it answers the one question too, and
+            # keeps the command within Task Scheduler's length limit). It makes 'apply' re-check
+            # the preset at run time and refuse permanent deletes, whatever the preset or the
+            # settings have become since.
             argv = sched.build_task_argv(tool, preset, config_path=_config_for_task(state))
+            argv[-1:] = [SCHEDULED_FLAG]
             command = sched.command_line(argv)
             scheduler = make_scheduler()
             if scheduler.exists(clean):
@@ -284,6 +283,12 @@ def build_schedule_app(tools: Mapping[str, Tool]) -> typer.Typer:
             fail(
                 f"The task {clean!r} does not look like one made by 'schedule add' "
                 f"(command: {task.command}), so it is not started from here."
+            )
+        if SCHEDULED_FLAG not in task.command.split():
+            fail(
+                f"The task {clean!r} was made by an older version, without the checks a scheduled "
+                "run now does at run time, so it is not started. Make it again with: "
+                f"various-tools schedule remove {clean!r}, then schedule add."
             )
         # The preset may have changed since the task was made: check it again.
         _check_preset(tools, get_state(ctx), parsed[0], parsed[1])

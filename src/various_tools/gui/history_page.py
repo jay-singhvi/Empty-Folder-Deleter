@@ -24,6 +24,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 import shiboken6
@@ -45,7 +46,13 @@ from PySide6.QtWidgets import (
 
 from various_tools.core.journal import ActionRecord, Journal, RunRecord, UndoReport, undo_run
 from various_tools.gui.state import AppState
-from various_tools.gui.undo_rules import UndoInfo, read_undo_info
+from various_tools.gui.undo_rules import (
+    STALE_AFTER,
+    UndoInfo,
+    in_progress_message,
+    read_undo_info,
+    stale_after,
+)
 from various_tools.gui.workers import Worker
 
 log = logging.getLogger(__name__)
@@ -201,14 +208,17 @@ def _read_runs(path: Path) -> RunList:
     return RunList(runs, _action_counts(path))
 
 
-def _read_page(path: Path, run_id: int, offset: int, *, first: bool) -> ActionPage:
+def _read_page(
+    path: Path, run_id: int, offset: int, *, first: bool, limit: timedelta = STALE_AFTER
+) -> ActionPage:
     with Journal(path) as journal:
         actions = journal.actions(run_id, limit=PAGE_SIZE, offset=offset)
         if not first:
             return ActionPage(run_id, offset, actions)
         total = journal.action_count(run_id)
         statuses = journal.status_counts(run_id)
-    return ActionPage(run_id, offset, actions, total, statuses, read_undo_info(path, run_id))
+    info = read_undo_info(path, run_id, limit=limit)
+    return ActionPage(run_id, offset, actions, total, statuses, info)
 
 
 class HistoryPage(QWidget):
@@ -424,11 +434,12 @@ class HistoryPage(QWidget):
         if self._closing:
             return None
         path = self._state.settings.journal_path()
+        limit = stale_after(self._state.settings.transcode_timeout_s)
         generation = self._generation
         run_id = run.id
         first = offset == 0
         worker = _start(
-            lambda _w: _read_page(path, run_id, offset, first=first),
+            lambda _w: _read_page(path, run_id, offset, first=first, limit=limit),
             lambda value: self._page_read(generation, value),
             lambda exc: self._page_failed(generation, run_id, exc),
         )
@@ -548,8 +559,12 @@ class HistoryPage(QWidget):
         settings = self._state.settings
         path = settings.journal_path()
         protection = settings.protected_paths()
+        limit = stale_after(settings.transcode_timeout_s)
 
         def job(_worker: Worker) -> UndoReport:
+            # Checked again on this thread: never undo a run that is still applying.
+            if read_undo_info(path, run_id, limit=limit).in_progress:
+                raise ValueError(in_progress_message(run_id, limit))
             # Its own connection, opened and closed on this thread.
             with Journal(path) as journal:
                 return undo_run(journal, run_id, protection=protection)

@@ -57,7 +57,7 @@ from various_tools.core.plan import (
     trash_extra,
 )
 from various_tools.tools.base import Category, ToolOptions
-from various_tools.tools.media_resize.tool import normalise_extensions
+from various_tools.tools.media_resize.tool import VIDEO_DURATION_TOLERANCE_S, normalise_extensions
 from various_tools.tools.metadata_strip.exiftool import (
     TagRead,
     describe_removal,
@@ -216,7 +216,7 @@ class MetadataStripOptions(ToolOptions):
             "Recycle Bin, then the copy is renamed. Undo does not restore it automatically; "
             "restore the original from the Recycle Bin by hand. Default: off."
         ),
-        json_schema_extra=_hint("Output", advanced=True),
+        json_schema_extra=_hint("Output", advanced=True, replaces_originals=True),
     )
 
     # ----- advanced --------------------------------------------------------------------
@@ -241,7 +241,7 @@ class MetadataStripOptions(ToolOptions):
         json_schema_extra=_hint("Advanced", advanced=True),
     )
     duration_tolerance_s: float = Field(
-        default=0.5,
+        default=VIDEO_DURATION_TOLERANCE_S,
         ge=0.05,
         le=60.0,
         title="Video duration tolerance (s)",

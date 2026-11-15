@@ -21,6 +21,12 @@ that no longer qualifies (for example one created since the scan) is kept and jo
 **skipped**, with the reason. Folders are not re-aged at apply (trashing their files changes their
 time); the engine still refuses any folder that is not empty.
 
+Apply also checks every folder of the plan again with the same refusals as the scan (see *Which
+folders*): an app data folder (`%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`), a folder that holds
+the temp folder, or a folder inside a browser cache. A saved or edited plan with such a folder
+removes nothing under it: every row there is journaled as **skipped** with the reason. A row
+inside a browser cache folder is skipped too, whatever folder the plan names.
+
 ## Which folders
 
 If you choose no folder, the tool uses your temp folder: the folders named by the `TEMP` and `TMP`

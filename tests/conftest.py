@@ -46,6 +46,9 @@ def _never_the_real_recycle_bin(
     monkeypatch.setattr(plan, "send2trash", fake_send2trash)
     monkeypatch.setattr(journal, "send2trash", fake_send2trash)
     monkeypatch.setattr(recycle, "current_user_bin", lambda _path: None)
+    # Every tmp_path counts as recyclable, so trash paths reach the fake above. Tests of the
+    # check itself import the real ``can_recycle`` and give it fake lookups.
+    monkeypatch.setattr(recycle, "can_recycle", lambda _path, **_kwargs: None)
 
 
 @pytest.fixture

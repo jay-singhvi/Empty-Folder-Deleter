@@ -518,7 +518,35 @@ def protected_reason(
     """
     environ = os.environ if env is None else env
     active = rules or DEFAULT_PROTECTION
-    target = _norm(path)
+    text = _norm(path)
+    as_drive = _admin_share_as_drive(text)
+    for target in (text,) if as_drive is None else (text, as_drive):
+        reason = _protected_reason_of(target, environ, active)
+        if reason is not None:
+            return reason
+    return None
+
+
+# ``\\host\c$\...``: an administrative share is the drive itself, on whatever machine.
+_ADMIN_SHARE = re.compile(r"^\\\\[^\\]+\\([A-Za-z])\$(\\.*)?$")
+
+
+def _admin_share_as_drive(normalized: str) -> str | None:
+    """``c:\\rest`` for an administrative share path ``\\\\host\\c$\\rest``, else None.
+
+    Used for the protected-path check only, so ``\\\\localhost\\C$\\Windows`` counts as the
+    Windows folder. Shares on another machine count too, which is the safer side."""
+    if sys.platform != "win32":
+        return None
+    match = _ADMIN_SHARE.match(normalized)
+    if match is None:
+        return None
+    return os.path.normcase(f"{match.group(1)}:" + (match.group(2) or "\\"))
+
+
+def _protected_reason_of(
+    target: str, environ: Mapping[str, str], active: ProtectedPaths
+) -> str | None:
     if active.drive_roots and _is_drive_root(target):
         return "drive root"
 
@@ -534,6 +562,13 @@ def protected_reason(
         if value and within(_norm(value)):
             return _FOLDER_LABELS.get(template.lower(), f"protected folder {template}")
     return None
+
+
+def real_path(path: Path | str) -> str:
+    """Where ``path`` really is, with junctions, symlinks, subst and mapped drives resolved
+    (``os.path.realpath``), without a long-path prefix. The part that does not exist is kept
+    as written. Opens folders' metadata only."""
+    return _strip_prefix(os.path.realpath(_strip_prefix(os.fspath(path))))
 
 
 def is_inside(path: Path, root: Path) -> bool:
@@ -575,9 +610,12 @@ def destination_refusal(dst: Path, stop: Path | None = None) -> str | None:
 def root_refusal(root: Path, allow_protected: bool | ProtectedPaths = False) -> str | None:
     """Why ``root`` cannot be used as a target folder, or ``None``.
 
-    Refuses a missing folder, a junction or symlink, and a protected path (AGENTS.md rules 4
-    and 6) unless protected paths are allowed. Pass ``ctx.settings.protected_paths()`` so the
-    user's protected-folder list is used; a plain bool keeps the default list. Opens no file.
+    Refuses a missing folder, a junction or symlink or a folder below one (always), and a
+    protected path (AGENTS.md rules 4 and 6) unless protected paths are allowed. The protected
+    check looks at the path as written (administrative shares count as their drive) and at its
+    real path (:func:`real_path`), so neither a link nor a subst or mapped drive can hide a
+    protected folder. Pass ``ctx.settings.protected_paths()`` so the user's protected-folder
+    list is used; a plain bool keeps the default list. Opens no file.
     """
     rules = (
         allow_protected
@@ -592,7 +630,15 @@ def root_refusal(root: Path, allow_protected: bool | ProtectedPaths = False) -> 
         return f"Could not read the folder: {exc.strerror or exc}"
     if stat_is_link(st):
         return f"Junction or symlink, not followed: {root}"
+    link = reparse_ancestor(root)
+    if link is not None:
+        return f"Inside a junction or symlink, not followed: {link}"
     reason = protected_reason(root, rules=rules)
+    if reason is None:
+        try:
+            reason = protected_reason(Path(real_path(root)), rules=rules)
+        except OSError as exc:
+            return f"Could not resolve the folder's real path: {exc.strerror or exc}"
     if reason and not rules.allowed:
         return f"Protected folder refused ({reason}): {root}"
     return None

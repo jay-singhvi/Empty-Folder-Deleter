@@ -82,7 +82,7 @@ def test_add_shows_what_will_run_and_creates_the_task(cli: Cli, preset: str, fak
     assert result.exit_code == 0, result.output
     assert "Create this scheduled run?" in result.output
     assert "every day at 09:00" in result.output
-    assert "empty_folders apply --preset Weekly --yes" in result.output
+    assert "empty_folders apply --preset Weekly --scheduled" in result.output
     assert "journaled" in result.output and "undone" in result.output and "History" in result.output
     assert "Recycle Bin" in result.output
 
@@ -91,7 +91,7 @@ def test_add_shows_what_will_run_and_creates_the_task(cli: Cli, preset: str, fak
     assert create[create.index("/TN") + 1] == "Various Tools\\Nightly"
     command = create[create.index("/TR") + 1]
     assert command.startswith(f"{sys.executable} -m various_tools.cli.main ")
-    assert command.endswith("empty_folders apply --preset Weekly --yes")
+    assert command.endswith("empty_folders apply --preset Weekly --scheduled")
     assert create[create.index("/SC") + 1] == "DAILY"
 
 
@@ -144,7 +144,7 @@ def test_add_yes_skips_the_question_but_still_shows_the_summary(
 ) -> None:
     result = add(cli, "--daily", "9:00", "--yes", input=None)
     assert result.exit_code == 0, result.output
-    assert "empty_folders apply --preset Weekly --yes" in result.output
+    assert "empty_folders apply --preset Weekly --scheduled" in result.output
     assert "journaled" in result.output
     assert "/Create" in fake.verbs()
 

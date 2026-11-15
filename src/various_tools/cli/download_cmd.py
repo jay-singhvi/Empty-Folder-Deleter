@@ -5,13 +5,16 @@ Scans never read a cloud-only file; they list it in the plan (``Plan.cloud_only`
 
     various-tools download [PATHS...] [--plan FILE] [--wait SECONDS] [--yes]
 
-It always asks first. With no terminal to answer, it refuses unless ``--yes`` is given. Ctrl+C
+Only files are downloaded: a folder (given or listed in the plan) is refused, because OneDrive
+would download everything inside it. It always asks first. With no terminal to answer, it refuses
+unless ``--yes`` is given. Ctrl+C
 stops after the current file. Downloading changes nothing else and is not journaled: the files
 stay where they are, they just also take space on this device afterwards.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -83,6 +86,16 @@ def download(
     if plan:
         targets += _paths_from_plan(plan)
     targets = _unique(targets)
+    # Files only. Downloading a folder would pin it and download everything inside it, far more
+    # than the count the question shows. Reading the attributes downloads nothing.
+    folders = [p for p in targets if os.path.isdir(p)]
+    if folders:
+        listed = ", ".join(str(p) for p in folders[:5]) + (" …" if len(folders) > 5 else "")
+        usage_error(
+            f"{listed} {'is a folder' if len(folders) == 1 else 'are folders'}. Only files are "
+            "downloaded: give the files themselves, or --plan FILE with a saved plan that lists "
+            "them. Nothing was downloaded."
+        )
     if not targets:
         if plan:
             note("The plan lists no cloud-only files; nothing to download.")

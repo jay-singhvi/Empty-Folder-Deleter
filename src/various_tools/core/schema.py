@@ -4,7 +4,8 @@
 declaration order. Each spec carries what a front end needs to draw the field: a label (``title``),
 help text (``description``), a ``kind`` (checkbox, number, text, path, dropdown, list, key/value
 table), bounds, the default and the UI hints from ``json_schema_extra`` (``group``, ``advanced``,
-``locked``, ``widget``, ``depends_on``, ``choices_from``, ``pair_separator``, ``pair_headers``).
+``locked``, ``widget``, ``depends_on``, ``choices_from``, ``pair_separator``, ``pair_headers``,
+``replaces_originals``).
 
 ``parse_value(spec, text)`` turns text typed by a person (a CLI flag, a config value) into a
 value that pydantic accepts for that field, and :func:`format_value` does the reverse for display.
@@ -74,6 +75,10 @@ class FieldSpec:
     # its first occurrence), shown under ``pair_headers`` (exactly two titles, or empty).
     pair_separator: str | None = None
     pair_headers: tuple[str, ...] = ()
+    # ``replaces_originals``: a value other than the default replaces, removes or downloads the
+    # user's original files (for example an in-place output). Such options are never run
+    # unattended: a scheduled run refuses them.
+    replaces_originals: bool = False
 
     @property
     def has_bounds(self) -> bool:
@@ -243,6 +248,7 @@ def describe(model: type[BaseModel]) -> list[FieldSpec]:
                 choices_from=str(choices_from) if choices_from else None,
                 pair_separator=_pair_separator(extra),
                 pair_headers=_pair_headers(extra),
+                replaces_originals=bool(extra.get("replaces_originals", False)),
             )
         )
     return specs

@@ -57,6 +57,7 @@ from various_tools.tools.media_convert import images, videos
 from various_tools.tools.media_convert.images import ImageRules
 from various_tools.tools.media_convert.videos import Choice, SourceInfo, VideoCodec, VideoMode
 from various_tools.tools.media_resize.geometry import VideoPreset
+from various_tools.tools.media_resize.tool import VIDEO_DURATION_TOLERANCE_S
 
 TOOL_ID = "media_convert"
 OUTPUT_FOLDER = "converted"
@@ -258,7 +259,7 @@ class MediaConvertOptions(ToolOptions):
         json_schema_extra=_hint("Video", advanced=True),
     )
     duration_tolerance_s: float = Field(
-        default=0.5,
+        default=VIDEO_DURATION_TOLERANCE_S,
         ge=0.05,
         le=60.0,
         title="Video duration tolerance (s)",
@@ -300,7 +301,7 @@ class MediaConvertOptions(ToolOptions):
             "comparing its length with ffprobe. If verification fails the original stays where "
             "it is. Undo does not restore it; use the Recycle Bin. Default: off."
         ),
-        json_schema_extra=_hint("Output", advanced=True),
+        json_schema_extra=_hint("Output", advanced=True, replaces_originals=True),
     )
 
     @field_validator("background_color")

@@ -53,12 +53,8 @@ def put_in_bin(
     return item
 
 
-@pytest.fixture(autouse=True)
-def _never_the_real_recycle_bin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Undo looks up the real Recycle Bin by default; in these tests it finds none."""
-    from various_tools.core import recycle
-
-    monkeypatch.setattr(recycle, "current_user_bin", lambda _path: None)
+# The real Recycle Bin is kept out by the global autouse fixture in tests/conftest.py (fake
+# send2trash, no bin found by undo, every path recyclable). Do not shadow it here.
 
 
 @pytest.fixture

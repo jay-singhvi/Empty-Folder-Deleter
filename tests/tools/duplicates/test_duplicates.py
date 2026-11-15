@@ -39,8 +39,8 @@ from various_tools.tools.duplicates.verify_ollama import OllamaVerifier
 from various_tools.tools.duplicates.videos import VIDEO_EXT, VideoInfo, VideoRules, same_video
 
 REPO = Path(__file__).resolve().parents[3]
-LEGACY_IMAGES = REPO / "legacy" / "python-find_duplicates.py"
-LEGACY_VIDEOS = REPO / "legacy" / "find_duplicate_videos.py"
+LEGACY_IMAGES = REPO / "tests" / "fixtures" / "legacy_reference" / "python-find_duplicates.py"
+LEGACY_VIDEOS = REPO / "tests" / "fixtures" / "legacy_reference" / "find_duplicate_videos.py"
 
 MakeVideo = Callable[..., Path]
 

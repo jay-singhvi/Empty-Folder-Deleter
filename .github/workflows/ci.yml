@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -25,6 +26,7 @@ jobs:
       # missing, so a failed install shows up as skipped tests rather than a red build.
       - name: Install ffmpeg
         run: choco install ffmpeg --no-progress -y
+        continue-on-error: true
 
       - name: Lint
         run: uv run ruff check

@@ -37,7 +37,7 @@ from various_tools.tools.media_resize import geometry as g
 from various_tools.tools.media_resize import tool as resize_tool
 
 REPO = Path(__file__).resolve().parents[3]
-LEGACY = REPO / "legacy" / "app.py"
+LEGACY = REPO / "tests" / "fixtures" / "legacy_reference" / "app.py"
 ORIENTATION = 0x0112
 
 

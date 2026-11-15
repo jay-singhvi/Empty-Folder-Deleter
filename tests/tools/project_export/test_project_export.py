@@ -37,8 +37,9 @@ from various_tools.tools.project_export import tool as export_tool
 from various_tools.tools.project_export.source import file_text, strip_python_comments
 
 REPO = Path(__file__).resolve().parents[3]
-LEGACY_V1 = REPO / "legacy" / "python-v1-Extract_Project_Structure.py"
-LEGACY_V3 = REPO / "legacy" / "python-v3-Extract_Project_Code.py"
+LEGACY_DIR = REPO / "tests" / "fixtures" / "legacy_reference"
+LEGACY_V1 = LEGACY_DIR / "python-v1-Extract_Project_Structure.py"
+LEGACY_V3 = LEGACY_DIR / "python-v3-Extract_Project_Code.py"
 
 NOTEBOOK = {
     "cells": [

@@ -38,7 +38,7 @@ from various_tools.tools.rename.naming import (
 from various_tools.tools.rename.presets import PRESETS
 
 REPO = Path(__file__).resolve().parents[3]
-LEGACY = REPO / "legacy" / "rename_snapchat.py"
+LEGACY = REPO / "tests" / "fixtures" / "legacy_reference" / "rename_snapchat.py"
 
 # (file name, modified time) in the order the legacy script would meet them, by mtime.
 SNAP_FILES: list[tuple[str, tuple[int, int, int, int, int, int]]] = [

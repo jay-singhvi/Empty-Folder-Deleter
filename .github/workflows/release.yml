@@ -35,12 +35,18 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Lint, types and tests
-        run: |
-          uv run ruff check
-          uv run ruff format --check
-          uv run pyright
-          uv run pytest
+      # One step per check: a multi-line pwsh step only reports the last command's exit code.
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest
         env:
           QT_QPA_PLATFORM: offscreen
 
@@ -68,6 +74,8 @@ jobs:
         with:
           name: Various Tools ${{ steps.version.outputs.version }}
           generate_release_notes: true
+          # A tag such as v1.2.0rc1 is published as a pre-release.
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'a') || contains(github.ref_name, 'b') }}
           fail_on_unmatched_files: true
           files: |
             dist/Various-Tools-${{ steps.version.outputs.version }}-setup.exe

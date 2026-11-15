@@ -38,7 +38,7 @@ from various_tools.tools.organize_by_date import tool as obd
 from various_tools.tools.organize_by_date.catalog import Catalog
 
 REPO = Path(__file__).resolve().parents[3]
-LEGACY = REPO / "legacy" / "python-extract_file_metadata-8.py"
+LEGACY = REPO / "tests" / "fixtures" / "legacy_reference" / "python-extract_file_metadata-8.py"
 EXIF_IFD = 0x8769
 DATE_ORIGINAL = 0x9003
 DATE_DIGITIZED = 0x9004

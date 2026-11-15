@@ -31,9 +31,14 @@ from various_tools.tools.empty_folders import (
     set_folder_selected,
 )
 
-# The original Tkinter app, at the repository root. Its find function is read from the source
+# The original Tkinter app, kept as a test fixture. Its find function is read from the source
 # and run on its own, so tkinter is never imported.
-LEGACY_APP = Path(__file__).resolve().parents[3] / "empty_folder_deleter.py"
+LEGACY_APP = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "legacy_reference"
+    / "empty_folder_deleter.py"
+)
 NO_EXTRAS: dict[str, object] = {
     "treat_as_empty": [],
     "exclude_globs": [],

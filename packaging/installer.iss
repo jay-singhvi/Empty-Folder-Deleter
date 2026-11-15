@@ -85,16 +85,16 @@ Root: HKCU; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "MUIVerb"; Value
 Root: HKCU; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
 Root: HKCU; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#GuiExe}"; Tasks: contextmenu
 Root: HKCU; Subkey: "{#MenuKey}\shell\empty_folders"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Find empty folders"; Tasks: contextmenu
-Root: HKCU; Subkey: "{#MenuKey}\shell\empty_folders\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool empty_folders --folder ""%V"""; Tasks: contextmenu
+Root: HKCU; Subkey: "{#MenuKey}\shell\empty_folders\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool empty_folders --folder ""%V\."""; Tasks: contextmenu
 Root: HKCU; Subkey: "{#MenuKey}\shell\duplicates"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Find duplicates"; Tasks: contextmenu
-Root: HKCU; Subkey: "{#MenuKey}\shell\duplicates\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool duplicates --folder ""%V"""; Tasks: contextmenu
+Root: HKCU; Subkey: "{#MenuKey}\shell\duplicates\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool duplicates --folder ""%V\."""; Tasks: contextmenu
 Root: HKCU; Subkey: "{#BackgroundKey}"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open with Various Tools"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKCU; Subkey: "{#BackgroundKey}"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
 Root: HKCU; Subkey: "{#BackgroundKey}"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#GuiExe}"; Tasks: contextmenu
 Root: HKCU; Subkey: "{#BackgroundKey}\shell\empty_folders"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Find empty folders"; Tasks: contextmenu
-Root: HKCU; Subkey: "{#BackgroundKey}\shell\empty_folders\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool empty_folders --folder ""%V"""; Tasks: contextmenu
+Root: HKCU; Subkey: "{#BackgroundKey}\shell\empty_folders\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool empty_folders --folder ""%V\."""; Tasks: contextmenu
 Root: HKCU; Subkey: "{#BackgroundKey}\shell\duplicates"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Find duplicates"; Tasks: contextmenu
-Root: HKCU; Subkey: "{#BackgroundKey}\shell\duplicates\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool duplicates --folder ""%V"""; Tasks: contextmenu
+Root: HKCU; Subkey: "{#BackgroundKey}\shell\duplicates\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#GuiExe}"" --tool duplicates --folder ""%V\."""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#GuiExe}"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent unchecked

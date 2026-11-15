@@ -5,6 +5,104 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Whole-plan review and fixes (2026-11-15)
+
+Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 7.8 and 8.5 and §5. User-facing text is in
+`README.md`, `docs/tools/` and `docs/scheduled-runs.md`.
+
+#### Added
+- Undo restores Recycle Bin items while they are still there (`core/recycle.py`), sends an
+  unchanged output file (write or convert) to the Recycle Bin, and undoes rows a crash left
+  pending. The journal runs in WAL mode.
+- `Plan.cloud_only` and a download action: "Download these N files..." in the desktop app and
+  `various-tools download [PATHS] [--plan FILE] [--wait SECONDS] [--yes]`.
+- `organize_by_date`: `cloud_only` (skip, ask, download) with `download_wait_seconds` and
+  `keep_pinned`, a download at Apply; `also_resize` with `resize_mode`, `resize_px` and
+  `resize_jpeg_quality`; catalog export (`.xlsx` or `.csv`) and import of the old master workbook
+  (`catalog-export PATH`, `catalog-import PATH`, and two buttons in the app), through the generic
+  `ToolExtra` mechanism in `tools/base.py`.
+- `media_resize`: `output = overwrite` (with `allow_overwrite`) and `remove_raw_originals`, both
+  sending originals to the Recycle Bin and journaled.
+- Case-only renames.
+- Live Ollama model list (`core/choices.py`).
+- `disk_usage`: `tree_depth` and `tree_min_share_pct`, size map notes and a `tree-size` note, a
+  "Size map" tab and "Tick files in this folder" in the app.
+- Folder-tree plan view (the default for `empty_folders`) and a table editor for `sort_by_type`
+  rules.
+- `project_export`: `copy_to_clipboard`.
+- Scheduled runs (Phase 7.8): `various-tools schedule add|list|remove|run`
+  (`docs/scheduled-runs.md`).
+- CLI: `--allow-locked` and `--force` (for `--export`); the one-off `--exiftool`, `--ffmpeg`,
+  `--ffprobe` and `--ollama-url` are accepted on tool commands and `doctor`.
+- README screenshots in `docs/images/`, generated on demo data by
+  `packaging/make_screenshots.py`.
+
+#### Changed
+- Phase 8.5 is done: `legacy/` is deleted, and the scripts the parity tests run moved to
+  `tests/fixtures/legacy_reference/`.
+- `AGENTS.md` and `CLAUDE.md` are brought up to date.
+- CI runs on `main` and on pull requests.
+- `README.md`: screenshots, the new commands and options, the old-script table rows that said a
+  feature had no equivalent (cloud-only download, `--resize`, the Excel master log, CR3 removal),
+  the Undo note, and the stale legacy and acknowledgments text.
+
+#### Fixed (safety)
+- Apply engine: moves never overwrite. A cross-volume move checks the file is on the device first,
+  copies to a `.partial` file, and refuses folders. A plan with no roots is refused. A source below
+  a junction inside the root is refused. Plan roots are checked again at apply. WRITE and CONVERT
+  are guarded by the engine too.
+- Undo runs the destination and protected-path guards and never overwrites.
+- Link detection uses the reparse tag, so OneDrive placeholders are not treated as junctions, and a
+  non-empty folder is never trashed whole.
+- Protected paths cannot be bypassed with a `\\?\` prefix or an 8.3 short name.
+- Program lookup never uses the current directory.
+- Originals recycled by `media_convert` (`trash_originals`) and `metadata_strip` (in place) are
+  their own journal rows.
+- `temp_cleaner` judges age on the newer of the modified and created times, checks again at apply,
+  merges short and long forms of the same root, and refuses app-data roots.
+- `corrupt_media` no longer calls a file corrupt after a memory or system I/O error.
+- `empty_folders` no longer recycles a junk file whose folder is unticked.
+- The CLI asks before a 🔒 value changes, and `--allow-locked` is the explicit way around the
+  question. `config set` validates a program path.
+- Closing the window during a run asks and waits. The plan cannot be edited while it is applying.
+- The release workflow now fails on lint and type errors.
+- No test can reach the real Recycle Bin.
+
+#### Fixed (correctness)
+- `organize_by_date` crashed on apply, undo, apply again (catalog primary key).
+- `project_export`: comment stripping with form feeds, and re-including an earlier export.
+- `duplicates`: zero-size media. `duplicates explain` on a cloud-only file.
+- `checksum`: long paths.
+- `media_convert` verified a video after giving it its final name.
+- `sort_by_type`: clash settings at apply, and commas in rules.
+- History with very large runs.
+- The Explorer menu on a drive root.
+- `--export` overwrote an existing file silently.
+
+#### Decisions
+- The previously deferred options (overwrite, cloud-only download, `also_resize`, Excel export and
+  import) are implemented on the owner's instruction. Each is off by default and advanced.
+- `cloud_only` is 🔒 with `skip` as the default, and nothing is downloaded during a scan.
+- `also_resize` resizes before the move, because the recycle helper refuses files outside the plan
+  roots.
+- Downloads are not journaled, because no path changes.
+- Scheduled runs refuse presets that delete permanently or change a 🔒 value.
+- The 🔒 thresholds and operators were compared with the legacy scripts value by value and are
+  unchanged.
+- The settings file still uses plain pydantic, not pydantic-settings (the earlier decision is
+  unchanged).
+
+#### Tests
+- Tests for each fix above. The test suite no longer reaches the real Recycle Bin.
+
+#### Follow-ups for the owner (not done here)
+- Rename the GitHub repository, then update the URLs (plan Phase 8.4).
+- Code signing.
+- There is no real CR3 sample, so the RAW path is tested with fakes.
+- `media_convert/images.py` and `media_resize/images.py` still share near-duplicate helpers.
+- `LIVE_PREVIEW_TOOLS` and `COMPARE_TOOLS` in the GUI are still keyed on two tool ids (the plan
+  permits these two).
+
 ### Phase 8: Packaging and release (2026-11-13)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 8, items 1 to 3. Build steps are in
@@ -63,7 +161,9 @@ Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phase 8, items 1 to 3. Build st
   and `packaging/installer.iss` (plan Phase 8.4).
 - Delete `legacy/` once every tool has passed its parity test, then archive the OneDrive
   `Scripts` copies (plan Phase 8.5). The parity tests still read `legacy/` and the root
-  `empty_folder_deleter.py`.
+  `empty_folder_deleter.py`. **Done:** `legacy/` is deleted and the parity references moved to
+  `tests/fixtures/legacy_reference/` (see "Whole-plan review and fixes"). Archiving the OneDrive
+  `Scripts` copies is still the owner's.
 - Code signing: the exes and installer are unsigned, so SmartScreen warns on first run.
 
 ### Phase 5: Desktop GUI and Phase 6: Reporting (2026-11-13)

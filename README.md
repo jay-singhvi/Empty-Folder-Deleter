@@ -4,6 +4,30 @@ Various Tools is a Windows app for tidying up files and media: empty folders, du
 
 This repository started as the **Empty Folder Deleter** Tkinter app; that app is now the `empty_folders` tool (see [The original Empty Folder Deleter](#the-original-empty-folder-deleter)).
 
+## Screenshots
+
+![The main window with the Empty Folder Deleter tool: options form and the plan as a folder tree](docs/images/main-window-empty-folders.png)
+
+The Empty Folder Deleter tool: the options form and the plan as a folder tree.
+
+![Compare group in the duplicates tool](docs/images/duplicates-compare.png)
+
+Duplicates: a group side by side, with the copy that stays.
+
+![The Size map tab of Disk Usage](docs/images/disk-usage-size-map.png)
+
+Disk Usage: the Size map tab.
+
+![History page](docs/images/history.png)
+
+History: every applied run, with Undo and Export.
+
+![Settings, External programs panel](docs/images/settings-external-programs.png)
+
+Settings: the External programs panel.
+
+The screenshots are generated on demo data by `uv run python packaging/make_screenshots.py`.
+
 ## Install
 
 Windows 10 or 11, 64-bit. Downloads are on the [Releases](https://github.com/jay-singhvi/Empty-Folder-Deleter/releases) page.
@@ -40,7 +64,9 @@ uv run various-tools-gui      # desktop app
 uv run various-tools --help   # command line
 ```
 
-To build the Windows app and the installer yourself, see [packaging/README.md](packaging/README.md).
+### Build the installer yourself
+
+To build the Windows app and the installer yourself, see [packaging/README.md](packaging/README.md). The exact local build commands are in that file.
 
 ## Tools
 
@@ -71,7 +97,9 @@ various-tools list                          # the tools: id, name, category, des
 various-tools TOOL scan  [PATHS] [flags]    # preview. Changes nothing
 various-tools TOOL apply [PATHS] [flags]    # the same, then apply (asks first)
 various-tools history [RUN_ID]              # what was applied, and each run's actions
-various-tools undo RUN_ID                   # move a run's files back
+various-tools undo RUN_ID                   # reverse a run
+various-tools download [PATHS] [--plan F]   # download cloud-only OneDrive files a scan skipped (asks first)
+various-tools schedule add|list|remove|run  # run a saved preset on a schedule (docs/scheduled-runs.md)
 various-tools doctor                        # are ffmpeg, ffprobe, ExifTool and Ollama available?
 various-tools presets list|save|delete      # named option sets
 various-tools config show|get|set|unset     # settings
@@ -100,13 +128,13 @@ various-tools duplicates scan "D:\Photos" --media images --json > plan.json
 Rules that always hold (the same as in the app):
 
 - Deletes go to the Recycle Bin. Permanent delete needs the setting `delete_mode = permanent` and asks a second, explicit question (`--yes` skips both questions for scripts). Without `--yes`, a run with nobody to answer is refused.
-- `various-tools undo RUN_ID` moves renamed and moved files back. Items sent to the Recycle Bin are not restored by Undo (the report says so); restore them from the Recycle Bin. Files a tool wrote (exports, converted or resized copies, manifests) are left in place.
-- OneDrive cloud-only files are never read or downloaded; they are reported as skipped.
+- `various-tools undo RUN_ID` moves and renames files back, restores items from the Recycle Bin when they are still there, and sends an output file a tool wrote (an export, a converted or resized copy, a manifest) to the Recycle Bin if it is unchanged. Permanent deletes cannot be undone.
+- OneDrive cloud-only files are never read or downloaded by a scan; they are reported as skipped. Downloading needs your explicit action: `various-tools download`, the download button in the app, or the `cloud_only` option of `organize_by_date` (see below).
 - `Ctrl+C` stops a running scan or apply at the next safe point and exits with code 130.
 
 ### Options, presets and settings
 
-Flags are written as `--field-name`. A switch is `--flag/--no-flag`. A list is repeated or comma-separated (`--treat-as-empty a.tmp,b.tmp`). A dictionary is repeated as `KEY=VALUE`. Flags you leave out keep their default, and an empty value (`--match ""`) puts a "use the app setting" option back to its default. Options marked "Advanced" in `--help` are tuned values; the locked ones (marked with a padlock) are safety values or thresholds tuned on real data, so leave them alone unless you know why. If a tool option has the same name as a command flag (for example rename's `preset`), it is written `--opt-preset`.
+Flags are written as `--field-name`. A switch is `--flag/--no-flag`. A list is repeated or comma-separated (`--treat-as-empty a.tmp,b.tmp`). A dictionary is repeated as `KEY=VALUE`. Flags you leave out keep their default, and an empty value (`--match ""`) puts a "use the app setting" option back to its default. Options marked "Advanced" in `--help` are tuned values; the locked ones (marked with a padlock) are safety values or thresholds tuned on real data, so leave them alone unless you know why. A flag or preset that changes a locked value asks first; `--allow-locked` accepts it without asking (`--yes` does not). If a tool option has the same name as a command flag (for example rename's `preset`), it is written `--opt-preset`.
 
 ```
 # Save a set of options once, reuse it by name. Flags you type override the preset.
@@ -128,7 +156,7 @@ Global options go before the command and apply to that run only; nothing is save
 various-tools --config D:\portable\settings.toml --ffmpeg D:\tools\ffmpeg.exe duplicates scan D:\Videos --media videos
 ```
 
-`--config FILE` (or the `VARIOUS_TOOLS_CONFIG` environment variable) chooses the settings file, and `--exiftool`, `--ffmpeg`, `--ffprobe` and `--ollama-url` override one program for one run.
+`--config FILE` (or the `VARIOUS_TOOLS_CONFIG` environment variable) chooses the settings file, and `--exiftool`, `--ffmpeg`, `--ffprobe` and `--ollama-url` override one program for one run. The four program options are also accepted after the command, on tool commands and on `doctor`.
 
 Exit codes: `0` done, `1` failure, refusal, partial apply or a declined question, `2` usage or validation error (bad flag, bad value, unknown name), `130` cancelled with `Ctrl+C`.
 
@@ -139,26 +167,44 @@ Every documented use of the original scripts has a command. All of them preview 
 | Original script and usage | New command |
 |---|---|
 | `empty_folder_deleter.py` (Tkinter: pick a folder, Start, review, confirm) | `various-tools empty_folders scan FOLDER`, then `various-tools empty_folders apply FOLDER`. Junk files and exclusions: `--treat-as-empty`, `--exclude-globs`; age: `--min-age-days`; permanent delete: `--delete-mode permanent` (also needs the setting). |
-| `app.py` (Streamlit resolution reducer: preset, percentage or custom box, JPEG quality, video CRF, dry run, new folder or overwrite) | `various-tools media_resize scan FOLDER` then `apply`. Size presets: `--mode fit_box --size 720p` (`360p`, `480p`, `720p`, `1080p`, `2k`, `4k`); custom box: `--size custom --max-width W --max-height H`; percentage: `--mode percent --percent 50`; shorter side: `--mode shorter_side --target-px 1080`; JPEG quality: `--jpeg-quality 85`; video: `--media videos` or `both`, `--video-quality high\|medium\|low`, `--video-crf N`; output: `--output new_folder --output-folder-name resized` or `--output suffix --suffix-tag _resized`. The dry-run checkbox is `scan`. |
+| `app.py` (Streamlit resolution reducer: preset, percentage or custom box, JPEG quality, video CRF, dry run, new folder or overwrite) | `various-tools media_resize scan FOLDER` then `apply`. Size presets: `--mode fit_box --size 720p` (`360p`, `480p`, `720p`, `1080p`, `2k`, `4k`); custom box: `--size custom --max-width W --max-height H`; percentage: `--mode percent --percent 50`; shorter side: `--mode shorter_side --target-px 1080`; JPEG quality: `--jpeg-quality 85`; video: `--media videos` or `both`, `--video-quality high\|medium\|low`, `--video-crf N`; output: `--output new_folder --output-folder-name resized` `--output suffix --suffix-tag _resized`, or replace the originals with `--output overwrite --allow-overwrite` (the originals go to the Recycle Bin). The dry-run checkbox is `scan`. |
 | `python-find_duplicates.py` (image duplicates; `--move`) | `various-tools duplicates scan FOLDER... --media images` (the input-list file becomes the folder arguments), then `various-tools duplicates apply FOLDER... --media images` for `--move`. Exact copies only: `--exact-only`. Trash instead of the `duplicate` folder: `--action trash`. Thresholds: `--phash-max`, `--dhash-max`, `--aspect-tol`, `--pixel-block-max`, `--burst-phash-max`. |
 | `python-find_duplicates.py --verify --model M` (Ollama check of borderline pairs) | `various-tools duplicates scan FOLDER... --media images --verify-with-ollama --ollama-model M`; Ollama address: `--ollama-url URL` (before the command) or `config set ollama_url URL`. |
 | `python-find_duplicates.py --explain A B` | `various-tools duplicates explain A B` (the same checks table and a verdict; `--phash-max`, `--dhash-max`, `--aspect-tol`, `--pixel-block-max` to experiment). |
 | `find_duplicate_videos.py` (video duplicates; `--move`) | `various-tools duplicates scan FOLDER... --media videos`, then `apply` for `--move`. Thresholds: `--dur-tol-s`, `--dur-tol-pct`, `--frame-mean-max`, `--frame-worst-max`, `--sample-at 0.1,0.5,0.9`. Needs ffmpeg and ffprobe (`various-tools doctor`). |
-| `python-extract_file_metadata-8.py` (organize by date; `--move`, `--dry-run-move`, `--recursive`, `--workers`, `--errors-only`, `--skip-processed`) | `various-tools organize_by_date scan SOURCE...` for `--dry-run-move`, `apply` for `--move`. `--recursive`, `--workers N`, `--errors-only`, `--skip-processed` keep their names. Destination: `--dest-root`; folder layout: `--folder-template "{year}/{year} - {month:02d}"`; date sources: `--date-priority`. Resize and CR3 conversion are now `media_resize` (`--convert-raw-to-jpeg`). Cloud-only OneDrive files are always skipped, so `--y`, `--N`, `--download-wait-seconds` and `--keep-pinned` have no equivalent. |
+| `python-extract_file_metadata-8.py` (organize by date; `--move`, `--dry-run-move`, `--recursive`, `--workers`, `--errors-only`, `--skip-processed`) | `various-tools organize_by_date scan SOURCE...` for `--dry-run-move`, `apply` for `--move`. `--recursive`, `--workers N`, `--errors-only`, `--skip-processed` keep their names. Destination: `--dest-root`; folder layout: `--folder-template "{year}/{year} - {month:02d}"`; date sources: `--date-priority`. Resizing while organizing: `--also-resize` with `--resize-mode`, `--resize-px`, `--resize-jpeg-quality`. CR3 conversion and removal of the CR3 originals: `media_resize` (`--convert-raw-to-jpeg`, `--remove-raw-originals`). Cloud-only OneDrive files: `--cloud-only skip\|ask\|download` (default `skip`; replaces `--y` and `--N`), with `--download-wait-seconds` and `--keep-pinned`. The Excel master log is the media catalog: `organize_by_date catalog-export PATH` writes it as `.xlsx` or `.csv`, and `organize_by_date catalog-import PATH` imports the old `Photo_Metadata_Master.xlsx` once. |
 | `rename_snapchat.py` | `various-tools rename scan FOLDER --opt-preset snapchat`, then `apply`. Other built-in presets: `whatsapp`, `screenshot`. Your own pattern: `--match "IMG_*.jpg" --template "Trip-{date:%Y%m%d}-{counter:03}{ext}"`. Name clashes are listed and never overwritten. |
-| `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`. |
+| `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`, `--copy-to-clipboard`. |
 | `python-v1-Extract_Project_Structure.py` (list project files with filters) | `various-tools project_export scan FOLDER --mode tree --exts .py,.md --exclude-globs .git,.venv`, then `apply` to write the listing. |
 
 ## Desktop app
 
 Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. From a source checkout run `uv run various-tools-gui` (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
 
-- **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Pick or save a **preset**, drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there.
-- **Duplicates:** *Compare group* shows a group side by side (thumbnail, resolution, size, date, reason); you can choose which copy to keep, and *Explain match* shows every check. Cloud-only OneDrive files are never opened for a preview.
+- **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Pick or save a **preset**, drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there. Closing the window during a run asks first and waits for the run to stop.
+- **Plan views:** Empty Folder Deleter opens its plan as a **folder tree** (the folders under each chosen folder, with every action at its path). You can switch to the grouped view.
+- **Disk Usage:** a **Size map** tab next to the plan shows folder sizes as a treemap. *Tick files in this folder* checks the files of the folder you are looking at. `tree_depth` and `tree_min_share_pct` set how deep and how fine the map is.
+- **Cloud-only files:** when a scan skipped OneDrive files that are only in the cloud, the page offers **Download these N files...**. Nothing is downloaded until you click it and confirm.
+- **Organize by date:** two extra buttons, *Export catalog...* (the media catalog as Excel or CSV) and *Import old master log...* (a one-time import of `Photo_Metadata_Master.xlsx`).
+- **Sort by type:** the rules are edited as a table.
+- **Duplicates:** the Ollama model field offers a live list of the models on your Ollama server. *Compare group* shows a group side by side (thumbnail, resolution, size, date, reason); you can choose which copy to keep, and *Explain match* shows every check. Cloud-only OneDrive files are never opened for a preview.
 - **Rename:** the table is a live preview of old name to new name while you edit the template.
 - **History:** every applied run with its actions, **Undo**, and **Export**.
 - **Settings:** every setting with its explanation, the theme (light, dark or follow Windows), and **External programs** (ffmpeg, ffprobe, ExifTool, Ollama: status, path, version, Browse, Test, Auto-detect, Reset and the `winget install` command). A tool page also offers *Locate...* when a feature needs a missing program.
 - **Explorer menu (optional, off by default):** turn on *Folder right-click menu* in Settings to add "Open with Various Tools > Find empty folders / Find duplicates" for your Windows account (no admin). It runs `"Various Tools.exe" --tool ID --folder PATH`. The installer can add the same menu, and uninstalling removes it.
+
+### Tool options added since the first release
+
+- `organize_by_date`: `cloud_only` (`skip`, `ask` or `download`; locked, default `skip`; a download happens at Apply, never during a scan), `download_wait_seconds`, `keep_pinned`, and `also_resize` with its size options (`resize_mode`, `resize_px`, `resize_jpeg_quality`).
+- `media_resize`: `output = overwrite`, which also needs `allow_overwrite`, and `remove_raw_originals`. Both send originals to the Recycle Bin and are journaled; both are off by default.
+- `disk_usage`: `tree_depth` and `tree_min_share_pct` for the size map.
+- `project_export`: `copy_to_clipboard`.
+
+Each tool's page in [docs/tools/](docs/tools/) lists every option.
+
+### Scheduled runs
+
+`various-tools schedule add|list|remove|run` runs a saved preset through Windows Task Scheduler. A scheduled run is the same as `TOOL apply --preset NAME --yes`, so it is journaled and can be undone. See [docs/scheduled-runs.md](docs/scheduled-runs.md).
 
 ### Reports
 
@@ -171,9 +217,11 @@ various-tools export report.csv --run 12                           # a run from 
 various-tools export report.html --plan plan.json
 ```
 
+`--export` and `export` never replace an existing file unless you add `--force`.
+
 ## The original Empty Folder Deleter
 
-The first app in this repository was a small Tkinter program, `empty_folder_deleter.py`, that found and deleted empty folders. It is replaced by the `empty_folders` tool, which adds junk-file rules, exclusions, a minimum age, the Recycle Bin by default, History and Undo; the table in [Old script to new command](#old-script-to-new-command) maps its use. The file stays in the repository for the parity tests until the legacy code is removed, and its old PyInstaller spec and NSIS installer script are kept under [legacy/](legacy/) for reference. The old per-machine installer and its "start on Windows startup" option are gone.
+The first app in this repository was a small Tkinter program, `empty_folder_deleter.py`, that found and deleted empty folders. It is replaced by the `empty_folders` tool, which adds junk-file rules, exclusions, a minimum age, the Recycle Bin by default, History and Undo; the table in [Old script to new command](#old-script-to-new-command) maps its use. The original scripts are no longer in the repository root: the copies the parity tests run are in `tests/fixtures/legacy_reference/` and are used only by those tests, and the `legacy/` folder is deleted. The old per-machine installer and its "start on Windows startup" option are gone.
 
 ## Contributing
 
@@ -185,7 +233,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Thanks to all contribution provided by Claude 3.5 Sonnet on helping with error resolution to improve this tool and help convert this app to an actual windows installer.
 - The app icon is drawn in code (`src/various_tools/gui/icon.py`).
 
 ## Support

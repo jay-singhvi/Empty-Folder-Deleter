@@ -11,20 +11,20 @@ and a CLI (Typer + Rich). Each tool (duplicate finder, folder cleaner, media res
 is a plugin that declares its own options, so the GUI and the CLI are generated from those
 declarations.
 
-This repository still contains the original **Empty Folder Deleter** Tkinter app
-(`empty_folder_deleter.py`). It is being rewritten as the `empty_folders` tool. Legacy scripts
-live in `legacy/` and are read-only references.
+This repository started as the **Empty Folder Deleter** Tkinter app, which is now the
+`empty_folders` tool. The original scripts are kept unchanged under
+`tests/fixtures/legacy_reference/` because the parity tests run them; they are read-only.
 
 ## Current state
 
-Check `CHANGELOG.md` for the phase in progress. Commands below marked *(Phase 1+)* do not exist
-until Phase 1 is merged.
+All plan phases (0 to 8) are implemented on `main`. `CHANGELOG.md` records what each phase did,
+the decisions taken and what is left for the owner.
 
 ## Stack (decided, do not revisit)
 
 | Concern | Choice |
 |---|---|
-| Python | Newest 3.x with wheels for every dependency. Pinned in `.python-version` in Phase 1 (3.13 is the likely pin). |
+| Python | Newest 3.x with wheels for every dependency. Pinned in `.python-version` (3.14). |
 | Env and packaging | uv, `pyproject.toml` (hatchling), `src/` layout, `uv.lock` |
 | GUI | PySide6 (Qt 6) |
 | CLI | Typer + Rich |
@@ -42,18 +42,18 @@ until Phase 1 is merged.
 pyproject.toml  uv.lock  .python-version
 README.md  CHANGELOG.md  LICENSE  AGENTS.md  CLAUDE.md (copy of this file)
 docs/MODERNIZATION_PLAN.md   docs/tools/<tool-id>.md
-legacy/                      read-only copies of the original scripts (deleted in Phase 8)
 src/various_tools/
   core/                      fs, onedrive, hashing, media/{imaging,exif,ffmpeg}, journal, plan,
                              context, deps, settings, cache
   tools/                     base.py (Tool protocol and registry), one package per tool
   cli/main.py                Typer app
   gui/                       app.py, main_window.py, widgets/, workers.py
-tests/                       core/, tools/<tool>/, gui/, fixtures/ (generated only)
+tests/                       core/, tools/<tool>/, cli/, gui/, fixtures/legacy_reference/ (the
+                             original scripts, read-only, run by the parity tests)
 packaging/                   spec, installer script, icon
 ```
 
-## Commands *(Phase 1+)*
+## Commands
 
 ```
 uv sync                       # install everything, including dev and media groups
@@ -96,7 +96,8 @@ Run all of the above before you say a change is done, and show the output.
 - **`core/` has no UI code.** No Qt imports and no `print` calls. Tools have no `print`, `input`
   or Qt either. Use the logger and the progress reporter on `RunContext`.
 - **`scan()` never changes the disk.** Caches are the only exception.
-- **`legacy/` is read-only.** Fix behavior in `src/`, not in the legacy copies.
+- **`tests/fixtures/legacy_reference/` is read-only.** Fix behavior in `src/`, not in the legacy
+  copies.
 - **No binaries in git.** Installers and `*.exe` are published through GitHub Releases. `dist/`,
   `build/` and `*.exe` are git-ignored.
 - **The version lives in one place:** `pyproject.toml`, read at runtime through package metadata.

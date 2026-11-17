@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 
-from various_tools.core.presets import PresetStore
 from various_tools.core.settings import Settings, default_settings_path
 
 EXIT_OK = 0
@@ -106,9 +105,6 @@ class CliState:
         if self.ollama_url:
             return saved.model_copy(update={"ollama_url": self.ollama_url})
         return saved
-
-    def presets(self) -> PresetStore:
-        return PresetStore.for_settings(self.saved_settings())
 
     def with_programs(
         self,

@@ -53,7 +53,7 @@ This writes `dist\Various-Tools-<version>-setup.exe`. The installer:
 - adds a Start menu shortcut, and optionally a desktop shortcut and the Explorer "Open with
   Various Tools" folder menu (the same menu as Settings > Desktop app > shell integration);
 - has no "start with Windows" option;
-- on uninstall, removes the Explorer menu and asks whether to keep settings, presets, history and
+- on uninstall, removes the Explorer menu and asks whether to keep settings, history and
   caches (`%LOCALAPPDATA%\Various Tools`). A silent uninstall keeps them.
 
 ## Release

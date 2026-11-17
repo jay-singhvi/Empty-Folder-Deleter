@@ -32,7 +32,6 @@ from various_tools.gui.tool_page import (
     COMPARE_TOOLS,
     LIVE_PREVIEW_DELAY_MS,
     LIVE_PREVIEW_TOOLS,
-    NO_PRESET,
     ToolPage,
     apply_summary,
     missing_programs,
@@ -85,8 +84,6 @@ def test_every_tool_page_builds(window: MainWindow, open_tool: OpenTool, tool_id
     assert page.undo_button.isHidden()
     assert page.compare_button.isHidden() is (tool_id not in COMPARE_TOOLS)
     assert page.table.totals_text() == "No plan"
-    assert page.preset_combo.currentText() == NO_PRESET
-    assert not page.delete_preset_button.isEnabled()
     assert page.plan is None and page.worker is None and not page.busy
     stop_live_preview(page)
 
@@ -690,83 +687,6 @@ def test_a_failing_scan_is_reported_not_raised(
     assert "Failed" in page.status_label.text()
     assert page.plan is None
     assert page.scan_button.isEnabled()
-
-
-# ----- presets --------------------------------------------------------------------------------
-
-
-def test_presets_save_load_and_delete_through_the_page(
-    open_tool: OpenTool, dialogs: Dialogs, gui_state: AppState, tmp_path: Path
-) -> None:
-    page = open_tool("empty_folders", str(tmp_path))
-    page.form.update_values({"min_age_days": 3, "skip_hidden_system": False})
-    dialogs.text = "weekly"
-    assert page.save_preset() is True
-    assert dialogs.asked[0][0] == "Save preset"
-    assert page.preset_combo.currentText() == "weekly"
-    assert gui_state.presets().names("empty_folders") == ["weekly"]
-    assert (gui_state.settings.resolved_data_folder() / "presets.json").is_file()
-    assert page.delete_preset_button.isEnabled()
-
-    page.form.update_values({"min_age_days": 9})
-    assert page.load_preset("weekly") is True
-    raw = page.form.raw_values()
-    assert raw["min_age_days"] == 3 and raw["skip_hidden_system"] is False
-    assert [str(r) for r in raw["roots"]] == [str(tmp_path)]  # folders are not part of a preset
-
-    assert page.load_preset(None) is True  # back to the defaults, folders kept
-    raw = page.form.raw_values()
-    assert raw["min_age_days"] == 0 and raw["skip_hidden_system"] is True
-    assert [str(r) for r in raw["roots"]] == [str(tmp_path)]
-    assert page.preset_combo.currentText() == NO_PRESET
-
-    page.reload_presets(select="weekly")
-    page._preset_chosen(page.preset_combo.currentIndex())  # pyright: ignore[reportPrivateUsage]
-    assert page.form.raw_values()["min_age_days"] == 3
-
-    dialogs.default = False
-    assert page.delete_preset() is False  # declined
-    assert gui_state.presets().names("empty_folders") == ["weekly"]
-    dialogs.default = True
-    assert page.delete_preset() is True
-    assert gui_state.presets().names("empty_folders") == []
-    assert page.preset_combo.currentText() == NO_PRESET
-    assert not page.delete_preset_button.isEnabled()
-    assert page.delete_preset() is False  # nothing selected
-
-
-def test_preset_edge_cases(open_tool: OpenTool, dialogs: Dialogs, gui_state: AppState) -> None:
-    page = open_tool("project_export")
-    assert page.save_preset() is False  # the options are not valid: no root
-    assert dialogs.asked == []
-    empty = open_tool("empty_folders")
-    dialogs.text = None
-    assert empty.save_preset() is False  # the dialog was cancelled
-    dialogs.text = "   "
-    assert empty.save_preset() is False  # a blank name
-    assert gui_state.presets().names("empty_folders") == []
-    assert empty.load_preset("missing") is False
-    assert empty.status_label.text()
-    assert empty.save_preset("direct") is True  # a name given by code needs no dialog
-    assert gui_state.presets().names("empty_folders") == ["direct"]
-
-
-def test_presets_are_shared_with_new_pages_and_stay_per_tool(
-    make_window: Callable[..., MainWindow], gui_state: AppState, dialogs: Dialogs
-) -> None:
-    first = make_window()
-    page = first.open_tool("empty_folders")
-    assert page is not None
-    dialogs.attach(page)
-    dialogs.text = "mine"
-    assert page.save_preset() is True
-    second = make_window()
-    again = second.open_tool("empty_folders")
-    other = second.open_tool("duplicates")
-    assert again is not None and other is not None
-    items = [again.preset_combo.itemText(i) for i in range(again.preset_combo.count())]
-    assert items == [NO_PRESET, "mine"]
-    assert other.preset_combo.count() == 1
 
 
 # ----- remembered folders ---------------------------------------------------------------------

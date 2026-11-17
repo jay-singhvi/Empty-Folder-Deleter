@@ -1,4 +1,4 @@
-"""One page per tool: options form, presets, Scan, the plan table, Apply, Export and Undo.
+"""One page per tool: options form, Scan, the plan table, Apply, Export and Undo.
 
 Everything here is generic. The page is built from the tool's options model through
 :class:`~various_tools.gui.widgets.schema_form.SchemaForm`. The only per-tool touches are the
@@ -40,11 +40,9 @@ from pydantic import ValidationError
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
@@ -84,14 +82,12 @@ from various_tools.tools.base import Tool, ToolOptions
 
 log = logging.getLogger(__name__)
 
-NO_PRESET = "(defaults)"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
 COMPARE_TOOLS = frozenset({"duplicates"})
 LIVE_PREVIEW_DELAY_MS = 700
 
 Confirm = Callable[[str, str], bool]
 Inform = Callable[[str, str], None]
-AskText = Callable[[str, str, str], str | None]
 ChooseExport = Callable[[], tuple[str, str] | None]
 ChooseExtraPath = Callable[[Any], str | None]  # a tool extra -> the chosen file, or None
 
@@ -166,14 +162,6 @@ def _default_inform(parent: QWidget) -> Inform:
     return inform
 
 
-def _default_ask_text(parent: QWidget) -> AskText:
-    def ask(title: str, label: str, text: str) -> str | None:
-        value, ok = QInputDialog.getText(parent, title, label, text=text)
-        return value if ok else None
-
-    return ask
-
-
 def _default_choose_extra_path(parent: QWidget) -> ChooseExtraPath:
     def choose(extra: Any) -> str | None:
         title = str(extra.label)
@@ -224,24 +212,13 @@ class ToolPage(QWidget):
         # Hooks that tests replace so no modal dialog blocks.
         self.confirm: Confirm = _default_confirm(self)
         self.inform: Inform = _default_inform(self)
-        self.ask_text: AskText = _default_ask_text(self)
         self.choose_export: ChooseExport = _default_choose_export(self)
         self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
 
-        # ----- header and presets ------------------------------------------------------
+        # ----- header ------------------------------------------------------------------
         title = QLabel(f"<h2>{tool.name}</h2>")
         description = QLabel(tool.description)
         description.setWordWrap(True)
-        self.preset_combo = QComboBox()
-        self.preset_combo.setMinimumWidth(200)
-        self.preset_combo.setToolTip("Load a saved set of options for this tool.")
-        self.save_preset_button = QPushButton("Save preset…")
-        self.delete_preset_button = QPushButton("Delete preset")
-        presets_row = QHBoxLayout()
-        presets_row.addWidget(QLabel("Preset:"))
-        presets_row.addWidget(self.preset_combo, 1)
-        presets_row.addWidget(self.save_preset_button)
-        presets_row.addWidget(self.delete_preset_button)
 
         # ----- options form ------------------------------------------------------------
         self.form = SchemaForm(
@@ -359,7 +336,6 @@ class ToolPage(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.addWidget(title)
         top_layout.addWidget(description)
-        top_layout.addLayout(presets_row)
         top_layout.addWidget(form_scroll, 1)
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
@@ -397,90 +373,19 @@ class ToolPage(QWidget):
         self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
         self.select_none_button.clicked.connect(lambda _c=False: self.select_all(False))
         self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
-        self.save_preset_button.clicked.connect(lambda _c=False: self.save_preset())
-        self.delete_preset_button.clicked.connect(lambda _c=False: self.delete_preset())
-        self.preset_combo.activated.connect(self._preset_chosen)
         self.form.changed.connect(self._form_changed)
         self.table.selectionChanged.connect(self._update_buttons)
         self.table.currentActionChanged.connect(lambda _a: self._update_buttons())
         self.table.filterChanged.connect(self._label_select_buttons)
 
-        self.reload_presets()
         self._update_buttons()
 
-    # ----- options and presets ----------------------------------------------------------------
+    # ----- options ----------------------------------------------------------------------------
 
     def _initial_values(self) -> dict[str, Any]:
         remembered = self.state.last_folders(self.tool.id)
         known = set(self.tool.Options.model_fields)
         return {name: value for name, value in remembered.items() if name in known}
-
-    def reload_presets(self, select: str | None = None) -> None:
-        current = select if select is not None else self.preset_combo.currentText()
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.clear()
-        self.preset_combo.addItem(NO_PRESET)
-        self.preset_combo.addItems(self.state.presets().names(self.tool.id))
-        index = self.preset_combo.findText(current)
-        self.preset_combo.setCurrentIndex(max(index, 0))
-        self.preset_combo.blockSignals(False)
-        self._update_buttons()
-
-    def _preset_chosen(self, index: int) -> None:
-        name = self.preset_combo.itemText(index)
-        self.load_preset(None if name == NO_PRESET else name)
-
-    def load_preset(self, name: str | None) -> bool:
-        """Fill the form from a preset (None: the defaults). Folder fields keep their values."""
-        folders = {
-            k: v for k, v in self.form.raw_values().items() if k in self.form.folder_fields()
-        }
-        try:
-            values = self.state.presets().get(self.tool.id, name) if name is not None else {}
-        except KeyError as exc:
-            self._set_status(str(exc), error=True)
-            return False
-        merged = {**folders, **values}
-        self.form.set_values(merged)
-        self.reload_presets(select=name or NO_PRESET)
-        self._set_status(f"Loaded preset {name!r}." if name else "Options reset to the defaults.")
-        return True
-
-    def save_preset(self, name: str | None = None) -> bool:
-        """Save the current options under a name (asks for one when not given)."""
-        options = self._build_options()
-        if options is None:
-            return False
-        if name is None:
-            current = self.preset_combo.currentText()
-            name = self.ask_text(
-                "Save preset", "Preset name:", "" if current == NO_PRESET else current
-            )
-        if not name or not name.strip():
-            return False
-        try:
-            self.state.presets().save(self.tool.id, name, options)
-        except (OSError, ValueError) as exc:
-            self.inform("Save preset", f"Could not save the preset: {exc}")
-            return False
-        self.reload_presets(select=name.strip())
-        self._set_status(f"Saved preset {name.strip()!r}.")
-        return True
-
-    def delete_preset(self) -> bool:
-        name = self.preset_combo.currentText()
-        if name == NO_PRESET:
-            return False
-        if not self.confirm("Delete preset", f"Delete the preset {name!r}?"):
-            return False
-        try:
-            self.state.presets().delete(self.tool.id, name)
-        except (OSError, ValueError) as exc:
-            self.inform("Delete preset", f"Could not delete the preset: {exc}")
-            return False
-        self.reload_presets(select=NO_PRESET)
-        self._set_status(f"Deleted preset {name!r}.")
-        return True
 
     def set_folder(self, path: str) -> bool:
         """Put a folder into the first folder field (used by ``--folder`` and the shell menu)."""
@@ -1205,8 +1110,3 @@ class ToolPage(QWidget):
         self.undo_button.setVisible(can_undo)
         self.undo_button.setEnabled(not busy and can_undo)
         self.form.setEnabled(not busy or (self._live and not self._closing))
-        self.preset_combo.setEnabled(not busy)
-        self.save_preset_button.setEnabled(not busy)
-        self.delete_preset_button.setEnabled(
-            not busy and self.preset_combo.currentText() != NO_PRESET
-        )

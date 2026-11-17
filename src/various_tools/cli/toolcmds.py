@@ -1,20 +1,20 @@
 """Tool sub-commands, generated from each tool's options model (plan §3.3 and Phase 4).
 
-For every discovered tool this builds ``<tool> scan``, ``<tool> apply``, one
-``<tool> <extra-id> PATH`` per item of the tool's optional ``extras`` and ``presets save <tool>``.
+For every discovered tool this builds ``<tool> scan``, ``<tool> apply`` and one
+``<tool> <extra-id> PATH`` per item of the tool's optional ``extras``.
 The flags come from :func:`various_tools.core.schema.describe`, so a new tool or a new option
 field needs no CLI code. Hand-written flags exist only for the shared
-``--preset``, ``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--select-all``, ``--export``,
+``--json``, ``--save-plan``, ``--plan``, ``--yes``, ``--select-all``, ``--export``,
 ``--export-format``, ``--force``, ``--allow-locked`` and the one-off program flags
 (``--exiftool``, ``--ffmpeg``, ``--ffprobe``, ``--ollama-url``; plan §3.5).
 
 How values travel: every generated flag defaults to ``None`` meaning "not given". Only the flags
-the user typed are collected as overrides, and they are applied on top of the preset (if any) and
-validated by the tool's own options model. Flag values are text, converted by ``parse_value``.
+the user typed are collected as overrides, and they are validated by the tool's own options
+model. Flag values are text, converted by ``parse_value``.
 
 🔒 Locked options (tuned thresholds and safety values): when the final options differ from a
-locked default, whether typed or loaded from a preset, the command lists them and asks. ``--yes``
-never answers that question; only ``--allow-locked`` does. With nobody to answer, it refuses.
+locked default, the command lists them and asks. ``--yes`` never answers that question; only
+``--allow-locked`` does. With nobody to answer, it refuses.
 """
 
 from __future__ import annotations
@@ -59,6 +59,8 @@ log = logging.getLogger(__name__)
 # Flag names the CLI itself uses. A tool option with one of these names becomes ``--opt-<name>``.
 RESERVED_FLAGS = frozenset(
     {
+        # The removed saved-preset flag. Still reserved, so an old '--preset NAME' is an error
+        # instead of silently meaning a tool option called 'preset' (rename's is --opt-preset).
         "preset",
         "json",
         "save-plan",
@@ -69,7 +71,6 @@ RESERVED_FLAGS = frozenset(
         "export-format",
         "force",
         "allow-locked",
-        "scheduled",
         "config",
         "exiftool",
         "ffmpeg",
@@ -81,8 +82,6 @@ RESERVED_FLAGS = frozenset(
 # Kinds that change files inside the plan's roots. A plan with any of them must name its roots.
 ROOTED_KINDS = frozenset({ActionKind.MOVE, ActionKind.RENAME, ActionKind.TRASH, ActionKind.DELETE})
 FOLDER_WIDGETS = ("folders", "folder")
-# The hidden flag 'schedule add' puts on every task's command line (see ``schedule_cmd``).
-SCHEDULED_FLAG = "--scheduled"
 _P = inspect.Parameter
 
 
@@ -277,21 +276,13 @@ def validation_messages(exc: ValidationError, flags: list[Flag], folders: FieldS
 
 def build_options(
     tool: Tool,
-    state: CliState,
-    preset: str | None,
     overrides: dict[str, Any],
     flags: list[Flag],
     folders: FieldSpec | None,
 ) -> ToolOptions:
-    """Preset values, then the explicit flags, validated by the tool's options model."""
+    """The explicit flags, validated by the tool's options model."""
     try:
-        if preset is None:
-            return tool.Options.model_validate(overrides)
-        return state.presets().build_options(tool.Options, tool.id, preset, overrides)
-    except KeyError:
-        known = state.presets().names(tool.id)
-        listing = f" Saved presets: {', '.join(known)}." if known else " No presets are saved."
-        usage_error(f"No preset {preset!r} for {tool.id}.{listing}")
+        return tool.Options.model_validate(overrides)
     except ValidationError as exc:
         usage_error(validation_messages(exc, flags, folders))
 
@@ -338,59 +329,6 @@ def option_values(opts: ToolOptions, specs: list[FieldSpec]) -> dict[str, Any]:
     return {spec.name: getattr(opts, spec.name) for spec in specs if hasattr(opts, spec.name)}
 
 
-def originals_changes(
-    specs: list[FieldSpec], values: Mapping[str, Any]
-) -> list[tuple[FieldSpec, Any]]:
-    """The ``replaces_originals`` fields whose value differs from the default: options that
-    replace, remove or download the user's own files."""
-    return [
-        (spec, values[spec.name])
-        for spec in specs
-        if spec.replaces_originals
-        and spec.name in values
-        and not _same_value(values[spec.name], spec.default)
-    ]
-
-
-def _changes_text(changes: list[tuple[FieldSpec, Any]], word: str) -> str:
-    return "\n".join(
-        f"  {flag_for(spec.name)} = {format_value(value)} ({word}: {format_value(spec.default)})"
-        for spec, value in changes
-    )
-
-
-def unattended_refusal(opts: ToolOptions, specs: list[FieldSpec]) -> str | None:
-    """Why these options must never run unattended (a scheduled run), or None.
-
-    Refused, in this order: a permanent ``delete_mode``; a 🔒 locked option changed from its
-    tuned default; an option marked ``replaces_originals`` changed from its default (an
-    in-place output, recycling originals, downloading cloud-only files). The text completes the
-    sentence "the preset P ...".
-    """
-    if getattr(opts, "delete_mode", None) == "permanent":
-        return (
-            "deletes permanently (delete_mode = permanent). Scheduled runs only ever use the "
-            "Recycle Bin. Save a preset with delete_mode trash instead."
-        )
-    values = option_values(opts, specs)
-    locked = locked_changes(specs, values)
-    if locked:
-        return (
-            "changes 🔒 locked options away from their tuned defaults, and a scheduled run "
-            "cannot ask you about that. Save a preset without them:\n"
-            + _changes_text(locked, "tuned default")
-        )
-    originals = originals_changes(specs, values)
-    if originals:
-        return (
-            "replaces, removes or downloads original files, and a scheduled run would do that "
-            "again on every run without asking (for example shrinking the same pictures again "
-            "and recycling the previous version each time, until the true original is gone from "
-            "the Recycle Bin). Save a preset without them:\n" + _changes_text(originals, "default")
-        )
-    return None
-
-
 def confirm_locked(changes: list[tuple[FieldSpec, Any]], *, allow: bool) -> None:
     """List changed locked values and ask before going on. ``--yes`` never answers this.
 
@@ -416,7 +354,7 @@ def confirm_locked(changes: list[tuple[FieldSpec, Any]], *, allow: bool) -> None
             "interactive. Add --allow-locked if you really mean them (--yes is not enough)."
         )
     if not accepted:
-        note("Nothing was changed. Drop those flags (or the preset) to use the tuned defaults.")
+        note("Nothing was changed. Drop those flags to use the tuned defaults.")
         raise typer.Exit(EXIT_FAILED)
 
 
@@ -456,16 +394,6 @@ def _paths_param(tool: Tool, folders: FieldSpec | None) -> list[inspect.Paramete
         ),
     ]
     return [_param("paths", annotation)]
-
-
-def _preset_param(extra: str) -> inspect.Parameter:
-    return _param(
-        "preset",
-        Annotated[
-            str | None,
-            typer.Option("--preset", metavar="NAME", help=f"Start from a saved preset. {extra}"),
-        ],
-    )
 
 
 def _allow_locked_param() -> inspect.Parameter:
@@ -526,7 +454,7 @@ def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> C
         state = state_with_programs(get_state(kw["ctx"]), kw)
         check_export_target(kw["export"], kw["export_format"], force=kw["force"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
-        opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
+        opts = build_options(tool, overrides, flags, folders)
         confirm_locked(locked_changes(specs, option_values(opts, specs)), allow=kw["allow_locked"])
         plan = run_job(
             state, lambda ctx: tool.scan(opts, ctx), label="Scanning", with_journal=False
@@ -549,7 +477,6 @@ def _scan_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> C
     params = [
         _required("ctx", typer.Context),
         *_paths_param(tool, folders),
-        _preset_param("Flags you type override the preset."),
         _param(
             "as_json",
             Annotated[
@@ -632,30 +559,18 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
 
     def apply(**kw: Any) -> None:
         state = state_with_programs(get_state(kw["ctx"]), kw)
-        scheduled: bool = kw["scheduled"]
-        yes: bool = kw["yes"] or scheduled  # a scheduled run has nobody to answer
+        yes: bool = kw["yes"]
         check_export_target(kw["export"], kw["export_format"], force=kw["force"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
-        if scheduled and (kw["plan"] or overrides or not kw["preset"] or kw["select_all"]):
-            usage_error(
-                "--scheduled runs exactly one saved --preset, with no --plan, option flags, "
-                "PATHS or --select-all. It is added by 'schedule add'."
-            )
         if kw["plan"]:
-            if overrides or kw["preset"]:
+            if overrides:
                 usage_error(
-                    "--plan cannot be combined with option flags, PATHS or --preset. "
+                    "--plan cannot be combined with option flags or PATHS. "
                     "Use the plan as saved, or drop --plan and give options."
                 )
             plan = _read_plan(kw["plan"], tool)
         else:
-            opts = build_options(tool, state, kw["preset"], overrides, flags, folders)
-            if scheduled:
-                # The preset (or the settings) may have changed since 'schedule add' checked it,
-                # so the same rules run again now, before anything is scanned or changed.
-                refusal = unattended_refusal(opts, specs)
-                if refusal is not None:
-                    fail(f"refusing this scheduled run: the preset {kw['preset']!r} {refusal}")
+            opts = build_options(tool, overrides, flags, folders)
             confirm_locked(
                 locked_changes(specs, option_values(opts, specs)), allow=kw["allow_locked"]
             )
@@ -666,11 +581,6 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         if kw["select_all"]:
             plan.select_all()
         selected = plan.selected_actions()
-        if scheduled and permanent_delete_requested(plan):
-            fail(
-                "refusing this scheduled run: the plan deletes permanently, and a scheduled run "
-                "only ever uses the Recycle Bin. Nothing was changed."
-            )
         console = out()
         if not selected:
             print_plan(console, plan, show_table=False)
@@ -731,7 +641,6 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
     params = [
         _required("ctx", typer.Context),
         *_paths_param(tool, folders),
-        _preset_param("Flags you type override the preset."),
         _param(
             "plan",
             Annotated[
@@ -766,79 +675,10 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         ),
         *_export_params(),
         _allow_locked_param(),
-        _param(
-            "scheduled",
-            Annotated[
-                bool,
-                typer.Option(
-                    SCHEDULED_FLAG,
-                    hidden=True,
-                    help=(
-                        "Set by 'schedule add' instead of --yes: answers the question, and "
-                        "refuses anything a scheduled run must not do."
-                    ),
-                ),
-            ],
-            False,
-        ),
         *program_params(),
         *[_param(f.param, _flag_annotation(f)) for f in flags],
     ]
     return _install(apply, params)
-
-
-def _save_preset_command(
-    tool: Tool, flags: list[Flag], folders: FieldSpec | None
-) -> Callable[..., None]:
-    specs = [f.spec for f in flags]
-
-    def save(**kw: Any) -> None:
-        state = get_state(kw["ctx"])
-        name: str = kw["name"].strip()
-        if not name:
-            usage_error("A preset needs a name.")
-        overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
-        store = state.presets()
-        base: dict[str, Any] = {}
-        if kw["preset"]:
-            try:
-                base = store.get(tool.id, kw["preset"])
-            except KeyError:
-                usage_error(f"No preset {kw['preset']!r} for {tool.id} to start from.")
-        values = {**base, **overrides}
-        incomplete = False
-        try:
-            stored: Any = tool.Options.model_validate(values)
-        except ValidationError as exc:
-            if all(e["type"] == "missing" for e in exc.errors()):
-                # A required option (for example a folder) can be given when the preset is used.
-                stored, incomplete = values, True
-            else:
-                usage_error(validation_messages(exc, flags, folders))
-        checked = values if incomplete else option_values(stored, specs)
-        confirm_locked(locked_changes(specs, checked), allow=kw["allow_locked"])
-        store.save(tool.id, name, stored)
-        console = out()
-        console.print(
-            f"Saved preset {escape(repr(name))} for {tool.id} in {escape(str(store.path))}"
-        )
-        if incomplete:
-            console.print(
-                "It has no value yet for every required option; give those when you use it."
-            )
-        console.print(f"Use it with: various-tools {tool.id} scan --preset {escape(repr(name))}")
-
-    params = [
-        _required("ctx", typer.Context),
-        _required(
-            "name", Annotated[str, typer.Argument(metavar="NAME", help="The preset's name.")]
-        ),
-        *_paths_param(tool, folders),
-        _preset_param("Start from this preset, then apply the flags you give."),
-        _allow_locked_param(),
-        *[_param(f.param, _flag_annotation(f)) for f in flags],
-    ]
-    return _install(save, params)
 
 
 RESERVED_SUBCOMMANDS = frozenset({"scan", "apply", "explain"})
@@ -915,22 +755,4 @@ def build_tool_app(tool: Tool) -> typer.Typer:
         ),
     )(_apply_command(tool, flags, folders))
     add_extra_commands(app, tool)
-    return app
-
-
-def build_preset_save_app(tools: Mapping[str, Tool]) -> typer.Typer:
-    """``presets save <tool> NAME [options]``: one command per tool, with that tool's flags."""
-    app = typer.Typer(
-        name="save",
-        help=escape("Save options as a named preset: presets save TOOL NAME [options]."),
-        no_args_is_help=True,
-        add_completion=False,
-    )
-    for tool in tools.values():
-        specs = describe(tool.Options)
-        app.command(
-            tool.id,
-            help=f"Save a preset for {tool.name}. Give the options you want it to remember.",
-            rich_help_panel=tool.category,
-        )(_save_preset_command(tool, make_flags(specs), folder_spec(specs)))
     return app

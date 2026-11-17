@@ -19,7 +19,6 @@ from various_tools.cli import clipboard, toolcmds
 from various_tools.cli.main import app
 from various_tools.core import onedrive
 from various_tools.core.journal import Journal
-from various_tools.core.presets import PresetStore
 from various_tools.core.settings import load_settings
 
 if TYPE_CHECKING:
@@ -187,30 +186,6 @@ def test_the_default_of_a_locked_option_needs_no_question(cli: Cli, empty_tree: 
     result = cli.run("empty_folders", "scan", str(empty_tree), "--delete-mode", "trash", "--json")
     assert result.exit_code == 0, result.output
     assert "Locked" not in result.output
-
-
-def test_locked_values_from_a_preset_ask_too(cli: Cli, empty_tree: Path) -> None:
-    save = ["presets", "save", "empty_folders", "perm", "--delete-mode", "permanent"]
-    refused = cli.run(*save)
-    assert refused.exit_code == 1
-    assert "Locked values differ" in refused.output
-    assert not cli.presets.exists()
-    saved = cli.run(*save, "--allow-locked")
-    assert saved.exit_code == 0, saved.output
-    assert PresetStore(cli.presets).get("empty_folders", "perm") == {"delete_mode": "permanent"}
-
-    used = cli.run("empty_folders", "scan", str(empty_tree), "--preset", "perm")
-    assert used.exit_code == 1
-    assert "--delete-mode" in used.output
-    ok = cli.run("empty_folders", "scan", str(empty_tree), "--preset", "perm", "--allow-locked")
-    assert ok.exit_code == 0, ok.output
-
-
-def test_locked_thresholds_of_a_preset_that_is_not_complete(cli: Cli) -> None:
-    refused = cli.run("presets", "save", "duplicates", "loose", "--phash-max", "9")
-    assert refused.exit_code == 1
-    assert "--phash-max" in refused.output
-    assert cli.run("presets", "save", "duplicates", "tuned", "--phash-max", "2").exit_code == 0
 
 
 # ----- 11: export never overwrites without --force -------------------------------------------
@@ -401,7 +376,6 @@ def test_every_readme_flag_exists_on_its_command() -> None:
     root: Any = typer.main.get_command(app)
     tools = {name for name, cmd in root.commands.items() if hasattr(cmd, "commands")} - {
         "config",
-        "presets",
     }
     rows = _readme_rows()
     assert len(rows) >= 8, "the mapping table was not found"

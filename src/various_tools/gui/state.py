@@ -1,8 +1,8 @@
-"""What every GUI page shares: the settings, the tools, presets, remembered folders and the
+"""What every GUI page shares: the settings, the tools, remembered folders and the
 external-program lookup. No Qt here, so it is easy to test.
 
 Tests build an :class:`AppState` with a settings file under ``tmp_path`` whose ``data_folder`` is
-also under ``tmp_path``, so nothing touches the real user settings, journal or presets.
+also under ``tmp_path``, so nothing touches the real user settings or journal.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import Any
 from various_tools.core.context import make_deps
 from various_tools.core.deps import ExternalTools
 from various_tools.core.journal import Journal
-from various_tools.core.presets import PresetStore
 from various_tools.core.settings import (
     Settings,
     default_settings_path,
@@ -90,10 +89,7 @@ class AppState:
         """Forget cached program locations so the next lookup searches again."""
         self.deps.redetect()
 
-    # ----- presets and history ---------------------------------------------------
-
-    def presets(self) -> PresetStore:
-        return PresetStore.for_settings(self.settings)
+    # ----- history ---------------------------------------------------------------
 
     def open_journal(self) -> Journal | None:
         """The history journal, or None when nothing was applied yet (no file is created)."""

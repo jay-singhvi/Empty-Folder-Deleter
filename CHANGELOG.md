@@ -5,6 +5,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.3.0: presets and scheduled runs removed (2026-11-17)
+
+The owner decided to remove two features entirely.
+
+- **Saved option presets are gone.** Removed: `core/presets.py` (`PresetStore`), the CLI
+  `presets list|save|delete` commands and the `--preset NAME` option on `TOOL scan` and
+  `TOOL apply`, `Settings.presets_path()` and `PRESETS_FILE`, and the GUI preset row (preset
+  dropdown, *Save preset...*, *Delete preset*) on every tool page. `--preset` stays a reserved
+  flag name, so an old `--preset NAME` is a usage error (exit 2) instead of silently meaning a
+  tool option called `preset`; rename's built-in presets are still `--opt-preset`.
+- **Scheduled runs are gone.** Removed: `core/schedule.py`, the CLI `schedule add|list|remove|run`
+  commands, the hidden `--scheduled` flag on `TOOL apply` and its run-time refusals,
+  `docs/scheduled-runs.md`, and `schtasks` from `core/deps.SYSTEM_TOOLS`. The
+  `replaces_originals` option marker stays: the GUI now uses it to decide which options it never
+  remembers between sessions.
+- Not affected: the rename tool's built-in presets (snapchat, whatsapp, screenshot),
+  media_resize's size presets and the x264/x265 speed preset (`video_preset`) of media_resize and
+  media_convert. These are tool options, not saved presets.
+- **Existing user files.** A `presets.json` left in the data folder by an earlier version is
+  simply ignored; nothing deletes it. A task that `schedule add` created in Task Scheduler (folder
+  *Various Tools*) is not removed either: when it runs, `apply --preset ... --scheduled` now stops
+  with a usage error before scanning, so it changes nothing. Delete such tasks in Task Scheduler.
+- The uninstaller's "keep your data" question no longer mentions presets. The GUI's unused
+  `ask_text` dialog hook (only *Save preset...* used it) is removed.
+- Version 0.3.0.
+
 ### Media converter: iPhone spatial audio and pre-cropped HEIC (2026-11-17, version 0.2.1)
 
 - **MOV with Apple spatial audio.** iPhone 16 and newer videos carry a second sound track in

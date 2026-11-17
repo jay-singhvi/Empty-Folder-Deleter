@@ -307,7 +307,7 @@ class OrganizeByDateOptions(ToolOptions):
             "group": "Cloud-only files",
             "advanced": True,
             "locked": True,
-            "replaces_originals": True,  # downloads files; never unattended
+            "replaces_originals": True,  # downloads files; never remembered
         },
     )
     download_wait_seconds: int = Field(

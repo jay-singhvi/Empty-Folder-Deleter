@@ -2,7 +2,7 @@
 ;
 ; Per-user install, no admin: %LOCALAPPDATA%\Programs\Various Tools. Start menu shortcut, optional
 ; desktop shortcut, optional Explorer right-click menu, and an uninstaller that offers to keep the
-; settings, history (journal), presets and caches. There is no "start with Windows" option.
+; settings, history (journal) and caches. There is no "start with Windows" option.
 ;
 ; Build the app first (packaging\README.md), then compile from the repository root:
 ;
@@ -101,7 +101,7 @@ Filename: "{app}\{#GuiExe}"; Description: "Start {#AppName} now"; Flags: nowait 
 
 [Code]
 const
-  { platformdirs puts settings, the journal, presets and caches here (appauthor = appname). }
+  { platformdirs puts settings, the journal and caches here (appauthor = appname). }
   DataRootName = 'Various Tools';
 
 function DataRoot(): String;
@@ -123,7 +123,7 @@ begin
     { Keep by default, and always in a silent uninstall: history is what makes Undo possible. }
     if (not UninstallSilent()) and DirExists(DataRoot()) then
     begin
-      if MsgBox('Keep your settings, presets, history and caches?' + #13#10 + #13#10 +
+      if MsgBox('Keep your settings, history and caches?' + #13#10 + #13#10 +
                 'Choose Yes to keep them for a later install (recommended).' + #13#10 +
                 'Choose No to delete ' + DataRoot() + '.',
                 mbConfirmation, MB_YESNO or MB_DEFBUTTON1) = IDNO then

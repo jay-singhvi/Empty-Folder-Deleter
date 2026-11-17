@@ -520,8 +520,6 @@ SYSTEM_TOOLS: dict[str, str] = {
     # Windows' own tool, used to pin and unpin OneDrive files. It is not one of the four
     # external programs, but its name lives here too, so that only this module names executables.
     "attrib": "attrib.exe",
-    # Windows Task Scheduler's command-line client, used by scheduled runs (core/schedule.py).
-    "schtasks": "schtasks.exe",
 }
 
 

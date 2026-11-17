@@ -1,4 +1,4 @@
-"""``<tool> scan``: tables, JSON, saved plans, presets, positional paths and validation."""
+"""``<tool> scan``: tables, JSON, saved plans, positional paths and validation."""
 
 from __future__ import annotations
 
@@ -134,36 +134,11 @@ def test_bool_flags_and_list_flags(cli: Cli) -> None:
     assert json.loads(repeated.stdout)["options"]["skip_hidden_system"] is False
 
 
-def test_preset_values_are_used_and_explicit_flags_win(cli: Cli) -> None:
-    tree = cli.work / "t"
-    (tree / "x").mkdir(parents=True)
-    (tree / "x" / "scratch.tmp").write_text("junk")
-    saved = cli.run(
-        "presets", "save", "empty_folders", "tmp cleaner", "--treat-as-empty", "scratch.tmp"
-    )
-    assert saved.exit_code == 0, saved.output
-
-    with_preset = cli.run("empty_folders", "scan", str(tree), "--preset", "tmp cleaner", "--json")
-    assert with_preset.exit_code == 0, with_preset.output
-    assert len(Plan.from_json(with_preset.stdout).actions) == 2
-
-    overridden = cli.run(
-        "empty_folders",
-        "scan",
-        str(tree),
-        "--preset",
-        "tmp cleaner",
-        "--treat-as-empty",
-        "other.junk",
-        "--json",
-    )
-    assert Plan.from_json(overridden.stdout).actions == []
-
-
-def test_unknown_preset_exits_2(cli: Cli, empty_tree: Path) -> None:
+def test_the_removed_preset_flag_is_rejected(cli: Cli, empty_tree: Path) -> None:
+    """Saved presets were removed in 0.3.0: an old '--preset NAME' is a usage error."""
     result = cli.run("empty_folders", "scan", str(empty_tree), "--preset", "nope")
     assert result.exit_code == 2
-    assert "No preset 'nope'" in result.output
+    assert "No such option" in result.output
 
 
 def test_reserved_name_collision_becomes_opt_flag(cli: Cli) -> None:
@@ -175,10 +150,10 @@ def test_reserved_name_collision_becomes_opt_flag(cli: Cli) -> None:
     plan = Plan.from_json(result.stdout)
     assert json.loads(result.stdout)["options"]["preset"] == "snapchat"
     assert [a.kind for a in plan.actions] == [ActionKind.RENAME]
-    # --preset is the CLI's own flag (a saved preset), so it is not the field.
+    # --preset stays reserved (it was the removed saved-preset flag), so it is not the field.
     clash = cli.run("rename", "scan", str(folder), "--preset", "snapchat")
     assert clash.exit_code == 2
-    assert "No preset 'snapchat'" in clash.output
+    assert "No such option" in clash.output
 
 
 def test_plan_notes_are_printed(cli: Cli) -> None:

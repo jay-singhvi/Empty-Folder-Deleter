@@ -32,7 +32,7 @@ The screenshots are generated on demo data by `uv run python packaging/make_scre
 
 Windows 10 or 11, 64-bit. Downloads are on the [Releases](https://github.com/jay-singhvi/Empty-Folder-Deleter/releases) page.
 
-- **Installer** (`Various-Tools-<version>-setup.exe`): installs for your Windows account only, with no admin prompt, to `%LOCALAPPDATA%\Programs\Various Tools`. It adds a Start menu shortcut and, if you tick them, a desktop shortcut and the Explorer folder menu "Open with Various Tools". It never starts with Windows. Uninstall from *Settings > Apps*; it asks whether to keep your settings, presets and History.
+- **Installer** (`Various-Tools-<version>-setup.exe`): installs for your Windows account only, with no admin prompt, to `%LOCALAPPDATA%\Programs\Various Tools`. It adds a Start menu shortcut and, if you tick them, a desktop shortcut and the Explorer folder menu "Open with Various Tools". It never starts with Windows. Uninstall from *Settings > Apps*; it asks whether to keep your settings and History.
 - **Portable zip** (`Various-Tools-<version>-portable.zip`): unzip anywhere and double-click `Various Tools.exe`. Nothing is installed.
 
 Either way the folder holds two programs:
@@ -40,7 +40,7 @@ Either way the folder holds two programs:
 - `Various Tools.exe`: the desktop app.
 - `various-tools.exe`: the command line. Open a terminal in that folder (or add it to `PATH`) and run `various-tools.exe --help`.
 
-Settings, presets, History (the journal that makes Undo possible) and caches are kept in `%LOCALAPPDATA%\Various Tools`.
+Settings, History (the journal that makes Undo possible) and caches are kept in `%LOCALAPPDATA%\Various Tools`.
 
 ### External programs (optional)
 
@@ -99,9 +99,7 @@ various-tools TOOL apply [PATHS] [flags]    # the same, then apply (asks first)
 various-tools history [RUN_ID]              # what was applied, and each run's actions
 various-tools undo RUN_ID                   # reverse a run
 various-tools download [PATHS] [--plan F]   # download cloud-only OneDrive files a scan skipped (asks first)
-various-tools schedule add|list|remove|run  # run a saved preset on a schedule (docs/scheduled-runs.md)
 various-tools doctor                        # are ffmpeg, ffprobe, ExifTool and Ollama available?
-various-tools presets list|save|delete      # named option sets
 various-tools config show|get|set|unset     # settings
 various-tools export FILE --run ID|--plan F # CSV, Excel, HTML or text report
 various-tools TOOL scan --help              # every flag, with its meaning, default and limits
@@ -132,17 +130,11 @@ Rules that always hold (the same as in the app):
 - OneDrive cloud-only files are never read or downloaded by a scan; they are reported as skipped. Downloading needs your explicit action: `various-tools download`, the download button in the app, or the `cloud_only` option of `organize_by_date` (see below).
 - `Ctrl+C` stops a running scan or apply at the next safe point and exits with code 130.
 
-### Options, presets and settings
+### Options and settings
 
-Flags are written as `--field-name`. A switch is `--flag/--no-flag`. A list is repeated or comma-separated (`--treat-as-empty a.tmp,b.tmp`). A dictionary is repeated as `KEY=VALUE`. Flags you leave out keep their default, and an empty value (`--match ""`) puts a "use the app setting" option back to its default. Options marked "Advanced" in `--help` are tuned values; the locked ones (marked with a padlock) are safety values or thresholds tuned on real data, so leave them alone unless you know why. A flag or preset that changes a locked value asks first; `--allow-locked` accepts it without asking (`--yes` does not). If a tool option has the same name as a command flag (for example rename's `preset`), it is written `--opt-preset`.
+Flags are written as `--field-name`. A switch is `--flag/--no-flag`. A list is repeated or comma-separated (`--treat-as-empty a.tmp,b.tmp`). A dictionary is repeated as `KEY=VALUE`. Flags you leave out keep their default, and an empty value (`--match ""`) puts a "use the app setting" option back to its default. Options marked "Advanced" in `--help` are tuned values; the locked ones (marked with a padlock) are safety values or thresholds tuned on real data, so leave them alone unless you know why. A flag that changes a locked value asks first; `--allow-locked` accepts it without asking (`--yes` does not). If a tool option has the same name as a command flag (for example rename's `preset`), it is written `--opt-preset`.
 
 ```
-# Save a set of options once, reuse it by name. Flags you type override the preset.
-various-tools presets save duplicates "Camera roll" --media images --action trash
-various-tools duplicates scan "D:\Camera Roll" --preset "Camera roll"
-various-tools presets list
-various-tools presets delete duplicates "Camera roll"
-
 # Settings live in the per-user config folder (the path is shown by: various-tools config show).
 various-tools config show
 various-tools config set workers 4
@@ -181,7 +173,7 @@ Every documented use of the original scripts has a command. All of them preview 
 
 Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. From a source checkout run `uv run various-tools-gui` (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
 
-- **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Pick or save a **preset**, drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there. Closing the window during a run asks first and waits for the run to stop.
+- **Tool page:** the options form is generated from the tool's options (Basic and Advanced sections, a padlock on tuned or safety values, which ask before they change). Drop folders from Explorer onto any folder field, and the page remembers the folders you used last. **Scan (preview)** changes nothing; the plan table can be sorted, filtered, checked and unchecked, grouped (for example per duplicate group), and shows totals. **Apply** asks first, and asks again before a permanent delete. Progress, Cancel and a collapsible log panel are always there. Closing the window during a run asks first and waits for the run to stop.
 - **Plan views:** Empty Folder Deleter opens its plan as a **folder tree** (the folders under each chosen folder, with every action at its path). You can switch to the grouped view.
 - **Disk Usage:** a **Size map** tab next to the plan shows folder sizes as a treemap. *Tick files in this folder* checks the files of the folder you are looking at. `tree_depth` and `tree_min_share_pct` set how deep and how fine the map is.
 - **Cloud-only files:** when a scan skipped OneDrive files that are only in the cloud, the page offers **Download these N files...**. Nothing is downloaded until you click it and confirm.
@@ -201,10 +193,6 @@ Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. 
 - `project_export`: `copy_to_clipboard`.
 
 Each tool's page in [docs/tools/](docs/tools/) lists every option.
-
-### Scheduled runs
-
-`various-tools schedule add|list|remove|run` runs a saved preset through Windows Task Scheduler. A scheduled run applies the preset without asking, so it is journaled and can be undone, and it refuses presets that delete permanently, change a locked value, or replace or remove originals. See [docs/scheduled-runs.md](docs/scheduled-runs.md).
 
 ### Reports
 

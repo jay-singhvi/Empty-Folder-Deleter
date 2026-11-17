@@ -2,7 +2,7 @@
 
 The tool commands are generated from each tool's options model (``toolcmds.py``), so adding a tool
 adds its commands. Everything else is a fixed command: ``list``, ``history``, ``undo``, ``doctor``,
-``config``, ``presets``, ``export``, ``version`` and ``duplicates explain``.
+``config``, ``export``, ``version`` and ``duplicates explain``.
 
 Global options go before the command: ``various-tools --config FILE --exiftool PATH ... <command>``.
 The program flags (``--exiftool``, ``--ffmpeg``, ``--ffprobe``, ``--ollama-url``) are also accepted
@@ -26,8 +26,6 @@ from various_tools.cli.config_cmd import config_app
 from various_tools.cli.download_cmd import download
 from various_tools.cli.explain_cmd import explain_command
 from various_tools.cli.export_cmd import make_export_command
-from various_tools.cli.presets_cmd import build_presets_app
-from various_tools.cli.schedule_cmd import build_schedule_app
 from various_tools.cli.state import CONFIG_ENV_VAR, CliState
 from various_tools.cli.toolcmds import build_tool_app
 from various_tools.core.settings import default_settings_path
@@ -113,8 +111,6 @@ def build_app() -> typer.Typer:
     app.command("export")(make_export_command(tools))
     app.command("download")(download)
     app.add_typer(config_app, name="config")
-    app.add_typer(build_presets_app(tools), name="presets")
-    app.add_typer(build_schedule_app(tools), name="schedule")
     app.command("version")(version)
     for tool in tools.values():
         tool_app = build_tool_app(tool)

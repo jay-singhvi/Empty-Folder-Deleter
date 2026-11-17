@@ -191,7 +191,8 @@ Rules:
 - Tools are discovered through the `various_tools.tools` entry-point group, so a new tool is just a
   new package that registers itself.
 - Presets: any options instance can be saved by name (e.g. "Phone camera roll dedupe") and
-  reloaded from the GUI dropdown or with `--preset NAME` in the CLI.
+  reloaded from the GUI dropdown or with `--preset NAME` in the CLI. *(Removed in 0.3.0 by the
+  owner's decision; see CHANGELOG.md.)*
 - `RunContext` provides `progress(done, total, msg)`, `check_cancelled()`, `log`,
   `settings` and `journal`. Tools never print or touch Qt directly.
 
@@ -405,6 +406,7 @@ In priority order. Each one gets a plan preview, journal entries and undo like t
    duplicates and organize scanners already collect these errors, so surface them here).
 8. *(Later)* **Scheduled / watch-folder runs**: run a saved preset on a schedule through
    Windows Task Scheduler (`various-tools <tool> apply --preset P --yes`). Every run is still journaled.
+   *(Built in 0.2.0, removed in 0.3.0 by the owner's decision together with presets.)*
 
 ### Phase 8: Packaging, release, cleanup
 1. PyInstaller one-dir spec in `packaging/`, without UPX. Bundle the icon and version info.

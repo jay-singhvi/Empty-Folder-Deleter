@@ -42,7 +42,6 @@ log = logging.getLogger(__name__)
 APP_NAME = "Various Tools"
 SETTINGS_FILE = "settings.toml"
 JOURNAL_FILE = "journal.sqlite"
-PRESETS_FILE = "presets.json"
 
 # Defaults for the external-program timeouts. Core media code uses them as parameter defaults,
 # and tools pass the user's value from ``ctx.settings``. They live here, not in core/media, so
@@ -107,8 +106,8 @@ class Settings(BaseModel):
         default=None,
         title="App data folder",
         description=(
-            "Where the history journal (used for Undo), the media catalog and saved presets are "
-            "kept. Empty uses the standard per-user app data folder."
+            "Where the history journal (used for Undo) and the media catalog are kept. "
+            "Empty uses the standard per-user app data folder."
         ),
         json_schema_extra=_hint("Folders", advanced=True, widget="folder"),
     )
@@ -426,10 +425,6 @@ class Settings(BaseModel):
     def journal_path(self) -> Path:
         """The SQLite history journal that Undo and History read."""
         return self.resolved_data_folder() / JOURNAL_FILE
-
-    def presets_path(self) -> Path:
-        """The JSON file that saved option presets live in."""
-        return self.resolved_data_folder() / PRESETS_FILE
 
 
 def default_settings_path() -> Path:

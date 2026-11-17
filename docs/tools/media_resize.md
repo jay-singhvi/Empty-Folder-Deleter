@@ -27,8 +27,7 @@ It replaces `app.py` (the resolution reducer) and the resize and CR3 conversion 
   journaled row, then the new file takes its name and modified time. If a step fails, the original
   is still in place, or it is in the Recycle Bin and the error says where the new copy is. Undo
   restores the original from the Recycle Bin. A video in the other outputs gets the same check,
-  and a copy that fails it is removed again. A preset that replaces originals (or removes RAW
-  originals) cannot be scheduled.
+  and a copy that fails it is removed again.
 - **An existing file is never overwritten** by a new output. If the output name is taken, the file
   is listed and left alone.
 - **Cloud-only OneDrive files are never read.** They are reported as skipped and listed in the

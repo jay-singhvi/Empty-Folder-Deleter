@@ -21,7 +21,6 @@ from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, 
 from various_tools.core.settings import (
     APP_NAME,
     JOURNAL_FILE,
-    PRESETS_FILE,
     Settings,
     load_settings,
     save_settings,
@@ -187,11 +186,10 @@ def test_full_round_trip_keeps_safety_values(tmp_path: Path) -> None:
 # ----- derived folders -----------------------------------------------------------------------
 
 
-def test_journal_and_presets_follow_the_data_folder(tmp_path: Path) -> None:
+def test_journal_follows_the_data_folder(tmp_path: Path) -> None:
     s = Settings(data_folder=tmp_path / "data")
     assert s.resolved_data_folder() == tmp_path / "data"
     assert s.journal_path() == tmp_path / "data" / JOURNAL_FILE
-    assert s.presets_path() == tmp_path / "data" / PRESETS_FILE
 
 
 def test_data_and_cache_folders_default_to_the_per_user_folders() -> None:

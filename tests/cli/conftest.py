@@ -1,5 +1,5 @@
 """CLI test setup. Every run points at a settings file under ``tmp_path`` whose ``data_folder`` is
-also under ``tmp_path``, so the journal and the presets never touch the real user data."""
+also under ``tmp_path``, so the journal never touches the real user data."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from various_tools.cli.main import app
 from various_tools.core import journal as journal_module
 from various_tools.core import plan as plan_module
 from various_tools.core import recycle as recycle_module
-from various_tools.core import schedule as schedule_module
 
 
 @dataclass
@@ -26,7 +25,7 @@ class Cli:
 
     root: Path
     config: Path
-    state: Path  # data folder: journal.sqlite and presets.json land here
+    state: Path  # data folder: journal.sqlite lands here
     work: Path  # a folder for generated test trees
 
     def run(
@@ -56,24 +55,12 @@ class Cli:
     def journal(self) -> Path:
         return self.state / "journal.sqlite"
 
-    @property
-    def presets(self) -> Path:
-        return self.state / "presets.json"
-
 
 @pytest.fixture(autouse=True)
 def _plain_help_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Typer forces a colour terminal when ``GITHUB_ACTIONS`` (or ``FORCE_COLOR``) is set, so on CI
     the help text is full of ANSI codes and ``--roots`` is split by them. Tests read plain text."""
     monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", None)
-
-
-@pytest.fixture(autouse=True)
-def _room_for_temp_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Task commands built here hold pytest's temp paths (``--config``) and the venv's Python.
-    On a CI runner those alone pass Task Scheduler's 261-character limit, which belongs to real
-    installs, so the CLI tests lift it. ``tests/core/test_schedule.py`` tests the limit itself."""
-    monkeypatch.setattr(schedule_module, "MAX_COMMAND_LENGTH", 4096)
 
 
 @pytest.fixture(autouse=True)

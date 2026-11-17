@@ -76,8 +76,8 @@ class FieldSpec:
     pair_separator: str | None = None
     pair_headers: tuple[str, ...] = ()
     # ``replaces_originals``: a value other than the default replaces, removes or downloads the
-    # user's original files (for example an in-place output). Such options are never run
-    # unattended: a scheduled run refuses them.
+    # user's original files (for example an in-place output). The GUI never remembers such a
+    # value between sessions: each page starts with the safe default.
     replaces_originals: bool = False
 
     @property

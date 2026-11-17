@@ -46,10 +46,8 @@ class Dialogs:
     def __init__(self) -> None:
         self.confirms: list[tuple[str, str]] = []
         self.informs: list[tuple[str, str]] = []
-        self.asked: list[tuple[str, str, str]] = []
         self.answers: list[bool] = []  # used first-in first-out; then ``default``
         self.default = True
-        self.text: str | None = None
         self.export_choice: tuple[str, str] | None = None
         self.extra_path: str | None = None  # the file a tool extra's dialog "picks"
         self.extras_asked: list[str] = []
@@ -61,10 +59,6 @@ class Dialogs:
     def inform(self, title: str, text: str) -> None:
         self.informs.append((title, text))
 
-    def ask_text(self, title: str, label: str, text: str) -> str | None:
-        self.asked.append((title, label, text))
-        return self.text
-
     def choose_export(self) -> tuple[str, str] | None:
         return self.export_choice
 
@@ -73,11 +67,10 @@ class Dialogs:
         return self.extra_path
 
     def attach(self, page: Any) -> None:
-        """Replace the hooks the page has (tool pages have all five, others two)."""
+        """Replace the hooks the page has (tool pages have all four, others two)."""
         page.confirm = self.confirm
         page.inform = self.inform
         if isinstance(page, ToolPage):
-            page.ask_text = self.ask_text
             page.choose_export = self.choose_export
             page.choose_extra_path = self.choose_extra_path
 

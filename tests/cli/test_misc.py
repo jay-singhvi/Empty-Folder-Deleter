@@ -1,8 +1,7 @@
-"""list, version, doctor, presets, duplicates explain and the generated --help."""
+"""list, version, doctor, duplicates explain and the generated --help."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,7 +9,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from various_tools.cli import toolcmds
-from various_tools.core.presets import PresetStore
 from various_tools.core.schema import describe
 from various_tools.tools.base import discover
 
@@ -44,7 +42,6 @@ def test_root_help_lists_commands_and_tools(cli: Cli) -> None:
         "undo",
         "doctor",
         "config",
-        "presets",
         "--exiftool",
         "--ffmpeg",
     ):
@@ -102,73 +99,6 @@ def test_doctor_uses_saved_paths(cli: Cli, fake_exe: Callable[..., Path], tmp_pa
     assert "9.9" in row
 
 
-def test_presets_list_save_delete(cli: Cli) -> None:
-    assert "No presets are saved" in cli.run("presets", "list").output
-
-    saved = cli.run(
-        "presets", "save", "empty_folders", "  Junk cleaner ", "--treat-as-empty", "x.tmp,y.tmp"
-    )
-    assert saved.exit_code == 0, saved.output
-    assert "Junk cleaner" in saved.output
-    store = PresetStore(cli.presets)
-    assert store.names("empty_folders") == ["Junk cleaner"]
-    assert store.get("empty_folders", "Junk cleaner") == {"treat_as_empty": ["x.tmp", "y.tmp"]}
-
-    listing = cli.run("presets", "list")
-    assert "Junk cleaner" in listing.output
-    assert "x.tmp" in listing.output
-    assert "Junk cleaner" in cli.run("presets", "list", "empty_folders").output
-    assert "No presets are saved" in cli.run("presets", "list", "rename").output
-
-    deleted = cli.run("presets", "delete", "empty_folders", "Junk cleaner")
-    assert deleted.exit_code == 0, deleted.output
-    assert store.names("empty_folders") == []
-    again = cli.run("presets", "delete", "empty_folders", "Junk cleaner")
-    assert again.exit_code == 1
-    assert "No preset" in again.output
-
-
-def test_presets_save_validates_and_checks_the_tool(cli: Cli) -> None:
-    bad = cli.run("presets", "save", "empty_folders", "bad", "--min-age-days", "-1")
-    assert bad.exit_code == 2
-    assert not cli.presets.exists()
-    assert cli.run("presets", "list", "no_such_tool").exit_code == 2
-    assert cli.run("presets", "delete", "no_such_tool", "x").exit_code == 2
-    assert cli.run("presets", "save", "empty_folders", "  ").exit_code == 2
-
-
-def test_presets_save_can_start_from_another_preset(cli: Cli) -> None:
-    cli.run("presets", "save", "empty_folders", "base", "--min-age-days", "7")
-    derived = cli.run(
-        "presets", "save", "empty_folders", "derived", "--preset", "base", "--no-skip-hidden-system"
-    )
-    assert derived.exit_code == 0, derived.output
-    assert PresetStore(cli.presets).get("empty_folders", "derived") == {
-        "min_age_days": 7,
-        "skip_hidden_system": False,
-    }
-
-
-def test_presets_save_may_leave_a_required_option_open(cli: Cli) -> None:
-    result = cli.run("presets", "save", "project_export", "md export", "--output-format", "md")
-    assert result.exit_code == 0, result.output
-    assert "required" in result.output
-    assert PresetStore(cli.presets).get("project_export", "md export") == {"output_format": "md"}
-    project = cli.work / "proj"
-    project.mkdir()
-    (project / "a.py").write_text("x = 1\n")
-    used = cli.run("project_export", "scan", str(project), "--preset", "md export", "--json")
-    assert used.exit_code == 0, used.output
-    assert json.loads(used.stdout)["options"]["output_format"] == "md"
-
-
-def test_presets_save_includes_given_folders(cli: Cli) -> None:
-    folder = str(cli.work / "photos")
-    result = cli.run("presets", "save", "empty_folders", "photos", folder)
-    assert result.exit_code == 0, result.output
-    assert PresetStore(cli.presets).get("empty_folders", "photos") == {"roots": [folder]}
-
-
 def test_explain_two_generated_images(cli: Cli, make_image: Callable[..., Path]) -> None:
     first = make_image("first.png", seed=1)
     same = make_image("same.png", seed=1)
@@ -217,7 +147,6 @@ def test_help_shows_titles_descriptions_and_markers(cli: Cli, tool_id: str) -> N
                 assert " ".join(spec.description.split())[:30] in text
             if spec.locked and "\U0001f512" not in spec.description:
                 assert "\U0001f512" in text
-        assert "--preset" in text
     assert "--json" in " ".join(cli.run(tool_id, "scan", "--help").output.split())
     assert "--yes" in " ".join(cli.run(tool_id, "apply", "--help").output.split())
 

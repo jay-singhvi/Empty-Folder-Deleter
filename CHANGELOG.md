@@ -5,7 +5,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Media converter: iPhone spatial audio and pre-cropped HEIC (2026-11-17)
+### Media converter: iPhone spatial audio and pre-cropped HEIC (2026-11-17, version 0.2.1)
 
 - **MOV with Apple spatial audio.** iPhone 16 and newer videos carry a second sound track in
   Apple Positional Audio (`apple_apac`). ffmpeg has no decoder for it and the MP4 muxer cannot copy

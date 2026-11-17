@@ -2,9 +2,11 @@
 
 HEIC and HEIF are opened through ``core.media.imaging.open_image``, which registers pillow-heif.
 ``inspect()`` only reads the header, so ``scan()`` stays cheap and writes nothing. ``render()``
-does the work in memory. ``write()`` puts the bytes into place through a temporary file, adds the
-tags Pillow cannot carry with ExifTool (when it is installed), checks the result and only then
-renames it. ``verify_output()`` is the check that gates removing an original.
+does the work in memory. A HEIC that libheif refuses because its HEVC stream is already cropped
+(see :data:`HEIF_SIZE_MISMATCH`) is decoded with ffmpeg instead, when ffmpeg is installed.
+``write()`` puts the bytes into place through a temporary file, adds the tags Pillow cannot carry
+with ExifTool (when it is installed), checks the result and only then renames it.
+``verify_output()`` is the check that gates removing an original.
 """
 
 from __future__ import annotations
@@ -20,10 +22,11 @@ from typing import Any, Literal
 from PIL import Image, ImageOps
 
 from various_tools.core.fs import rename_no_replace
+from various_tools.core.media import ffmpeg as ffmpeg_media
 from various_tools.core.media.exif import run_exiftool
 from various_tools.core.media.imaging import open_image
 from various_tools.core.onedrive import ensure_on_device
-from various_tools.core.settings import DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S
+from various_tools.core.settings import DEFAULT_EXIFTOOL_WRITE_TIMEOUT_S, DEFAULT_FRAME_TIMEOUT_S
 
 ImageFormat = Literal["JPEG", "PNG"]
 
@@ -34,6 +37,9 @@ EXIF_WIDTH_TAG = 0xA002
 EXIF_HEIGHT_TAG = 0xA003
 ALPHA_MODES = frozenset({"RGBA", "LA", "La", "PA", "RGBa"})
 PNG_MODES = frozenset({"RGB", "RGBA", "L", "LA", "P", "1", "I;16"})
+# libheif's message for a HEIC whose HEVC stream already crops the picture that the container
+# then expects to crop itself (seen in files saved by some phone editors). The pixels are fine.
+HEIF_SIZE_MISMATCH = "does not have the size signaled in the file"
 
 
 class ImageError(RuntimeError):
@@ -130,20 +136,59 @@ def _for_format(image: Image.Image, rules: ImageRules, alpha: bool) -> Image.Ima
     return image.convert("RGBA" if alpha else "RGB")
 
 
-def render(source: Path, rules: ImageRules) -> Rendered | str:
+def _decode(
+    original: Image.Image, source: Path, ffmpeg: Path | None, timeout: float
+) -> Image.Image:
+    """The decoded pixels of ``original``, with its EXIF orientation still to be applied.
+
+    When libheif refuses the picture with :data:`HEIF_SIZE_MISMATCH`, ffmpeg decodes it, and
+    the result is used only if it has exactly the size the file's header gives.
+    """
+    try:
+        original.load()
+        return original
+    except ValueError as exc:
+        if HEIF_SIZE_MISMATCH not in str(exc):
+            raise
+        if ffmpeg is None:
+            raise ImageError(f"{exc} (installing ffmpeg lets this picture be converted)") from exc
+        try:
+            pixels = ffmpeg_media.decode_still(ffmpeg, source, timeout=timeout)
+        except ffmpeg_media.MediaError as media_exc:
+            raise ImageError(f"{exc}; ffmpeg could not decode it either: {media_exc}") from exc
+    if pixels.size != original.size:
+        raise ImageError(
+            f"libheif refused the picture, and ffmpeg decoded it as {pixels.size[0]}x"
+            f"{pixels.size[1]} instead of {original.size[0]}x{original.size[1]}"
+        )
+    orientation = original.getexif().get(ORIENTATION_TAG)
+    if orientation:
+        pixels.getexif()[ORIENTATION_TAG] = orientation
+    return pixels
+
+
+def render(
+    source: Path,
+    rules: ImageRules,
+    *,
+    ffmpeg: Path | None = None,
+    ffmpeg_timeout: float = DEFAULT_FRAME_TIMEOUT_S,
+) -> Rendered | str:
     """Convert ``source`` in memory. Returns the result, or the reason the file is left alone.
 
     The caller must have checked that the file is on the device (rule 3). This checks again,
-    before anything is read, so a cloud-only file raises instead of being read.
+    before anything is read, so a cloud-only file raises instead of being read. ``ffmpeg`` is
+    the fallback decoder for a HEIC that libheif refuses (see :func:`_decode`).
     """
     ensure_on_device(source)
     with open_image(source) as original:
         if getattr(original, "is_animated", False):
             return "animated or multi-image file, left as-is (a single picture cannot hold it)"
         alpha = _has_alpha(original)
+        pixels = _decode(original, source, ffmpeg, ffmpeg_timeout)
         # The pixels are turned first. Only then is the orientation reset in the kept EXIF,
         # because _kept_exif changes the EXIF object that exif_transpose reads.
-        displayed = ImageOps.exif_transpose(original)
+        displayed = ImageOps.exif_transpose(pixels)
         displayed.load()
         exif = _kept_exif(original, displayed.size) if rules.keep_metadata else None
         icc = _kept_icc(original) if rules.keep_metadata else None

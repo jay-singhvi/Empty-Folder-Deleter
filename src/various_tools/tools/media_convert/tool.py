@@ -603,7 +603,12 @@ class _Converter:
 
     def _picture(self, src: Path, dst: Path, kind: Kind) -> None:
         rules = _rules(self.opts, dst.suffix.lower())
-        result = images.render(src, rules)
+        result = images.render(
+            src,
+            rules,
+            ffmpeg=self.ctx.deps.ffmpeg(),
+            ffmpeg_timeout=self.ctx.settings.frame_grab_timeout_s,
+        )
         if isinstance(result, str):
             raise ValueError(result)
         images.write(

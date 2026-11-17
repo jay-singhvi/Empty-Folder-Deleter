@@ -220,6 +220,49 @@ def _run_ffmpeg_frame(
     )
 
 
+def decode_still(ffmpeg: Path, path: Path, *, timeout: float = FRAME_TIMEOUT_S) -> Image.Image:
+    """Decode a still picture (e.g. a HEIC) with ffmpeg, at full size, as an RGB image.
+
+    Only the cropping signalled inside the HEVC stream is applied (``-apply_cropping codec``,
+    ffmpeg 7.1 or newer). Some HEIC files signal the same crop again in the container, and
+    applying both cuts the picture twice. A stored rotation is applied, as libheif does.
+    """
+    ensure_on_device(path)
+    args = [
+        str(ffmpeg),
+        "-v",
+        "error",
+        "-nostdin",
+        "-apply_cropping",
+        "codec",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "-",
+    ]
+    try:
+        result = run_binary(args, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"ffmpeg timed out decoding {path.name}") from exc
+    except (OSError, ValueError) as exc:
+        raise MediaError(f"ffmpeg could not run on {path.name}: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", "replace").strip()[:300]
+        raise MediaError(f"ffmpeg could not decode {path.name}: {detail}")
+    try:
+        with Image.open(io.BytesIO(result.stdout)) as img:
+            return img.convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise MediaError(f"ffmpeg gave an unreadable picture for {path.name}") from exc
+
+
 def transcode(
     ffmpeg: Path,
     source: Path,

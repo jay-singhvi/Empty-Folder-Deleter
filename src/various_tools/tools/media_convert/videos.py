@@ -4,6 +4,11 @@ A remux copies the streams into a new container, so quality is untouched and it 
 That only works when every stream is a kind MP4 can hold. Otherwise the video is re-encoded (H.264
 or H.265) and audio is copied when MP4 can hold it, or turned into AAC when it cannot.
 
+Newer iPhones add a second sound track in Apple Positional Audio (``apple_apac``, spatial audio)
+next to the normal stereo AAC track. ffmpeg cannot decode it and an MP4 cannot hold it, so such
+a video cannot be converted whole. It is skipped with a reason, never converted with a track
+missing.
+
 The ffmpeg and ffprobe programs are passed in as resolved paths (``RunContext.deps``). The output
 is written through ``core/media/ffmpeg.transcode``, which uses a temporary file and a rename that
 never replaces an existing file.
@@ -30,6 +35,8 @@ Method = Literal["remux", "reencode"]
 # Container facts, not preferences: what an MP4 can hold without converting it.
 MP4_VIDEO_CODECS = frozenset({"h264", "hevc", "mpeg4", "av1"})
 MP4_AUDIO_CODECS = frozenset({"aac", "mp3", "ac3", "eac3", "alac"})
+# Sound tracks ffmpeg cannot decode and the MP4 muxer cannot copy. A video with one is skipped.
+UNUSABLE_AUDIO_CODECS = frozenset({"apple_apac", "apac"})
 ENCODERS: dict[str, str] = {"h264": "libx264", "h265": "libx265"}
 # The CRF scales differ: x265 needs a higher number than x264 for similar quality.
 DEFAULT_CRF: dict[str, int] = {"h264": 18, "h265": 22}
@@ -82,7 +89,17 @@ def _incompatible(info: SourceInfo) -> list[str]:
 
 
 def choose(info: SourceInfo, mode: VideoMode, codec: VideoCodec) -> Choice | str:
-    """Remux or re-encode, or the reason the file is left alone."""
+    """Remux or re-encode, or the reason the file is left alone.
+
+    A video with a sound track that cannot be carried over (Apple spatial audio) is left alone in
+    every mode: converting it would drop that track.
+    """
+    unusable = sorted({c for c in info.audio if c in UNUSABLE_AUDIO_CODECS})
+    if unusable:
+        return (
+            f"has an Apple spatial audio track ({', '.join(unusable)}) that ffmpeg cannot read "
+            "and an MP4 cannot hold; left as-is rather than converted without it"
+        )
     bad = _incompatible(info)
     if mode == "reencode":
         return Choice("reencode", f"re-encode to {codec.upper()} (chosen)")

@@ -18,7 +18,7 @@ script. It shares its picture and video helpers with Resize media where they fit
 
 | From | To | How |
 |---|---|---|
-| HEIC, HEIF | JPG or PNG (option) | Decoded with pillow-heif, turned upright, encoded with Pillow. |
+| HEIC, HEIF | JPG or PNG (option) | Decoded with pillow-heif, turned upright, encoded with Pillow. A HEIC that libheif refuses with "Decoded image does not have the size signaled in the file" (its picture is cropped twice, seen in files from some phone editors) is decoded with ffmpeg instead, and used only when it has the size the file's header gives. |
 | WebP (still) | JPG or PNG (option) | Decoded and encoded with Pillow. Animated WebP is left as it is. |
 | MOV | MP4 | **Remux** (copy the streams, no quality loss) when MP4 can hold every stream, otherwise **re-encode** to H.264 or H.265. |
 
@@ -35,6 +35,10 @@ default, option `background_color`). A PNG output keeps the transparency.
   everywhere. Sound that MP4 can hold is copied, any other sound becomes AAC.
 - Timecode and other data tracks that MP4 cannot hold are left out. Every picture and sound track
   is kept. Subtitles are not copied.
+- **Apple spatial audio.** iPhone 16 and newer record a second sound track in Apple Positional
+  Audio (APAC) next to the normal stereo AAC track. ffmpeg cannot decode it and an MP4 cannot hold
+  it, so such a video cannot be converted without losing that track. It is skipped, with the
+  reason in the plan's notes, and stays a MOV.
 
 ## Rules
 

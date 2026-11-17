@@ -341,6 +341,16 @@ def test_remux_mode_refuses_what_an_mp4_cannot_hold_and_reencode_mode_always_enc
     assert args[args.index("-c:a") + 1] == "copy"  # AAC fits an MP4, so it is not re-encoded
 
 
+def test_a_video_with_apple_spatial_audio_is_skipped_never_converted_without_it() -> None:
+    # iPhone 16 and newer: a stereo AAC track plus an Apple spatial audio (APAC) track.
+    for audio in (("aac", "apple_apac"), ("apple_apac",), ("apple_apac", "pcm_s16le")):
+        info = videos.SourceInfo(duration=3.0, video=("hevc",), audio=audio)
+        for mode in ("auto", "remux", "reencode"):
+            reason = videos.choose(info, mode, "h264")
+            assert isinstance(reason, str), (audio, mode)
+            assert "apple_apac" in reason and "left as-is" in reason
+
+
 def test_metadata_and_faststart_flags() -> None:
     choice = videos.Choice("remux", "remux, no re-encode")
     kept = _args(choice, PHONE)
@@ -843,6 +853,66 @@ def test_a_failed_verification_keeps_the_output_and_the_original(
     assert fake_trash == []
     assert src.read_bytes() == original
     assert (src.parent / "converted" / "a.jpg").is_file()  # kept, for the owner to inspect
+
+
+def _refused_by_libheif(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every opened picture fail to decode the way libheif refuses a pre-cropped HEIC."""
+    real_open = images.open_image
+
+    def opening(path: Path) -> Image.Image:
+        image = real_open(path)
+
+        def refuse() -> None:
+            raise ValueError(
+                "Invalid input: Invalid image size: Decoded image does not have the size "
+                "signaled in the file."
+            )
+
+        image.load = refuse  # type: ignore[method-assign]
+        return image
+
+    monkeypatch.setattr(images, "open_image", opening)
+
+
+def test_a_heic_libheif_refuses_for_its_size_is_decoded_with_ffmpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A JPEG stands in for the HEIC: like pillow-heif, it reads EXIF without decoding pixels.
+    src = _picture(tmp_path / "a.heic", "JPEG", orientation=6)
+    _refused_by_libheif(monkeypatch)
+    calls: list[Path] = []
+
+    def decode(ffmpeg: Path, path: Path, *, timeout: float) -> Image.Image:
+        calls.append(path)
+        return Image.new("RGB", (64, 48), (200, 10, 10))
+
+    monkeypatch.setattr(images.ffmpeg_media, "decode_still", decode)
+    rules = convert_tool._rules(MediaConvertOptions(), ".jpg")
+    result = images.render(src, rules, ffmpeg=tmp_path / "ffmpeg.exe")
+    assert isinstance(result, images.Rendered)
+    assert calls == [src]
+    assert result.size == (48, 64)  # the EXIF orientation (6) is still applied
+
+
+def test_the_ffmpeg_fallback_is_refused_when_its_size_is_wrong_or_ffmpeg_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _picture(tmp_path / "a.heic", "PNG", exif=False)
+    _refused_by_libheif(monkeypatch)
+    monkeypatch.setattr(
+        images.ffmpeg_media, "decode_still", lambda *a, **k: Image.new("RGB", (60, 40))
+    )
+    rules = convert_tool._rules(MediaConvertOptions(), ".jpg")
+    with pytest.raises(ImageError, match="60x40 instead of 64x48"):
+        images.render(src, rules, ffmpeg=tmp_path / "ffmpeg.exe")
+    with pytest.raises(ImageError, match="installing ffmpeg"):
+        images.render(src, rules, ffmpeg=None)
+
+
+def test_decode_still_reads_a_picture_at_full_size(tmp_path: Path, ffmpeg_path: Path) -> None:
+    src = _picture(tmp_path / "a.png", "PNG", exif=False)
+    decoded = ffmpeg_media.decode_still(ffmpeg_path, src)
+    assert decoded.size == (64, 48) and decoded.mode == "RGB"
 
 
 def test_the_verification_really_checks_the_size(tmp_path: Path) -> None:

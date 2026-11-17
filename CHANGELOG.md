@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Media converter: iPhone spatial audio and pre-cropped HEIC (2026-11-17)
+
+- **MOV with Apple spatial audio.** iPhone 16 and newer videos carry a second sound track in
+  Apple Positional Audio (`apple_apac`). ffmpeg has no decoder for it and the MP4 muxer cannot copy
+  it, so every such video failed at apply with "no decoder found for: apple_apac". They are now
+  skipped at scan with that reason, instead of being planned and failing. They are never converted
+  with a sound track missing (owner's decision).
+- **HEIC refused by libheif for its size.** Some HEIC files crop the picture in the HEVC stream
+  and again in the container; libheif 1.23 then refuses them ("Decoded image does not have the
+  size signaled in the file"). `media_convert` now decodes such a file with ffmpeg
+  (`core/media/ffmpeg.decode_still`, `-apply_cropping codec`) and uses the result only when it has
+  exactly the header's size. Without ffmpeg the error says that installing it would help.
+
 ### Whole-plan review and fixes (2026-11-15)
 
 Plan reference: `docs/MODERNIZATION_PLAN.md` §4 Phases 7.8 and 8.5 and §5. User-facing text is in

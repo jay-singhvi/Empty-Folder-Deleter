@@ -5,6 +5,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.3.0: a simpler tool page (2026-11-17)
+
+Owner's request: simplify the GUI without losing options or control.
+- **One action row:** Scan (it turns into Cancel while a job runs), Apply N… (says how many
+  checked actions it will carry out), Compare group (duplicates), Undo this run (when it can),
+  the tool's extra buttons, and a *More* menu with Export… and Reset options to defaults.
+- Select all / Select none moved into the plan table's toolbar, next to the filter.
+- The progress bar shows only while a job runs. The scan-notes box shows only when a scan left
+  notes, and is only as tall as they need (up to 5 lines). A folder list is as tall as the folders
+  in it (2 to 6 rows).
+- **Remembered options replace presets.** A page now remembers the options of its last scan, not
+  only the folders (setting *Remember last folders and options*, on by default). For safety,
+  🔒 locked options, options marked `replaces_originals` and a permanent-delete choice are never
+  remembered: they always start from their defaults. Folders saved by 0.2 are still read.
+- Every option stays available: basic options are shown, advanced ones stay under *Advanced
+  options*. Screenshots in `docs/images/` are regenerated.
+
 ### Version 0.3.0: presets and scheduled runs removed (2026-11-17)
 
 The owner decided to remove two features entirely.

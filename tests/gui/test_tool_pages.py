@@ -35,6 +35,7 @@ from various_tools.gui.tool_page import (
     ToolPage,
     apply_summary,
     missing_programs,
+    rememberable_fields,
     result_summary,
 )
 from various_tools.tools.base import discover
@@ -689,7 +690,7 @@ def test_a_failing_scan_is_reported_not_raised(
     assert page.scan_button.isEnabled()
 
 
-# ----- remembered folders ---------------------------------------------------------------------
+# ----- remembered options ---------------------------------------------------------------------
 
 
 def test_remembered_folders_survive_a_new_page_and_a_new_state(
@@ -701,8 +702,8 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     tmp_path: Path,
 ) -> None:
     page = open_tool("empty_folders", str(empty_tree))
-    scan(page)  # a scan remembers the folders
-    assert gui_state.last_folders("empty_folders") == {"roots": [str(empty_tree)]}
+    scan(page)  # a scan remembers the folders and options
+    assert gui_state.last_options("empty_folders")["roots"] == [str(empty_tree)]
     assert (tmp_path / "data" / "gui_state.json").is_file()
 
     fresh_window = make_window()
@@ -711,7 +712,7 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     assert [str(r) for r in fresh_page.form.raw_values()["roots"]] == [str(empty_tree)]
 
     reloaded = AppState.load(gui_state.settings_path)
-    assert reloaded.last_folders("empty_folders") == {"roots": [str(empty_tree)]}
+    assert reloaded.last_options("empty_folders")["roots"] == [str(empty_tree)]
     third = make_window(reloaded)
     third_page = third.open_tool("empty_folders")
     assert third_page is not None
@@ -720,6 +721,61 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     other = third.open_tool("duplicates")
     assert other is not None
     assert other.form.raw_values()["roots"] == []
+
+
+def test_options_are_remembered_and_reset_keeps_the_folders(
+    make_window: Callable[..., MainWindow],
+    open_tool: OpenTool,
+    empty_tree: Path,
+    scan: PageStep,
+) -> None:
+    page = open_tool("empty_folders", str(empty_tree))
+    page.form.update_values({"min_age_days": 7})
+    scan(page)
+
+    again = make_window().open_tool("empty_folders")
+    assert again is not None
+    assert again.form.raw_values()["min_age_days"] == 7  # remembered
+
+    again.reset_options()
+    values = again.form.raw_values()
+    assert values["min_age_days"] == 0  # back to the default
+    assert [str(r) for r in values["roots"]] == [str(empty_tree)]  # folders stay
+
+
+def test_risky_options_are_never_remembered(
+    make_window: Callable[..., MainWindow],
+    open_tool: OpenTool,
+    gui_state: AppState,
+    empty_tree: Path,
+    scan: PageStep,
+) -> None:
+    # A permanent delete always starts again from the Recycle Bin default.
+    page = open_tool("empty_folders", str(empty_tree))
+    page.form.update_values({"delete_mode": "permanent"})
+    scan(page)
+    assert "delete_mode" not in gui_state.last_options("empty_folders")
+    again = make_window().open_tool("empty_folders")
+    assert again is not None and again.form.raw_values()["delete_mode"] == "trash"
+
+    # Options that replace or remove originals, and 🔒 locked options, are left out entirely.
+    from various_tools.tools.media_convert import MediaConvertOptions
+    from various_tools.tools.organize_by_date.tool import OrganizeByDateOptions
+
+    convert = rememberable_fields(MediaConvertOptions)
+    assert "trash_originals" not in convert and "jpeg_quality" in convert
+    organize = rememberable_fields(OrganizeByDateOptions)
+    assert "cloud_only" not in organize
+
+
+def test_folders_saved_by_version_0_2_are_still_read(make_state: Callable[..., AppState]) -> None:
+    state = make_state()
+    path = state.settings.resolved_data_folder() / "gui_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"format": 1, "last_folders": {"empty_folders": {"roots": ["C:/x"]}}}', encoding="utf-8"
+    )
+    assert state.last_options("empty_folders") == {"roots": ["C:/x"]}
 
 
 def test_remembering_can_be_switched_off(
@@ -734,7 +790,7 @@ def test_remembering_can_be_switched_off(
     page = window.open_tool("empty_folders", str(empty_tree))
     assert page is not None
     scan(page)
-    assert state.last_folders("empty_folders") == {}
+    assert state.last_options("empty_folders") == {}
     assert not (tmp_path / "data" / "gui_state.json").exists()
 
 

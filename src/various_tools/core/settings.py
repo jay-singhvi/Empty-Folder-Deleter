@@ -386,10 +386,12 @@ class Settings(BaseModel):
     )
     remember_last_folders: bool = Field(
         default=True,
-        title="Remember last folders",
+        title="Remember last folders and options",
         description=(
-            "On: each tool page opens with the folders you used last time on that page. Off: "
-            "tool pages start empty and nothing is remembered."
+            "On: each tool page opens with the folders and options you used last time on that "
+            "page. Locked options, permanent delete and options that replace or remove originals "
+            "always start from their defaults. Off: tool pages start empty and nothing is "
+            "remembered."
         ),
         json_schema_extra=_hint("Desktop app"),
     )

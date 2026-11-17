@@ -1,4 +1,4 @@
-"""What every GUI page shares: the settings, the tools, remembered folders and the
+"""What every GUI page shares: the settings, the tools, remembered options and the
 external-program lookup. No Qt here, so it is easy to test.
 
 Tests build an :class:`AppState` with a settings file under ``tmp_path`` whose ``data_folder`` is
@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 GUI_STATE_FILE = "gui_state.json"
 GUI_STATE_FORMAT = 1
+LAST_OPTIONS_KEY = "last_options"
+OLD_LAST_FOLDERS_KEY = "last_folders"
 
 SettingsListener = Callable[["Settings"], None]
 
@@ -96,7 +98,7 @@ class AppState:
         path = self.settings.journal_path()
         return Journal(path) if path.is_file() else None
 
-    # ----- remembered folders ----------------------------------------------------
+    # ----- remembered options ----------------------------------------------------
 
     def _gui_state_path(self) -> Path:
         return self.settings.resolved_data_folder() / GUI_STATE_FILE
@@ -114,27 +116,37 @@ class AppState:
             return {}
         return data  # pyright: ignore[reportUnknownVariableType]
 
-    def last_folders(self, tool_id: str) -> dict[str, Any]:
-        """Folder field values used last time on this tool's page (empty when off or unknown)."""
+    def last_options(self, tool_id: str) -> dict[str, Any]:
+        """Option values used last time on this tool's page (empty when off or unknown).
+
+        Version 0.2 stored only the folders, under ``last_folders``; those are still read.
+        """
         if not self.settings.remember_last_folders:
             return {}
-        folders: Any = self._read_gui_state().get("last_folders", {})
-        if not isinstance(folders, dict):
-            return {}
-        values: Any = folders.get(tool_id, {})  # pyright: ignore[reportUnknownMemberType]
-        return dict(values) if isinstance(values, dict) else {}  # pyright: ignore[reportUnknownArgumentType]
+        state = self._read_gui_state()
+        for key in (LAST_OPTIONS_KEY, OLD_LAST_FOLDERS_KEY):
+            tools: Any = state.get(key, {})
+            if not isinstance(tools, dict):
+                continue
+            values: Any = tools.get(tool_id)  # pyright: ignore[reportUnknownMemberType]
+            if isinstance(values, dict):
+                return dict(values)  # pyright: ignore[reportUnknownArgumentType]
+        return {}
 
-    def remember_folders(self, tool_id: str, values: Mapping[str, Any]) -> None:
-        """Store folder field values for this tool. Does nothing when the setting is off."""
+    def remember_options(self, tool_id: str, values: Mapping[str, Any]) -> None:
+        """Store option values for this tool. Does nothing when the setting is off.
+
+        The caller decides which options may be remembered (see ``tool_page.rememberable_fields``).
+        """
         if not self.settings.remember_last_folders:
             return
         data = self._read_gui_state()
         data["format"] = GUI_STATE_FORMAT
-        folders: Any = data.setdefault("last_folders", {})
-        if not isinstance(folders, dict):
-            folders = {}
-            data["last_folders"] = folders
-        folders[tool_id] = json.loads(json.dumps(dict(values), default=str))
+        tools: Any = data.setdefault(LAST_OPTIONS_KEY, {})
+        if not isinstance(tools, dict):
+            tools = {}
+            data[LAST_OPTIONS_KEY] = tools
+        tools[tool_id] = json.loads(json.dumps(dict(values), default=str))
         path = self._gui_state_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,4 +155,4 @@ class AppState:
                 json.dump(data, handle, indent=2, ensure_ascii=False)
             os.replace(tmp_name, path)
         except OSError as exc:
-            log.warning("Could not remember folders in %s: %s", path, exc)
+            log.warning("Could not remember options in %s: %s", path, exc)

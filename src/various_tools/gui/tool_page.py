@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -67,6 +69,7 @@ from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
+from various_tools.core.schema import describe
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
     UndoInfo,
@@ -82,6 +85,9 @@ from various_tools.tools.base import Tool, ToolOptions
 
 log = logging.getLogger(__name__)
 
+APPLY_TEXT = "Apply…"
+# An option value never remembered between sessions (a permanent delete).
+PERMANENT = "permanent"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
 COMPARE_TOOLS = frozenset({"duplicates"})
 LIVE_PREVIEW_DELAY_MS = 700
@@ -90,6 +96,16 @@ Confirm = Callable[[str, str], bool]
 Inform = Callable[[str, str], None]
 ChooseExport = Callable[[], tuple[str, str] | None]
 ChooseExtraPath = Callable[[Any], str | None]  # a tool extra -> the chosen file, or None
+
+
+def rememberable_fields(model: type[ToolOptions]) -> list[str]:
+    """The options a page may remember for next time.
+
+    Left out, so they always start from their safe default: 🔒 locked options and options
+    marked ``replaces_originals`` (they replace, remove or download originals). A
+    permanent-delete value is also never remembered (see :data:`PERMANENT`).
+    """
+    return [s.name for s in describe(model) if not s.locked and not s.replaces_originals]
 
 
 def missing_programs(notes: list[str]) -> list[str]:
@@ -230,16 +246,30 @@ class ToolPage(QWidget):
         form_scroll.setWidget(self.form)
 
         # ----- actions -----------------------------------------------------------------
-        self.scan_button = QPushButton("Scan (preview)")
-        self.scan_button.setToolTip("Find what would change. Nothing on disk changes.")
+        self.scan_button = QPushButton("Scan")
+        self.scan_button.setToolTip("Preview what would change. Nothing on disk changes.")
         self.scan_button.setDefault(True)
         self.cancel_button = QPushButton("Cancel")
-        self.apply_button = QPushButton("Apply…")
+        self.cancel_button.setVisible(False)  # shown only while a job runs
+        self.apply_button = QPushButton(APPLY_TEXT)
         self.apply_button.setToolTip("Carry out the checked actions. Asks for confirmation first.")
-        self.export_button = QPushButton("Export…")
+        # "More": the actions that are needed now and then, out of the main row.
+        self.more_button = QToolButton()
+        self.more_button.setText("More")
+        self.more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        more_menu = QMenu(self.more_button)
+        more_menu.setToolTipsVisible(True)
+        self.export_button = more_menu.addAction("Export…")
         self.export_button.setToolTip(
             "Save the plan (or the applied result) as CSV, Excel or HTML."
         )
+        more_menu.addSeparator()
+        self.reset_options_action = more_menu.addAction("Reset options to defaults")
+        self.reset_options_action.setToolTip(
+            "Put every option back to its default. The folders stay as they are."
+        )
+        self.more_button.setMenu(more_menu)
         self.compare_button = QPushButton("Compare group…")
         self.compare_button.setToolTip(
             "Show the selected duplicate group side by side, change which copy is kept, "
@@ -256,6 +286,7 @@ class ToolPage(QWidget):
         self.undo_button.setToolTip("Move and rename everything this run changed back.")
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)  # shown only while a job runs
         self.status_label = QLabel("Choose options, then Scan to preview.")
         self.status_label.setWordWrap(True)
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -264,10 +295,7 @@ class ToolPage(QWidget):
             self.scan_button,
             self.cancel_button,
             self.apply_button,
-            self.export_button,
             self.compare_button,
-            self.select_all_button,
-            self.select_none_button,
             self.undo_button,
         ):
             buttons.addWidget(button)
@@ -302,21 +330,22 @@ class ToolPage(QWidget):
         # ----- tool extras (for example catalog export and import) ----------------------
         self.extras: tuple[Any, ...] = tuple(getattr(tool, "extras", ()) or ())
         self.extra_buttons: dict[str, QPushButton] = {}
-        extras_row = QHBoxLayout()
         for extra in self.extras:
             button = QPushButton(f"{extra.label}…")
             button.setToolTip(extra.description)
             button.clicked.connect(lambda _c=False, e=extra: self.run_extra(e))
-            extras_row.addWidget(button)
+            buttons.addWidget(button)
             self.extra_buttons[extra.id] = button
-        extras_row.addStretch(1)
+        buttons.addWidget(self.more_button)
 
         # ----- results -----------------------------------------------------------------
         self.notes_view = QPlainTextEdit()
         self.notes_view.setReadOnly(True)
-        self.notes_view.setMaximumHeight(90)
-        self.notes_view.setPlaceholderText("Scan notes appear here.")
+        self.notes_view.setVisible(False)  # shown only when a scan left notes
         self.table = PlanTable()
+        # Selecting rows belongs to the results, so the buttons sit in the table's toolbar.
+        self.table.add_toolbar_widget(self.select_all_button)
+        self.table.add_toolbar_widget(self.select_none_button)
         if getattr(tool, "plan_view", None) == FOLDER_TREE:
             self.table.set_view_mode(FOLDER_TREE)
         # A tool that can build a size tree from its plan gets a "Size map" tab (plan 7.1).
@@ -341,8 +370,6 @@ class ToolPage(QWidget):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.addLayout(buttons)
-        if self.extras:
-            bottom_layout.addLayout(extras_row)
         bottom_layout.addWidget(self.progress_bar)
         bottom_layout.addWidget(self.status_label)
         bottom_layout.addWidget(self.missing_banner)
@@ -367,7 +394,8 @@ class ToolPage(QWidget):
         self.scan_button.clicked.connect(lambda _c=False: self.scan())
         self.cancel_button.clicked.connect(lambda _c=False: self.cancel())
         self.apply_button.clicked.connect(lambda _c=False: self.apply())
-        self.export_button.clicked.connect(lambda _c=False: self.export())
+        self.export_button.triggered.connect(lambda _c=False: self.export())
+        self.reset_options_action.triggered.connect(lambda _c=False: self.reset_options())
         self.compare_button.clicked.connect(lambda _c=False: self.open_compare())
         self.undo_button.clicked.connect(lambda _c=False: self.undo_last())
         self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
@@ -383,9 +411,16 @@ class ToolPage(QWidget):
     # ----- options ----------------------------------------------------------------------------
 
     def _initial_values(self) -> dict[str, Any]:
-        remembered = self.state.last_folders(self.tool.id)
-        known = set(self.tool.Options.model_fields)
-        return {name: value for name, value in remembered.items() if name in known}
+        remembered = self.state.last_options(self.tool.id)
+        keep = set(rememberable_fields(self.tool.Options))
+        return {name: value for name, value in remembered.items() if name in keep}
+
+    def reset_options(self) -> None:
+        """Every option back to its default; the folder fields keep what they hold."""
+        values = self.form.raw_values()
+        folders = {name: values[name] for name in self.form.folder_fields() if name in values}
+        self.form.set_values(folders)
+        self._set_status("Options reset to the defaults.")
 
     def set_folder(self, path: str) -> bool:
         """Put a folder into the first folder field (used by ``--folder`` and the shell menu)."""
@@ -398,10 +433,16 @@ class ToolPage(QWidget):
             self._set_status("Some options are not valid; see the messages in the form.", True)
             return None
 
-    def _remember_folders(self) -> None:
-        values = self.form.raw_values()
-        self.state.remember_folders(
-            self.tool.id, {name: values.get(name) for name in self.form.folder_fields()}
+    def _remember_options(self, options: ToolOptions) -> None:
+        """Remember what this scan used, except options that must start from the default."""
+        values = options.model_dump(mode="json")
+        self.state.remember_options(
+            self.tool.id,
+            {
+                name: values[name]
+                for name in rememberable_fields(self.tool.Options)
+                if name in values and values[name] != PERMANENT
+            },
         )
 
     # ----- scan -------------------------------------------------------------------------------
@@ -420,7 +461,7 @@ class ToolPage(QWidget):
         options = self._build_options()
         if options is None:
             return None
-        self._remember_folders()
+        self._remember_options(options)
         tool = self.tool
 
         def job(ctx: Any) -> tuple[Plan, list[int | None]]:
@@ -442,7 +483,7 @@ class ToolPage(QWidget):
         self.result = None
         self._applied = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
-        self.notes_view.setPlainText("\n".join(plan.notes))
+        self._show_notes(plan.notes)
         self._show_missing(missing_programs(plan.notes))
         self._show_cloud_only(plan)
         self._show_size_map(plan)
@@ -453,6 +494,15 @@ class ToolPage(QWidget):
             )
         else:
             self._set_status("Nothing to do: the scan found no actions.")
+
+    def _show_notes(self, notes: list[str]) -> None:
+        """The scan notes, in a box only as tall as they need (up to 5 lines), or hidden."""
+        self.notes_view.setPlainText("\n".join(notes))
+        self.notes_view.setVisible(bool(notes))
+        lines = min(max(len(notes), 1), 5)
+        line = self.notes_view.fontMetrics().lineSpacing()
+        margins = 2 * self.notes_view.frameWidth() + 12
+        self.notes_view.setFixedHeight(lines * line + margins)
 
     def _applying(self) -> bool:
         """An apply is being confirmed or is running."""
@@ -1086,7 +1136,13 @@ class ToolPage(QWidget):
         selected = bool(self.plan.selected_actions()) if self.plan is not None else False
         self.scan_button.setEnabled(not busy)
         self.cancel_button.setEnabled(running)
+        self.cancel_button.setVisible(running)
+        self.progress_bar.setVisible(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
+        count = len(self.plan.selected_actions()) if self.plan is not None else 0
+        self.apply_button.setText(f"Apply {count}…" if count and not self._applied else APPLY_TEXT)
+        self.more_button.setEnabled(not busy)
+        self.reset_options_action.setEnabled(not busy)
         self.export_button.setEnabled(not busy and has_plan)
         can_select = not busy and has_plan and not self._applied
         self.select_all_button.setEnabled(can_select)

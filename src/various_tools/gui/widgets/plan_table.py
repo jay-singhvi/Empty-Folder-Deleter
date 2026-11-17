@@ -653,6 +653,7 @@ class PlanTable(QWidget):
         self.view.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
         top = QHBoxLayout()
+        self._toolbar = top
         top.addWidget(self.filter_edit, 1)
         top.addWidget(self.kind_combo)
         top.addWidget(QLabel("View:"))
@@ -708,6 +709,10 @@ class PlanTable(QWidget):
     def view_mode(self) -> str:
         """``GROUPED`` or ``FOLDER_TREE``."""
         return self._model.mode
+
+    def add_toolbar_widget(self, widget: QWidget) -> None:
+        """Put ``widget`` at the end of the toolbar above the table (filter, kind, view)."""
+        self._toolbar.addWidget(widget)
 
     def set_view_mode(self, mode: str) -> None:
         """Show the plan grouped or as a folder tree. The plan and its checks stay as they are."""

@@ -142,7 +142,6 @@ class PathListEdit(QWidget):
         super().__init__(parent)
         self.list_widget = QListWidget(self)
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list_widget.setMinimumHeight(70)
         self.list_widget.setAcceptDrops(False)
         self.add_button = QPushButton("Add…", self)
         self.remove_button = QPushButton("Remove", self)
@@ -157,6 +156,14 @@ class PathListEdit(QWidget):
         self.setAcceptDrops(True)
         self.add_button.clicked.connect(self.browse)
         self.remove_button.clicked.connect(self.remove_selected)
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """As tall as the folders listed (2 to 6 rows), so a short list takes little room."""
+        rows = min(max(self.list_widget.count(), 2), 6)
+        row = self.list_widget.sizeHintForRow(0) if self.list_widget.count() else 0
+        row = max(row, self.list_widget.fontMetrics().height() + 4)
+        self.list_widget.setFixedHeight(rows * row + 2 * self.list_widget.frameWidth() + 4)
 
     def paths(self) -> list[str]:
         return [self.list_widget.item(row).text() for row in range(self.list_widget.count())]
@@ -165,6 +172,7 @@ class PathListEdit(QWidget):
         """Replace the list (duplicates dropped) without emitting ``changed``."""
         self.list_widget.clear()
         self._append(paths)
+        self._fit_height()
 
     def add_paths(self, paths: Iterable[str]) -> None:
         """Add folders that are not already listed; emits ``changed`` if any were added."""
@@ -176,6 +184,7 @@ class PathListEdit(QWidget):
         rows = sorted((self.list_widget.row(item) for item in selected), reverse=True)
         for row in rows:
             self.list_widget.takeItem(row)
+        self._fit_height()
         if rows:
             self.changed.emit()
 
@@ -206,6 +215,8 @@ class PathListEdit(QWidget):
             known.add(_path_key(path))
             self.list_widget.addItem(path)
             added = True
+        if added:
+            self._fit_height()
         return added
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 (Qt name)

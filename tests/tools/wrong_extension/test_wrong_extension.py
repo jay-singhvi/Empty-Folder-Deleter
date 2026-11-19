@@ -23,7 +23,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 32
 PDF = b"%PDF-1.7\n" + b"\x00" * 32
 ZIP = b"PK\x03\x04" + b"\x00" * 32
-MP3 = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 32
+MP3 = b"\xff\xfb\x90\x64" + b"\x00" * 32
 SEVEN_Z = b"7z\xbc\xaf\x27\x1c\x00\x04" + b"\x00" * 32
 
 

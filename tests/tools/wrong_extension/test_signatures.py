@@ -28,7 +28,6 @@ CASES: list[tuple[str, bytes, str]] = [
     ("tiff_be", b"MM\x00*\x00\x00\x00\x08", ".tiff"),
     ("heic", ftyp(b"heic"), ".heic"),
     ("heix", ftyp(b"heix"), ".heic"),
-    ("mif1", ftyp(b"mif1"), ".heic"),
     ("avif", ftyp(b"avif"), ".avif"),
     ("mp4", ftyp(b"isom"), ".mp4"),
     ("mp42", ftyp(b"mp42"), ".mp4"),
@@ -38,7 +37,6 @@ CASES: list[tuple[str, bytes, str]] = [
     ("zip", b"PK\x03\x04\x14\x00\x00\x00", ".zip"),
     ("mkv", EBML + b"\x88matroska", ".mkv"),
     ("webm", EBML + b"\x84webm", ".webm"),
-    ("mp3_id3", b"ID3\x03\x00\x00\x00\x00\x00\x00", ".mp3"),
     ("mp3_frame", b"\xff\xfb\x90\x64\x00\x00\x00\x00", ".mp3"),
     ("flac", b"fLaC\x00\x00\x00\x22", ".flac"),
     ("ogg", b"OggS\x00\x02" + b"\x00" * 10, ".ogg"),
@@ -61,6 +59,37 @@ def test_detect_every_signature(label: str, head: bytes, expected: str) -> None:
 )
 def test_unknown_content_gives_none(head: bytes) -> None:
     assert detect(head) is None
+
+
+def ftyp_brands(major: bytes, *compatible: bytes) -> bytes:
+    body = major + b"\x00\x00\x00\x00" + b"".join(compatible)
+    return (8 + len(body)).to_bytes(4, "big") + b"ftyp" + body
+
+
+def test_mif1_with_avif_compatible_brand_is_avif() -> None:
+    head = ftyp_brands(b"mif1", b"mif1", b"avif", b"miaf")
+    assert detect(head.ljust(64, b"\x00")) == ".avif"
+
+
+def test_mif1_with_heic_compatible_brand_is_heic() -> None:
+    head = ftyp_brands(b"mif1", b"mif1", b"heic")
+    assert detect(head.ljust(64, b"\x00")) == ".heic"
+
+
+def test_mif1_alone_is_unknown() -> None:
+    assert detect(ftyp_brands(b"mif1", b"mif1").ljust(64, b"\x00")) is None
+
+
+def test_id3_header_is_not_decided() -> None:
+    assert detect(b"ID3\x03\x00\x00\x00\x00\x00\x00".ljust(64, b"\x00")) is None
+
+
+def test_utf16_bom_text_is_not_mp3() -> None:
+    assert detect(b"\xff\xfe" + "hello world".encode("utf-16-le")) is None
+
+
+def test_mp3_frame_still_detected() -> None:
+    assert detect(b"\xff\xfb\x90\x64\x00\x00\x00\x00") == ".mp3"
 
 
 def test_equivalent_extensions() -> None:

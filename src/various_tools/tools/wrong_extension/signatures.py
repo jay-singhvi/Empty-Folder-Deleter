@@ -72,7 +72,8 @@ for _index, (_family, _extensions) in enumerate(_GROUPS):
 for _ext in _ZIP_BASED:
     _GROUP_OF[_ext] = _GROUP_OF[".zip"]
 
-_HEIC_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"})
+_HEIC_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis"})
+_HEIF_GENERIC_BRANDS = frozenset({b"mif1", b"msf1"})
 _AVIF_BRANDS = frozenset({b"avif", b"avis"})
 _MP4_BRANDS = frozenset(
     {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"mmp4"}
@@ -96,8 +97,21 @@ def is_equivalent(current: str, wanted: str) -> bool:
     return a in _GROUP_OF and _GROUP_OF[a] == _GROUP_OF.get(b)
 
 
+def _heif_by_compatible_brands(head: bytes) -> str | None:
+    """``mif1``/``msf1`` name only the container; the compatible brands say AVIF or HEIC."""
+    size = min(int.from_bytes(head[0:4], "big"), len(head))
+    brands = {head[i : i + 4] for i in range(16, size - 3, 4)}
+    if brands & _AVIF_BRANDS:
+        return ".avif"
+    if brands & _HEIC_BRANDS:
+        return ".heic"
+    return None
+
+
 def _ftyp(head: bytes) -> str | None:
     brand = head[8:12]
+    if brand in _HEIF_GENERIC_BRANDS:
+        return _heif_by_compatible_brands(head)
     if brand in _HEIC_BRANDS:
         return ".heic"
     if brand in _AVIF_BRANDS:
@@ -117,12 +131,15 @@ def _riff(head: bytes) -> str | None:
 
 
 def _is_mp3_frame(head: bytes) -> bool:
-    """An MPEG audio frame header: 11 sync bits, a real version, and layer I, II or III."""
+    """An MPEG audio layer III frame header: 11 sync bits, a real version, valid bitrate and rate.
+
+    Layer III only: ``FF FE`` (a UTF-16 LE byte order mark) would otherwise pass as layer I.
+    """
     if len(head) < 4 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
         return False
     version, layer = (head[1] >> 3) & 0x03, (head[1] >> 1) & 0x03
     bitrate, rate = head[2] >> 4, (head[2] >> 2) & 0x03
-    return version != 1 and layer != 0 and bitrate not in (0, 15) and rate != 3
+    return version != 1 and layer == 1 and bitrate not in (0, 15) and rate != 3
 
 
 def detect(head: bytes) -> str | None:
@@ -151,7 +168,7 @@ def detect(head: bytes) -> str | None:
         return ".zip"
     if head.startswith(b"\x1a\x45\xdf\xa3"):
         return ".webm" if b"webm" in head[:64] else ".mkv"
-    if head.startswith(b"ID3") or _is_mp3_frame(head):
+    if _is_mp3_frame(head):
         return ".mp3"
     if head.startswith(b"fLaC"):
         return ".flac"

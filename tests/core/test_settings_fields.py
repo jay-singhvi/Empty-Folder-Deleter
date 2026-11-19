@@ -224,6 +224,16 @@ def test_locked_defaults_are_unchanged() -> None:
     )
 
 
+def test_library_folders_default_empty_and_round_trip(tmp_path: Path) -> None:
+    assert Settings().library_folders == []
+    field = Settings.model_fields["library_folders"]
+    assert field.title and field.description
+    path = tmp_path / "settings.toml"
+    folders = [tmp_path / "Pictures", tmp_path / "Camera Roll"]
+    save_settings(Settings(library_folders=folders), path)
+    assert load_settings(path).library_folders == folders
+
+
 def test_default_protected_list_is_not_shared_between_instances() -> None:
     a, b = Settings(), Settings()
     a.protected_folders.append("X")

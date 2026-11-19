@@ -160,8 +160,18 @@ class Settings(BaseModel):
         ),
         json_schema_extra=_hint("Folders"),
     )
+    library_folders: list[Path] = Field(
+        default_factory=list[Path],
+        title="Photo and video folders",
+        description=(
+            "Folders the Timeline and the Map show photos and videos from. Their dates and "
+            "places are kept in a small cache, so only new or changed files are read on each "
+            "update. Files that are only in OneDrive are listed but never downloaded."
+        ),
+        json_schema_extra=_hint("Folders", widget="folders"),
+    )
 
-    # ----- safety (🔒) -------------------------------------------------------
+    # ----- safety (🔒)-------------------------------------------------------
     delete_mode: Literal["trash", "permanent"] = Field(
         default="trash",
         title="Delete mode",

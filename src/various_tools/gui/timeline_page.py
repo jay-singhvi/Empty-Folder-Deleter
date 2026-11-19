@@ -93,7 +93,7 @@ class TimelinePage(QWidget):
 
         self.update_button = QPushButton(UPDATE_TEXT)
         self.update_button.setDefault(True)
-        self.update_button.clicked.connect(lambda _c=False: self.update())
+        self.update_button.clicked.connect(lambda _c=False: self.update_library())
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(lambda _c=False: self.cancel())
@@ -233,7 +233,7 @@ class TimelinePage(QWidget):
 
     # ----- update ------------------------------------------------------------------------------
 
-    def update(self) -> Worker | None:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    def update_library(self) -> Worker | None:
         """Bring the library up to date for the chosen folders, in the background.
 
         None when a job already runs, the window is closing or no folder is chosen. (This

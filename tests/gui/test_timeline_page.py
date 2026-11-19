@@ -130,7 +130,7 @@ def test_update_runs_sync_and_refreshes(
     page = make_page(qtbot, make_state(library_folders=[str(root)]))
     assert tree_texts(page) == []
 
-    worker = page.update()
+    worker = page.update_library()
     assert worker is not None
     assert not page.update_button.isEnabled()
     qtbot.waitUntil(lambda: page.worker is None, timeout=30000)
@@ -140,7 +140,7 @@ def test_update_runs_sync_and_refreshes(
     assert page.update_button.isEnabled()
 
     (root / "a.jpg").unlink()
-    assert page.update() is not None
+    assert page.update_library() is not None
     qtbot.waitUntil(lambda: page.worker is None, timeout=30000)
     assert page.status_label.text() == "1 photo and 0 videos. Updated: 0 new, 1 removed."
 
@@ -149,7 +149,7 @@ def test_update_without_folders_asks_for_one(
     qtbot: QtBot, make_state: Callable[..., AppState]
 ) -> None:
     page = make_page(qtbot, make_state())
-    assert page.update() is None
+    assert page.update_library() is None
     assert "folder" in page.status_label.text().lower()
 
 
@@ -162,3 +162,12 @@ def test_changing_folders_saves_them_in_settings(
     folder.mkdir()
     page.folders.add_paths([str(folder)])
     assert state.settings.library_folders == [folder]
+
+
+def test_qt_repaint_method_is_not_hidden() -> None:
+    from PySide6.QtWidgets import QWidget
+
+    from various_tools.gui.timeline_page import TimelinePage
+
+    assert "update" not in TimelinePage.__dict__
+    assert TimelinePage.update is QWidget.update

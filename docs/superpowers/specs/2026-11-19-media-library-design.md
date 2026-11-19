@@ -106,7 +106,7 @@ class MediaGrid(QWidget):
   line: "1,234 photos and 56 videos. Updated: 12 new, 3 removed."
 * On open, it shows what the library already has (no update needed to browse).
 * `TimelinePage(state: AppState)`, attribute names: `folders`, `update_button`, `months`
-  (`QTreeWidget`), `grid` (`MediaGrid`), `status_label`, `update() -> Worker | None`.
+  (`QTreeWidget`), `grid` (`MediaGrid`), `status_label`, `update_library() -> Worker | None` (not `update`, which is Qt's repaint).
 
 ### B. World map widget
 

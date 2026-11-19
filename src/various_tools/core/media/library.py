@@ -226,6 +226,11 @@ class MediaLibrary:
                     old = known.get(key)
                     if old is not None and old == (info.size, info.mtime, cloud):
                         report.unchanged += 1
+                    elif cloud and old is not None and old[:2] == (info.size, info.mtime):
+                        # Read earlier, now "Free up space": same content, so keep what was read
+                        # (date, GPS, size) and only record that it is online-only (rule 3).
+                        self._conn.execute("UPDATE items SET cloud_only = 1 WHERE key = ?", (key,))
+                        report.unchanged += 1
                     else:
                         item, note = _read_file(info, cloud, ctx, need_note=not ffprobe_note)
                         if note is not None:

@@ -492,3 +492,25 @@ def test_with_location_returns_only_items_with_gps(
     assert [i.path.name for i in located] == ["here.jpg"]
     assert located[0].lat == pytest.approx(10.0)
     assert located[0].lon == pytest.approx(-20.0)
+
+
+def test_file_that_goes_cloud_only_after_being_read_keeps_its_date_and_gps(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, reads: list[Path], cloud: set[str]
+) -> None:
+    root = tmp_path / "pics"
+    make_jpeg(root / "a.jpg", gps=((37.0, 46.0, 30.0), (122.0, 25.0, 12.0)), size=(40, 30))
+    lib.sync([root], ctx)
+    assert len(reads) == 1
+
+    cloud.add("a.jpg")  # "Free up space": same size and mtime, now online-only
+    report = lib.sync([root], ctx)
+
+    assert len(reads) == 1  # not read again (rule 3)
+    assert report.cloud_only == 1
+    item = lib.items()[0]
+    assert item.cloud_only is True
+    assert item.date_source == "camera"
+    assert item.taken == datetime(2024, 5, 6, 7, 8, 9)
+    assert item.lat == pytest.approx(37.775, abs=1e-3)
+    assert (item.width, item.height) == (40, 30)
+    assert len(lib.with_location()) == 1

@@ -1,6 +1,6 @@
 [project]
 name = "various-tools"
-version = "0.3.0"
+version = "0.4.0"
 description = "Various Tools: a Windows toolkit for cleaning up, deduplicating and organizing files and media."
 readme = "README.md"
 license = { text = "MIT" }

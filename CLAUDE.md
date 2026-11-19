@@ -93,10 +93,16 @@ Run all of the above before you say a change is done, and show the output.
 - **Only `core/deps.py` may locate external programs.** No other module may call `shutil.which`,
   hardcode an executable name, or hardcode a path to ffmpeg, ffprobe, ExifTool or Ollama. Media
   code receives resolved paths through `RunContext.deps`.
+- **GUI words are plain.** The GUI shows the words in `gui/wording.py` ("Move to Recycle Bin",
+  not `trash`); a tool sets `scan_label` and `found_nouns`. CLI output and exports keep
+  the raw names.
 - **`core/` has no UI code.** No Qt imports and no `print` calls. Tools have no `print`, `input`
   or Qt either. Use the logger and the progress reporter on `RunContext`.
 - **`scan()` never changes the disk.** Caches are the only exception.
-- **`tests/fixtures/legacy_reference/` is read-only.** Fix behavior in `src/`, not in the legacy
+- **`tests/fixtures/legacy_reference/` is read-only** (one owner-approved exception: the
+  personal path in `python-find_duplicates.py` was replaced for open-sourcing, and
+  `tests/test_no_personal_paths.py` keeps such paths out of every tracked file). Fix behavior
+  in `src/`, not in the legacy
   copies.
 - **No binaries in git.** Installers and `*.exe` are published through GitHub Releases. `dist/`,
   `build/` and `*.exe` are git-ignored.

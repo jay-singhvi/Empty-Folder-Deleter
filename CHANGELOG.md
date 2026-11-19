@@ -5,6 +5,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.4.0: a step-by-step tool page (2026-11-19)
+
+Owner's request: the app should be easy for a non-technical 15-year-old, without losing any
+feature. Design: `docs/superpowers/specs/2026-11-19-simpler-tool-page-design.md`.
+
+- **Three steps on every tool page:** *1 Choose where to look* (the options), *2* a button that
+  says what it looks for (each tool's `scan_label`, for example "Look for empty folders"), and
+  *3 Check the list, then confirm*, shown after the first scan, when the list also gets most of
+  the page. A plain sentence says what was found ("Found 11 items to remove (2.0 KB). Only
+  ticked rows are changed, and you confirm first."). The confirm button says what it will do:
+  "Move 12 to the Recycle Bin…", "Rename 9 items…", "Apply 5 changes…" for mixed kinds.
+- **One "Show all settings" switch,** app-wide, remembered in `gui_state.json` (even with
+  *Remember last folders and options* off), off by default. On: every page's extra options are
+  open, and the kind filter, the view switch, Select all / none and the log panel are shown.
+  Nothing was removed. The form's toggle is now called *More settings for this tool*.
+- **Plain words in the list:** *What happens / File / Goes to / Why / Size*, and "Move to
+  Recycle Bin", "Move", "Rename", "Delete forever", "Create file", "Convert" instead of the raw
+  kind names (`gui/wording.py`). CLI output and CSV/Excel/HTML exports keep the raw names.
+- **Duplicates show which copy is kept:** the group row reads "Keeps <full path>" and each
+  duplicate has a *Kept copy* column, so two kept files with the same name can be told apart.
+- **Right-click any row:** *Show in File Explorer* (selects the item), *Open* (default app; a
+  cloud-only OneDrive file asks before it is downloaded) and *Copy path*. A duplicate offers
+  *Show this copy* and *Show the kept copy*; a move or rename offers *Show where it is now* and
+  *Show where it will go* (the nearest folder that exists). Entries for a path that is gone are
+  disabled. `explorer.exe` is named in `core/deps.SYSTEM_TOOLS`; `SYSTEM_TOOLS` values are now
+  relative to `%SystemRoot%`.
+- **Open source:** the legacy copy of `python-find_duplicates.py` named the owner's Pictures
+  folder; it now uses the home folder (owner-approved change to the read-only legacy folder).
+  `tests/test_no_personal_paths.py` fails when any tracked file holds a real
+  `C:\Users\<account>` path. The old value is still in the git history; rewriting history
+  was not done.
+- Builder's calls: step 1 holds the folders and the basic options together (the form stays one
+  piece); extras and *More* sit in the step-2 row so they work without a scan; Empty Folder
+  Deleter counts "items to remove", because its plan also removes junk files.
+- Screenshots in `docs/images/` regenerated. Version 0.4.0.
+
 ### Version 0.3.0: a simpler tool page (2026-11-17)
 
 Owner's request: simplify the GUI without losing options or control.

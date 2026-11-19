@@ -77,6 +77,13 @@ NON_DEFAULTS: dict[str, dict[str, Any]] = {
         "min_plausible_year": 2001,
         "counter_scope": "global",
     },
+    "empty_files": {
+        "exclude_globs": [".git"],
+        "keep_names": [".keep"],
+        "min_age_days": 3,
+        "skip_hidden_system": False,
+    },
+    "wrong_extension": {"exclude_globs": ["cache"], "families": ["photos", "audio"]},
     "checksum": {
         "mode": "verify",
         "algorithm": "sha512",

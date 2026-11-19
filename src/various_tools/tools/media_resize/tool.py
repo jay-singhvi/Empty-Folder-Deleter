@@ -892,6 +892,9 @@ class _Converter:
 class MediaResize:
     id = TOOL_ID
     name = "Resize media"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Find files to resize"
+    found_nouns = ("file to resize", "files to resize")
     description = (
         "Reduce the resolution of images and videos to a box, a shorter or longer side, or a "
         "percentage. Files are never enlarged unless you turn that locked option off. "

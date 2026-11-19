@@ -515,6 +515,9 @@ def _journal_dropped(ctx: RunContext, result: RunResult, dropped: list[ActionOut
 class Rename:
     id = TOOL_ID
     name = "Rename"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Preview new names"
+    found_nouns = ("file to rename", "files to rename")
     description = (
         "Give a batch of files one name pattern, dated from their capture, modified or created "
         "time, or from a date in the name. Built-in presets cover Snapchat, WhatsApp and "

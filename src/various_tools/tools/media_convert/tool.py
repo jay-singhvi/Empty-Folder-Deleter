@@ -674,6 +674,9 @@ class _Converter:
 class MediaConvert:
     id = TOOL_ID
     name = "Convert media"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Find files to convert"
+    found_nouns = ("file to convert", "files to convert")
     description = (
         "Turn HEIC pictures into JPG or PNG, WebP into JPG or PNG, and MOV videos into MP4. "
         "Metadata is kept, transparent areas are painted onto a colour for JPG, and videos are "

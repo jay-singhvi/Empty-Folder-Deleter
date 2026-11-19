@@ -611,6 +611,9 @@ def _describe_filters(options: DiskUsageOptions) -> str:
 class DiskUsage:
     id = TOOL_ID
     name = "Disk Usage"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Find what takes space"
+    found_nouns = ("large item", "large items")
     description = (
         "Find the largest files and folders under the chosen folders, filtered by size, type "
         "and age, and send the files you pick to the Recycle Bin."

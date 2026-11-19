@@ -944,6 +944,9 @@ def _to_plan(opts: DuplicatesOptions, findings: Findings, ctx: RunContext, plan:
 class Duplicates:
     id = TOOL_ID
     name = "Duplicate Finder"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Find duplicates"
+    found_nouns = ("duplicate", "duplicates")
     description = (
         "Find identical images and videos, and the same picture or footage in another file. "
         "Burst frames and re-encoded videos go to review. Nothing moves until you apply."

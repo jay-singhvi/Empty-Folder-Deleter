@@ -475,7 +475,7 @@ def test_metadata_strip_without_exiftool_plans_nothing_and_shows_the_locate_bann
     assert not page.missing_banner.isHidden()
     assert "exiftool" in page.missing_label.text()
     assert set(page.locate_buttons) == {"exiftool"}
-    assert "Nothing to do" in page.status_label.text()
+    assert "Nothing found" in page.status_label.text()
     assert not page.apply_button.isEnabled()
     assert page.apply() is None
     assert tree_snapshot(folder) == before

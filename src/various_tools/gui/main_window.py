@@ -135,6 +135,9 @@ class MainWindow(QMainWindow):
         self.search_edit.textChanged.connect(self.filter_tools)
         self.sidebar.currentItemChanged.connect(self._item_changed)
         self.history_page.runUndone.connect(self._run_undone)
+        # The log is one of the "Show all settings" extras.
+        self.log_panel.setVisible(state.show_all_settings())
+        state.on_show_all_changed(self._show_all_changed)
         self.statusBar().showMessage("Ready")
 
     # ----- sidebar ----------------------------------------------------------------------------
@@ -252,6 +255,12 @@ class MainWindow(QMainWindow):
         if folder:
             page.set_folder(folder)
         return page
+
+    def _show_all_changed(self, on: bool) -> None:
+        """The "Show all settings" switch changed on some page: every page follows."""
+        self.log_panel.setVisible(on)
+        for page in self.tool_pages.values():
+            page.set_show_all(on)
 
     def _busy_changed(self, busy: bool) -> None:
         if not self.closing:

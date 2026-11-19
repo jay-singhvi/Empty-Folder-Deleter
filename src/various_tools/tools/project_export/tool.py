@@ -461,6 +461,9 @@ def _export_text(root: Path, opts: ProjectExportOptions, output: Path, ctx: RunC
 class ProjectExport:
     id = "project_export"
     name = "Project Export"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Preview the export"
+    found_nouns = ("file", "files")
     description = (
         "Write a folder's file list and file contents to one text file, for example to give an "
         "AI assistant the context of a project. Comments can be stripped from Python files."

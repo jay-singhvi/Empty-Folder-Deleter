@@ -619,6 +619,9 @@ class _Stripper:
 class MetadataStrip:
     id = TOOL_ID
     name = "Strip metadata"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Find files with hidden details"
+    found_nouns = ("file to clean", "files to clean")
     description = (
         "Remove GPS location, or all metadata, from pictures and videos before you share them. "
         "A preview lists what each file would lose. Needs ExifTool, which edits the metadata "

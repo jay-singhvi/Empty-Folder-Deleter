@@ -647,6 +647,9 @@ def _plan_verify(opts: ChecksumOptions, roots: list[Path], ctx: RunContext, plan
 class Checksum:
     id = TOOL_ID
     name = "Checksum and verify"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Check the files"
+    found_nouns = ("file", "files")
     description = (
         "Write a SHA-256 checksum manifest for a folder, or check a folder against one, for "
         "example to confirm that a backup copy matches. Compatible with sha256sum."

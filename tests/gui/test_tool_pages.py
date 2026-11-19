@@ -873,7 +873,7 @@ def test_a_scan_note_about_a_missing_program_shows_the_banner(
     assert "ffprobe not found" in page.notes_view.toPlainText()
     assert not page.missing_banner.isHidden()
     assert "ffprobe" in page.locate_buttons
-    assert "Nothing to do" in page.status_label.text()
+    assert "Nothing found" in page.status_label.text()
 
 
 # ----- export ---------------------------------------------------------------------------------

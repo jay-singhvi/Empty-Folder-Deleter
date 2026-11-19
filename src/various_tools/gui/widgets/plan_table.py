@@ -1021,7 +1021,7 @@ class PlanTable(QWidget):
         self.view.setColumnWidth(last - 1, 280)
         if self._model.mode == FOLDER_TREE:
             self.view.setColumnWidth(0, 340)
-            self.view.setColumnWidth(1, 80)
+            self.view.setColumnWidth(1, 150)
 
     def _sync_kinds(self) -> None:
         previous = self.kind_combo.currentText()

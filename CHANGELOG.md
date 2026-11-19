@@ -51,6 +51,13 @@ calls below are the builder's, the safer way where nothing was decided.
   - Media library: a photo that goes cloud-only after being read keeps its camera date, GPS and size, so it stays on the Timeline and the Map.
   - Map: a failed tile is retried after 5 minutes at the earliest, and after 5 failures in a row no more tiles are requested until the tile source is set again.
   - Empty Files: a file written to between Scan and Apply is skipped ("changed since the scan: no longer empty") instead of being trashed.
+- **Known, left for later (review minors):** a photo folder inside another chosen folder is read
+  and counted twice; a subfolder that cannot be listed (access denied) loses its rows until the
+  next update; RAW photos and videos get no GPS place or pixel size; the whole library is
+  loaded on the GUI thread (slow past about 100,000 items); the map tile cache has no size limit
+  and is not tied to the tile address; Fix File Extensions leaves sidecar files (`.xmp`,
+  `.aae`) with the old name, and MP1/MP2 audio is no longer recognised (left alone, never
+  renamed).
 
 ### Version 0.4.0: a step-by-step tool page (2026-11-19)
 

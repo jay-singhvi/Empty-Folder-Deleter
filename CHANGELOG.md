@@ -45,6 +45,12 @@ calls below are the builder's, the safer way where nothing was decided.
 - Not done yet: panning across the 180° line on the map, a speed test with 50,000 points, and
   screenshots of the two new pages.
 - Version 0.5.0.
+- **Review fixes:**
+  - Fix File Extensions: an AVIF with major brand `mif1` is told from a HEIC by its compatible brands, so a correct `.avif` is no longer renamed to `.heic`.
+  - Fix File Extensions: an `ID3` header no longer means `.mp3` (FLAC and WAV can start with an ID3 tag), and a UTF-16 byte order mark is not taken for an MP3 frame.
+  - Media library: a photo that goes cloud-only after being read keeps its camera date, GPS and size, so it stays on the Timeline and the Map.
+  - Map: a failed tile is retried after 5 minutes at the earliest, and after 5 failures in a row no more tiles are requested until the tile source is set again.
+  - Empty Files: a file written to between Scan and Apply is skipped ("changed since the scan: no longer empty") instead of being trashed.
 
 ### Version 0.4.0: a step-by-step tool page (2026-11-19)
 

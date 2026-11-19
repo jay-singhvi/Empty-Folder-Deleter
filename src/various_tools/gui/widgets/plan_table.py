@@ -4,8 +4,8 @@ Two views, switched by the person for any plan (the tool page picks the first on
 optional ``plan_view`` attribute):
 
 * **Grouped**: duplicate plans group their actions under a "Keeps <full path>" row, with a
-  "Kept copy" column on each duplicate, so two kept files with the same name can be told apart. Other plans with a
-  ``group_id`` show the id; plans without groups are a flat list.
+  "Kept copy" column on each duplicate, so two kept files with the same name can be told
+  apart. Other plans with a ``group_id`` show the id; plans without groups are a flat list.
 * **Folder tree**: the folders under each plan root, with every action at its path. A folder row's
   tri-state check box covers everything inside it (plan 3.1).
 
@@ -31,22 +31,27 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     QPersistentModelIndex,
+    QPoint,
     QSortFilterProxyModel,
     Qt,
     Signal,
 )
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
 from various_tools.core.plan import ActionKind, Plan, PlannedAction
+from various_tools.gui import reveal
 from various_tools.gui.plan_edit import human_size
 from various_tools.gui.wording import kind_label
 
@@ -681,6 +686,12 @@ class PlanTable(QWidget):
         self.view.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.view.header().setStretchLastSection(False)
         self.view.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
+        # Hooks that tests replace, so nothing opens Explorer, an app or a message box.
+        self.reveal: Callable[[Path], bool] = reveal.show_in_explorer
+        self.open_file: Callable[[Path], bool] = reveal.open_path
+        self.confirm: Callable[[str, str], bool] = self._default_confirm
 
         top = QHBoxLayout()
         self._toolbar = top
@@ -852,6 +863,69 @@ class PlanTable(QWidget):
 
     def totals_text(self) -> str:
         return self._model.totals_text()
+
+    # ----- right-click menu ------------------------------------------------------------------
+
+    def context_menu_at(self, pos: QPoint) -> QMenu | None:
+        """The right-click menu for the row at ``pos`` (viewport coordinates), not shown yet.
+
+        One "show" entry per place the row is about (for a duplicate: this copy and the kept
+        copy), then Open and Copy path for the row's own file. Entries for a path that no
+        longer exists are disabled. None when there is no row at ``pos``.
+        """
+        node = self._model.node_at(self._proxy.mapToSource(self.view.indexAt(pos)))
+        if node is None:
+            return None
+        targets = reveal.reveal_targets(node.action, node.path, self._model.is_duplicates())
+        if not targets:
+            return None
+        menu = QMenu(self.view)
+        for target in targets:
+            entry = menu.addAction(target.label)
+            entry.setEnabled(target.exists)
+            entry.setToolTip(str(target.path))
+            entry.triggered.connect(lambda _c=False, p=target.path: self.reveal(p))
+        own = targets[0]
+        menu.addSeparator()
+        open_entry = menu.addAction("Open")
+        open_entry.setEnabled(own.exists and not own.is_destination)
+        open_entry.triggered.connect(lambda _c=False, p=own.path: self._open(p))
+        copy_entry = menu.addAction("Copy path")
+        copy_entry.triggered.connect(lambda _c=False, p=own.path: self._copy_path(p))
+        menu.setToolTipsVisible(True)
+        return menu
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        menu = self.context_menu_at(pos)
+        if menu is not None:
+            menu.exec(self.view.viewport().mapToGlobal(pos))
+            menu.deleteLater()
+
+    def _open(self, path: Path) -> bool:
+        """Open ``path`` in its default app; a cloud-only file is downloaded only if asked."""
+        if reveal.needs_download(path) and not self.confirm(
+            "Download from OneDrive?",
+            f"{path.name} is only in OneDrive, not on this device. Opening it downloads it "
+            "to this device.\n\nDownload and open it?",
+        ):
+            return False
+        return self.open_file(path)
+
+    @staticmethod
+    def _copy_path(path: Path) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(str(path))
+
+    def _default_confirm(self, title: str, text: str) -> bool:
+        answer = QMessageBox.question(
+            self,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     # ----- internals ----------------------------------------------------------------------
 

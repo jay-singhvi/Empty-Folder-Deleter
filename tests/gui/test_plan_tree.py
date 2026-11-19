@@ -85,13 +85,13 @@ def test_folder_tree_builds_the_hierarchy_under_the_root(qtbot: QtBot, tmp_path:
     table = tree_table(qtbot, plan)
     model = table.view.model()
     headers = [model.headerData(c, Qt.Orientation.Horizontal) for c in range(model.columnCount())]
-    assert headers == ["Name", "Kind", "Destination", "Reason", "Size"]
+    assert headers == ["Name", "What happens", "Goes to", "Why", "Size"]
     assert names(table) == [str(tmp_path)]
     assert names(table, find(table, str(tmp_path))) == ["a", "c"]  # "keep" is not in the plan
     assert names(table, find(table, str(tmp_path), "a")) == ["b"]
     assert names(table, find(table, str(tmp_path), "c")) == ["Thumbs.db"]
     kind = model.index(0, 1, find(table, str(tmp_path), "a"))
-    assert model.data(kind, Qt.ItemDataRole.DisplayRole) == "trash"
+    assert model.data(kind, Qt.ItemDataRole.DisplayRole) == "Move to Recycle Bin"
     assert table.current_group_id() is None
 
 

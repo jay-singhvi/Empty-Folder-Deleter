@@ -88,7 +88,7 @@ def test_ticking_a_group_with_a_filter_ticks_only_the_shown_rows(
     table.filter_edit.setText("visual")
     assert _check(table, table.view.model().index(0, 0), Qt.CheckState.Checked)
     assert [a.selected for a in plan.actions] == [False, True, True]
-    table.kind_combo.setCurrentText("move")
+    table.kind_combo.setCurrentText("Move")
     table.filter_edit.setText("")
     # Without a text filter but with a kind filter, every move row is shown: all change.
     assert _check(table, table.view.model().index(0, 0), Qt.CheckState.Unchecked)

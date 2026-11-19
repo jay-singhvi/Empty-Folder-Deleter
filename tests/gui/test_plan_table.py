@@ -480,3 +480,25 @@ def test_full_controls_switch_hides_the_extra_filters(qtbot: QtBot, tmp_path: Pa
     assert table.kind_combo.isVisibleTo(table)
     assert table.view_combo.isVisibleTo(table)
     assert extra.isVisibleTo(table)
+
+
+def test_switching_the_full_controls_off_clears_the_kind_filter(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    plan = Plan(
+        tool="mixed",
+        roots=[tmp_path],
+        actions=[
+            PlannedAction(ActionKind.MOVE, tmp_path / "a", tmp_path / "d" / "a", "x"),
+            PlannedAction(ActionKind.TRASH, tmp_path / "b", None, "junk"),
+        ],
+    )
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "mixed")
+    table.kind_combo.setCurrentText("Move")
+    assert top_rows(table) == 1
+    table.set_full_controls(False)
+    # A filter nobody can see must not hide rows that Apply would still act on.
+    assert top_rows(table) == 2
+    assert not table.filter_active()

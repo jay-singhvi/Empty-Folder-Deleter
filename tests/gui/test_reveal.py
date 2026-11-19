@@ -41,6 +41,7 @@ def test_duplicates_give_this_copy_and_the_kept_copy(tmp_path: Path) -> None:
     assert [(t.label, t.path) for t in targets] == [
         ("Show this copy", copy),
         ("Show the kept copy", keeper),
+        ("Show where it will go", tmp_path),  # duplicate/ does not exist yet
     ]
 
 
@@ -164,3 +165,50 @@ def test_folder_tree_folder_row_has_show_in_explorer(qtbot: QtBot, tmp_path: Pat
 def test_no_menu_on_empty_space(qtbot: QtBot, tmp_path: Path) -> None:
     table, *_ = _dup_table(qtbot, tmp_path)
     assert table.context_menu_at(QPoint(5, table.view.viewport().height() - 2)) is None
+
+
+# ----- review fixes ---------------------------------------------------------------------------
+
+
+def test_explorer_command_quotes_spaces_and_commas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(reveal.subprocess, "Popen", lambda args, **_k: calls.append(args))
+    monkeypatch.setattr(reveal, "system_tool", lambda _name: r"C:\Windows\explorer.exe")
+    target = Path(r"C:\Pics\Summer, 2024\a,b c.jpg")
+    assert reveal.show_in_explorer(target)
+    assert calls == [r'"C:\Windows\explorer.exe" /select,"C:\Pics\Summer, 2024\a,b c.jpg"']
+
+
+def test_a_moved_duplicate_also_shows_where_it_will_go(tmp_path: Path) -> None:
+    keeper, copy = tmp_path / "a.jpg", tmp_path / "b.jpg"
+    keeper.write_text("k")
+    copy.write_text("k")
+    review = tmp_path / "review" / "b.jpg"
+    action = PlannedAction(ActionKind.MOVE, copy, review, "", str(keeper))
+    labels = [t.label for t in reveal_targets(action, None, is_duplicates=True)]
+    assert labels == ["Show this copy", "Show the kept copy", "Show where it will go"]
+
+
+def test_a_new_file_row_copies_its_own_path(qtbot: QtBot, tmp_path: Path) -> None:
+    out = tmp_path / "out.txt"
+    plan = Plan(
+        tool="project_export",
+        roots=[tmp_path],
+        actions=[PlannedAction(ActionKind.WRITE, None, out, "export")],
+    )
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "project_export")
+    table.show()
+    menu = table.context_menu_at(_row_point(table, 0))
+    assert menu is not None
+    assert not _action(menu, "Open").isEnabled()  # not written yet
+    _action(menu, "Copy path").trigger()
+    from PySide6.QtGui import QGuiApplication
+
+    assert QGuiApplication.clipboard().text() == str(out)
+    out.write_text("done")  # after Apply the file exists
+    menu = table.context_menu_at(_row_point(table, 0))
+    assert menu is not None and _action(menu, "Open").isEnabled()

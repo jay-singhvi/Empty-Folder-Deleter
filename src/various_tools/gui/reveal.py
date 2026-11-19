@@ -31,10 +31,19 @@ SHOW = "Show in File Explorer"
 
 @dataclass(frozen=True)
 class RevealTarget:
+    """One "show" entry. ``path`` is what Explorer shows: ``original`` itself, or, when that
+    does not exist yet (a destination), its nearest existing parent (``is_destination``)."""
+
     label: str
     path: Path
     exists: bool
     is_destination: bool = False
+    original: Path | None = None
+
+    @property
+    def own_path(self) -> Path:
+        """The path the row is about (what Copy path copies)."""
+        return self.original if self.original is not None else self.path
 
 
 def _exists(path: Path) -> bool:
@@ -52,9 +61,9 @@ def _nearest_existing(path: Path) -> Path:
 
 
 def _target(label: str, path: Path, *, destination: bool = False) -> RevealTarget:
-    if destination:
-        path = _nearest_existing(path)
-    return RevealTarget(label, path, _exists(path), destination)
+    shown = _nearest_existing(path) if destination else path
+    replaced = shown != path
+    return RevealTarget(label, shown, _exists(shown), replaced, path)
 
 
 def reveal_targets(
@@ -65,10 +74,13 @@ def reveal_targets(
         return [_target(SHOW, node_path)] if node_path is not None else []
     src, dst = action.src, action.dst
     if is_duplicates and src is not None and action.group_id:
-        return [
+        targets = [
             _target("Show this copy", src),
             _target("Show the kept copy", Path(action.group_id)),
         ]
+        if dst is not None:  # moved to the duplicate or review folder
+            targets.append(_target("Show where it will go", dst, destination=True))
+        return targets
     moves = action.kind in (ActionKind.MOVE, ActionKind.RENAME)
     if moves and src is not None and dst is not None:
         return [
@@ -89,11 +101,17 @@ def needs_download(path: Path) -> bool:
 
 
 def show_in_explorer(path: Path) -> bool:
-    """Open File Explorer with ``path`` selected (a drive root is opened instead)."""
+    """Open File Explorer with ``path`` selected (a drive root is opened instead).
+
+    Explorer splits its arguments at commas, and ``subprocess`` quotes only around spaces, so
+    the command line is built here with the path in double quotes (a Windows path cannot
+    contain ``"``).
+    """
     explorer = system_tool("explorer")
-    args = [explorer, str(path)] if path.parent == path else [explorer, f"/select,{path}"]
+    select = "" if path.parent == path else "/select,"
+    command = f'"{explorer}" {select}"{path}"'
     try:
-        subprocess.Popen(args)  # noqa: S603 - fixed program, the path is one argument
+        subprocess.Popen(command)  # noqa: S603 - fixed program, a quoted path
     except OSError as exc:
         log.warning("Could not open File Explorer for %s: %s", path, exc)
         return False

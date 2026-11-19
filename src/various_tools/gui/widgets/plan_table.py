@@ -771,6 +771,9 @@ class PlanTable(QWidget):
         self._full_controls = full
         for widget in self._full_only:
             widget.setVisible(full)
+        if not full and self.kind_combo.currentIndex() > 0:
+            # A filter nobody can see must not hide rows that Apply still acts on.
+            self.kind_combo.setCurrentIndex(0)
 
     def set_view_mode(self, mode: str) -> None:
         """Show the plan grouped or as a folder tree. The plan and its checks stay as they are."""
@@ -891,7 +894,7 @@ class PlanTable(QWidget):
         open_entry.setEnabled(own.exists and not own.is_destination)
         open_entry.triggered.connect(lambda _c=False, p=own.path: self._open(p))
         copy_entry = menu.addAction("Copy path")
-        copy_entry.triggered.connect(lambda _c=False, p=own.path: self._copy_path(p))
+        copy_entry.triggered.connect(lambda _c=False, p=own.own_path: self._copy_path(p))
         menu.setToolTipsVisible(True)
         return menu
 

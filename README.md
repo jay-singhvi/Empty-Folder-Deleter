@@ -75,6 +75,7 @@ Each tool has a page in [docs/tools/](docs/tools/) with its options and safety r
 | Tool id | Category | What it does |
 |---|---|---|
 | `empty_folders` | Clean up | Remove folders that are empty, or hold only junk files. |
+| `empty_files` | Clean up | Send 0-byte files to the Recycle Bin, keeping ones that are empty on purpose (`__init__.py`, `.gitkeep`). |
 | `disk_usage` | Clean up | List the largest files and folders, with type and age filters. Files can be sent to the Recycle Bin (none are selected by default). |
 | `temp_cleaner` | Clean up | Remove old files from temp folders (`%TEMP%` by default). Browser caches are listed but never touched. |
 | `duplicates` | Clean up | Find identical pictures and videos, and the same picture or footage in another file. |
@@ -84,6 +85,7 @@ Each tool has a page in [docs/tools/](docs/tools/) with its options and safety r
 | `corrupt_media` | Media | Find pictures and videos that fail to open or decode, and quarantine or trash them. |
 | `organize_by_date` | Organize | Move photos and videos into year and month folders by capture date. |
 | `sort_by_type` | Organize | Move files into subfolders by type, using editable rules such as `*.pdf=Documents/PDF`. |
+| `wrong_extension` | Organize | Find files whose content does not match their extension (a PNG named `.jpg`) and rename them. |
 | `rename` | Organize | Give a batch of files one name pattern, dated from their capture, modified or created time. |
 | `project_export` | Developer | Write a folder's file list and contents to one text file, for example for an AI assistant. |
 | `checksum` | Developer | Create or verify SHA-256 manifests (`sha256sum` format), for example to check a backup. |
@@ -174,6 +176,11 @@ Every documented use of the original scripts has a command. All of them preview 
 Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. From a source checkout run `uv run various-tools-gui` (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
 
 - **Tool page:** three numbered steps in plain words: *1 Choose where to look*, *2* a button that says what it looks for ("Look for empty folders", "Find duplicates"), and *3 Check the list, then confirm*, which appears after the first scan. The confirm button says what it will do ("Move 12 to the Recycle Bin…"). One **Show all settings** switch (top right of step 2, remembered, the same on every page) shows every extra option, the kind filter, the view switch, Select all / none and the log; with it off they are folded away, never removed. Right-click any row of the list for **Show in File Explorer** (the file is selected), **Open** (in its default app; a cloud-only OneDrive file asks before it is downloaded) and **Copy path**; a duplicate row offers both *this copy* and *the kept copy*, a move both *where it is now* and *where it will go*. Duplicate groups show the full path of the copy that is kept.
+- **Photos & videos:** a *Timeline* (by year and month, with thumbnails) and a *Map* (by GPS
+  place) of the folders you choose. *Update* reads only new or changed files. Files only in
+  OneDrive are listed but never downloaded. The map works offline; a detailed OpenStreetMap
+  map can be switched on in Settings (off by default, because it sends the viewed area to
+  OpenStreetMap).
 - **Options form:** generated from the tool's options (basic options shown, advanced ones folded under *More settings for this tool*, a padlock on tuned or safety values, which ask before they change). Drop folders from Explorer onto any folder field. The page remembers the folders and options you used last; 🔒 locked options, permanent delete and options that replace or remove originals always start from their defaults, and *More > Reset options to defaults* puts the rest back. The scan button changes nothing and a **Cancel** button shows while it runs; the confirm button asks first, and asks again before a permanent delete; *More* holds Export. The list can be sorted, filtered, grouped (for example per duplicate group), checked and unchecked, and shows totals. The progress bar and the scan notes appear only when there is something to show; the log panel is collapsible. Closing the window during a run asks first and waits for the run to stop.
 - **Plan views:** Empty Folder Deleter opens its plan as a **folder tree** (the folders under each chosen folder, with every action at its path). You can switch to the grouped view.
 - **Disk Usage:** a **Size map** tab next to the plan shows folder sizes as a treemap. *Tick files in this folder* checks the files of the folder you are looking at. `tree_depth` and `tree_min_share_pct` set how deep and how fine the map is.

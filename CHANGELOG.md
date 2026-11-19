@@ -5,6 +5,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.5.0: photo timeline, photo map and two new tools (2026-11-19)
+
+Owner's request: see all photos and videos on a timeline and on a world map, kept up to date
+without rebuilding, each opening in its default app; add more tools. Design:
+`docs/superpowers/specs/2026-11-19-media-library-design.md`. The owner said "continue", so the
+calls below are the builder's, the safer way where nothing was decided.
+
+- **Photos & videos** is a new sidebar section with two pages that never change files:
+  - **Timeline:** pick your photo folders (`Settings.library_folders`), press *Update the
+    timeline*, then browse *Year > Month* with thumbnails. Double-click opens the default app;
+    right-click offers *Open*, *Edit* (the Windows "edit" app, photos only), *Show in File
+    Explorer* and *Copy path*.
+  - **Map:** the photos and videos with a GPS place, grouped in circles that split as you zoom
+    in; click a circle to see its photos below.
+- **Media library** (`core/media/library.py`, `media_library.sqlite` in the cache folder): one
+  row per file with date, place and size. *Update* reads only new or changed files (size,
+  modified time and OneDrive status) and drops rows for files that are gone; rows of other
+  folders are kept, and a missing folder (an unplugged drive) keeps its rows. Cancel keeps what
+  was read. Dates: camera EXIF, video metadata through ffprobe, ExifTool for RAW, else the
+  modified date.
+- **OneDrive cloud-only files are never opened** (rule 3): they are listed with their modified
+  date, a cloud picture instead of a thumbnail and no place, and read on the first update after
+  they are on the device.
+- **The map works offline.** It draws a world outline built into the app (Natural Earth 1:110m
+  land, public domain, `gui/data/world_land.json`, 66 KB). **Detailed online map** (setting
+  `map_online_tiles`, off by default) adds OpenStreetMap pictures, cached in
+  `<cache>/map_tiles`, with the attribution shown; it is off by default because it tells that
+  service which area you look at. The app names itself `VariousTools/<version>` and nothing
+  else.
+- **New tool Empty Files** (`empty_files`, Clean up): 0-byte files to the Recycle Bin. Files
+  that are empty on purpose (`__init__.py`, `.gitkeep`, `.keep`, `py.typed`, `.nojekyll`) are
+  kept; never-touch, minimum age and hidden/system options. Nothing is opened.
+- **New tool Fix File Extensions** (`wrong_extension`, Organize): reads the first 64 bytes to
+  find files whose content does not match the extension (a PNG named `.jpg`) and renames them.
+  Equivalent names are left alone (`.jpeg`/`.jpg`, `.mp4`/`.m4v`/`.mov`, `.mkv`/`.webm`, Office
+  files as zip); unknown content and files without an extension are never touched; cloud-only
+  files are skipped and reported.
+- Not done yet: panning across the 180° line on the map, a speed test with 50,000 points, and
+  screenshots of the two new pages.
+- Version 0.5.0.
+
 ### Version 0.4.0: a step-by-step tool page (2026-11-19)
 
 Owner's request: the app should be easy for a non-technical 15-year-old, without losing any

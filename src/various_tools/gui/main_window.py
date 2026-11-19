@@ -32,8 +32,10 @@ from PySide6.QtWidgets import (
 from various_tools import __version__
 from various_tools.gui import shell
 from various_tools.gui.history_page import HistoryPage
+from various_tools.gui.map_page import MapPage
 from various_tools.gui.settings_page import SettingsPage
 from various_tools.gui.state import AppState
+from various_tools.gui.timeline_page import TimelinePage
 from various_tools.gui.tool_page import ToolPage
 from various_tools.gui.widgets.log_panel import LogBridge, LogPanel
 from various_tools.gui.workers import active_workers, cancel_all
@@ -44,6 +46,10 @@ log = logging.getLogger(__name__)
 APP_TITLE = "Various Tools"
 HISTORY_ID = "__history__"
 SETTINGS_ID = "__settings__"
+TIMELINE_ID = "__timeline__"
+MAP_ID = "__map__"
+# Pages that browse photos and videos (they never change files), above "App" in the sidebar.
+MEDIA_SECTION = "Photos & videos"
 _PAGE_ROLE = Qt.ItemDataRole.UserRole
 CLOSE_QUESTION = "A run is in progress. Stop it and close?"
 CLOSE_POLL_MS = 100
@@ -103,6 +109,8 @@ class MainWindow(QMainWindow):
         # ----- pages -----------------------------------------------------------------------
         self.stack = QStackedWidget()
         self.tool_pages: dict[str, ToolPage] = {}
+        self.timeline_page: TimelinePage | None = None  # created on first use
+        self.map_page: MapPage | None = None
         self.history_page = HistoryPage(state)
         self.settings_page = SettingsPage(state, shell_backend=shell_backend)
         self.welcome = QLabel(
@@ -164,6 +172,7 @@ class MainWindow(QMainWindow):
                 header.addChild(item)
                 self._tool_items[tool_id] = item
             header.setExpanded(True)
+        self._add_section(MEDIA_SECTION, ((TIMELINE_ID, "Timeline"), (MAP_ID, "Map")))
         other = QTreeWidgetItem(["App"])
         other.setFlags(Qt.ItemFlag.ItemIsEnabled)
         font = other.font(0)
@@ -176,6 +185,20 @@ class MainWindow(QMainWindow):
             other.addChild(item)
             self._tool_items[page_id] = item
         other.setExpanded(True)
+
+    def _add_section(self, title: str, pages: tuple[tuple[str, str], ...]) -> None:
+        header = QTreeWidgetItem([title])
+        header.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        font = header.font(0)
+        font.setBold(True)
+        header.setFont(0, font)
+        self.sidebar.addTopLevelItem(header)
+        for page_id, label in pages:
+            item = QTreeWidgetItem([label])
+            item.setData(0, _PAGE_ROLE, page_id)
+            header.addChild(item)
+            self._tool_items[page_id] = item
+        header.setExpanded(True)
 
     def filter_tools(self, text: str) -> None:
         """Hide tools whose name, id or description does not contain ``text``."""
@@ -234,6 +257,16 @@ class MainWindow(QMainWindow):
             page = self.history_page
         elif page_id == SETTINGS_ID:
             page = self.settings_page
+        elif page_id == TIMELINE_ID:
+            if self.timeline_page is None:
+                self.timeline_page = TimelinePage(self.state)
+                self.stack.addWidget(self.timeline_page)
+            page = self.timeline_page
+        elif page_id == MAP_ID:
+            if self.map_page is None:
+                self.map_page = MapPage(self.state)
+                self.stack.addWidget(self.map_page)
+            page = self.map_page
         else:
             page = self.tool_page(page_id)
         self.stack.setCurrentWidget(page)
@@ -296,6 +329,9 @@ class MainWindow(QMainWindow):
         for page in self.tool_pages.values():
             page.shutdown()
         self.history_page.shutdown()
+        for media_page in (self.timeline_page, self.map_page):
+            if media_page is not None:
+                media_page.shutdown()
         cancel_all()
         central = self.centralWidget()
         if central is not None:

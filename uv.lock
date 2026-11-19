@@ -1029,7 +1029,7 @@ wheels = [
 
 [[package]]
 name = "various-tools"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 default-groups = ["dev", "gui", "media"]
 dependencies = [

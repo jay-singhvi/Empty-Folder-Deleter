@@ -137,15 +137,16 @@ def test_drag_pans(qtbot: QtBot) -> None:
 class _FakeReply(QObject):
     finished = Signal()
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, error: int = 0) -> None:
         super().__init__()
         self._data = data
+        self._error = error
 
     def readAll(self) -> QByteArray:  # noqa: N802
         return QByteArray(self._data)
 
     def error(self) -> int:
-        return 0
+        return self._error
 
     def deleteLater(self) -> None:  # noqa: N802
         pass
@@ -156,10 +157,11 @@ class _FakeManager(QObject):
         super().__init__()
         self.requests: list[QNetworkRequest] = []
         self.replies: list[_FakeReply] = []
+        self.fail = False
 
     def get(self, request: QNetworkRequest) -> _FakeReply:
         self.requests.append(request)
-        reply = _FakeReply(_png_bytes())
+        reply = _FakeReply(b"", error=1) if self.fail else _FakeReply(_png_bytes())
         self.replies.append(reply)
         return reply
 
@@ -215,3 +217,67 @@ def test_tile_source_none_turns_tiles_off(qtbot: QtBot, tmp_path: Path) -> None:
     widget.set_tile_source("https://tile.example/{z}/{x}/{y}.png", tmp_path, "UA")
     widget.set_tile_source(None, None, "UA")
     assert widget.tiles_enabled is False
+
+
+def _failing_widget(qtbot: QtBot, tmp_path: Path) -> tuple[WorldMap, _FakeManager]:
+    manager = _FakeManager()
+    manager.fail = True
+    widget = WorldMap(network_manager=manager)
+    qtbot.addWidget(widget)
+    widget.resize(600, 400)
+    widget.set_tile_source("https://tile.example/{z}/{x}/{y}.png", tmp_path, "UA")
+    widget.set_view(0.0, 0.0, 2)
+    return widget, manager
+
+
+def _fail_all_pending(manager: _FakeManager, done: int) -> int:
+    for reply in manager.replies[done:]:
+        reply.finished.emit()
+    return len(manager.replies)
+
+
+def test_failed_tile_is_not_requested_again_until_the_backoff_is_over(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(wm, "_now", lambda: now[0])
+    widget, manager = _failing_widget(qtbot, tmp_path)
+    widget.grab()
+    first = len(manager.requests)
+    assert first > 0
+    for reply in manager.replies[:2]:  # two failures: well under the give-up limit
+        reply.finished.emit()
+
+    widget.grab()
+    assert len(manager.requests) == first  # failed tiles wait
+
+    now[0] += 4 * 60
+    widget.grab()
+    assert len(manager.requests) == first  # still inside the 5 minutes
+
+    now[0] += 2 * 60
+    widget.grab()
+    assert len(manager.requests) == first + 2  # backoff over: only the failed two are asked again
+
+
+def test_tiles_stop_after_five_failures_in_a_row_until_the_source_is_set_again(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(wm, "_now", lambda: now[0])
+    widget, manager = _failing_widget(qtbot, tmp_path)
+    done = 0
+    for _ in range(10):
+        widget.grab()
+        done = _fail_all_pending(manager, done)
+        now[0] += 6 * 60
+    assert done >= 5
+    total = len(manager.requests)
+    for _ in range(3):
+        widget.grab()
+        now[0] += 6 * 60
+    assert len(manager.requests) == total  # gave up
+
+    widget.set_tile_source("https://tile.example/{z}/{x}/{y}.png", tmp_path, "UA")
+    widget.grab()
+    assert len(manager.requests) > total

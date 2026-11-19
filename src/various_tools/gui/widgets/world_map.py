@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cache, partial
@@ -49,6 +50,13 @@ MAX_LAT = 85.0511287798  # Web Mercator cuts the poles here
 ATTRIBUTION = "© OpenStreetMap contributors"
 _DRAG_THRESHOLD_PX = 4
 _MAX_TILES_IN_MEMORY = 256
+_TILE_RETRY_S = 5 * 60  # a failed tile is not asked for again for this long
+_MAX_TILE_FAILURES = 5  # this many failures in a row stop all requests until the source is reset
+
+
+def _now() -> float:
+    """Monotonic seconds. A function so tests can replace the clock."""
+    return time.monotonic()
 
 
 def lonlat_to_world(lon: float, lat: float) -> tuple[float, float]:
@@ -173,6 +181,8 @@ class WorldMap(QWidget):
         self._user_agent = ""
         self._tiles: dict[tuple[int, int, int], QPixmap] = {}
         self._pending: set[tuple[int, int, int]] = set()
+        self._failed: dict[tuple[int, int, int], float] = {}  # key -> when to retry
+        self._failures_in_a_row = 0
 
     # ---- public API --------------------------------------------------------------------------
 
@@ -216,6 +226,8 @@ class WorldMap(QWidget):
         self._user_agent = user_agent
         self._tiles.clear()
         self._pending.clear()
+        self._failed.clear()
+        self._failures_in_a_row = 0
         if url_template is not None and self._manager is None:
             self._manager = QNetworkAccessManager(self)
         self.update()
@@ -341,9 +353,20 @@ class WorldMap(QWidget):
             if not loaded.isNull():
                 self._remember(key, loaded)
                 return loaded
-        if key not in self._pending and self._template is not None and self._manager is not None:
+        if (
+            key not in self._pending
+            and self._template is not None
+            and self._manager is not None
+            and self._may_request(key)
+        ):
             self._request_tile(z, x, y)
         return None
+
+    def _may_request(self, key: tuple[int, int, int]) -> bool:
+        if self._failures_in_a_row >= _MAX_TILE_FAILURES:
+            return False  # offline or blocked: stay quiet until set_tile_source is called again
+        retry_at = self._failed.get(key)
+        return retry_at is None or _now() >= retry_at
 
     def _remember(self, key: tuple[int, int, int], pix: QPixmap) -> None:
         if len(self._tiles) >= _MAX_TILES_IN_MEMORY:
@@ -368,11 +391,13 @@ class WorldMap(QWidget):
             data = bytes(reply.readAll()) if not failed else b""
         finally:
             reply.deleteLater()
-        if not data:
-            return
         pix = QPixmap()
-        if not pix.loadFromData(data):
+        if not data or not pix.loadFromData(data):
+            self._failed[key] = _now() + _TILE_RETRY_S
+            self._failures_in_a_row += 1
             return
+        self._failed.pop(key, None)
+        self._failures_in_a_row = 0
         path = self._tile_path(*key)
         if path is not None:
             try:

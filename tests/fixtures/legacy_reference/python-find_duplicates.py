@@ -73,7 +73,7 @@ INPUT_LIST = os.path.join(SCRIPT_DIR, "find_duplicates_input_list.txt")
 CACHE_PATH = os.path.join(SCRIPT_DIR, "find_duplicates_cache.sqlite")
 CACHE_VERSION = 2                # bump when the hashing logic or cached fields change
 
-BASE = r"C:\Users\jaysi\OneDrive\Pictures"   # duplicate/, review/ and the log live here
+BASE = os.path.join(os.path.expanduser("~"), "OneDrive", "Pictures")   # duplicate/, review/ and the log live here
 DUP_DIR = os.path.join(BASE, "duplicate")
 REVIEW_DIR = os.path.join(BASE, "review")
 LOG_PATH = os.path.join(BASE, "duplicates_log.csv")

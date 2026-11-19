@@ -5,6 +5,96 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.5.0: photo timeline, photo map and two new tools (2026-11-19)
+
+Owner's request: see all photos and videos on a timeline and on a world map, kept up to date
+without rebuilding, each opening in its default app; add more tools. Design:
+`docs/superpowers/specs/2026-11-19-media-library-design.md`. The owner said "continue", so the
+calls below are the builder's, the safer way where nothing was decided.
+
+- **Photos & videos** is a new sidebar section with two pages that never change files:
+  - **Timeline:** pick your photo folders (`Settings.library_folders`), press *Update the
+    timeline*, then browse *Year > Month* with thumbnails. Double-click opens the default app;
+    right-click offers *Open*, *Edit* (the Windows "edit" app, photos only), *Show in File
+    Explorer* and *Copy path*.
+  - **Map:** the photos and videos with a GPS place, grouped in circles that split as you zoom
+    in; click a circle to see its photos below.
+- **Media library** (`core/media/library.py`, `media_library.sqlite` in the cache folder): one
+  row per file with date, place and size. *Update* reads only new or changed files (size,
+  modified time and OneDrive status) and drops rows for files that are gone; rows of other
+  folders are kept, and a missing folder (an unplugged drive) keeps its rows. Cancel keeps what
+  was read. Dates: camera EXIF, video metadata through ffprobe, ExifTool for RAW, else the
+  modified date.
+- **OneDrive cloud-only files are never opened** (rule 3): they are listed with their modified
+  date, a cloud picture instead of a thumbnail and no place, and read on the first update after
+  they are on the device.
+- **The map works offline.** It draws a world outline built into the app (Natural Earth 1:110m
+  land, public domain, `gui/data/world_land.json`, 66 KB). **Detailed online map** (setting
+  `map_online_tiles`, off by default) adds OpenStreetMap pictures, cached in
+  `<cache>/map_tiles`, with the attribution shown; it is off by default because it tells that
+  service which area you look at. The app names itself `VariousTools/<version>` and nothing
+  else.
+- **New tool Empty Files** (`empty_files`, Clean up): 0-byte files to the Recycle Bin. Files
+  that are empty on purpose (`__init__.py`, `.gitkeep`, `.keep`, `py.typed`, `.nojekyll`) are
+  kept; never-touch, minimum age and hidden/system options. Nothing is opened.
+- **New tool Fix File Extensions** (`wrong_extension`, Organize): reads the first 64 bytes to
+  find files whose content does not match the extension (a PNG named `.jpg`) and renames them.
+  Equivalent names are left alone (`.jpeg`/`.jpg`, `.mp4`/`.m4v`/`.mov`, `.mkv`/`.webm`, Office
+  files as zip); unknown content and files without an extension are never touched; cloud-only
+  files are skipped and reported.
+- Not done yet: panning across the 180° line on the map, a speed test with 50,000 points, and
+  screenshots of the two new pages.
+- Version 0.5.0.
+- **Review fixes:**
+  - Fix File Extensions: an AVIF with major brand `mif1` is told from a HEIC by its compatible brands, so a correct `.avif` is no longer renamed to `.heic`.
+  - Fix File Extensions: an `ID3` header no longer means `.mp3` (FLAC and WAV can start with an ID3 tag), and a UTF-16 byte order mark is not taken for an MP3 frame.
+  - Media library: a photo that goes cloud-only after being read keeps its camera date, GPS and size, so it stays on the Timeline and the Map.
+  - Map: a failed tile is retried after 5 minutes at the earliest, and after 5 failures in a row no more tiles are requested until the tile source is set again.
+  - Empty Files: a file written to between Scan and Apply is skipped ("changed since the scan: no longer empty") instead of being trashed.
+- **Known, left for later (review minors):** a photo folder inside another chosen folder is read
+  and counted twice; a subfolder that cannot be listed (access denied) loses its rows until the
+  next update; RAW photos and videos get no GPS place or pixel size; the whole library is
+  loaded on the GUI thread (slow past about 100,000 items); the map tile cache has no size limit
+  and is not tied to the tile address; Fix File Extensions leaves sidecar files (`.xmp`,
+  `.aae`) with the old name, and MP1/MP2 audio is no longer recognised (left alone, never
+  renamed).
+
+### Version 0.4.0: a step-by-step tool page (2026-11-19)
+
+Owner's request: the app should be easy for a non-technical 15-year-old, without losing any
+feature. Design: `docs/superpowers/specs/2026-11-19-simpler-tool-page-design.md`.
+
+- **Three steps on every tool page:** *1 Choose where to look* (the options), *2* a button that
+  says what it looks for (each tool's `scan_label`, for example "Look for empty folders"), and
+  *3 Check the list, then confirm*, shown after the first scan, when the list also gets most of
+  the page. A plain sentence says what was found ("Found 11 items to remove (2.0 KB). Only
+  ticked rows are changed, and you confirm first."). The confirm button says what it will do:
+  "Move 12 to the Recycle Bin…", "Rename 9 items…", "Apply 5 changes…" for mixed kinds.
+- **One "Show all settings" switch,** app-wide, remembered in `gui_state.json` (even with
+  *Remember last folders and options* off), off by default. On: every page's extra options are
+  open, and the kind filter, the view switch, Select all / none and the log panel are shown.
+  Nothing was removed. The form's toggle is now called *More settings for this tool*.
+- **Plain words in the list:** *What happens / File / Goes to / Why / Size*, and "Move to
+  Recycle Bin", "Move", "Rename", "Delete forever", "Create file", "Convert" instead of the raw
+  kind names (`gui/wording.py`). CLI output and CSV/Excel/HTML exports keep the raw names.
+- **Duplicates show which copy is kept:** the group row reads "Keeps <full path>" and each
+  duplicate has a *Kept copy* column, so two kept files with the same name can be told apart.
+- **Right-click any row:** *Show in File Explorer* (selects the item), *Open* (default app; a
+  cloud-only OneDrive file asks before it is downloaded) and *Copy path*. A duplicate offers
+  *Show this copy* and *Show the kept copy*; a move or rename offers *Show where it is now* and
+  *Show where it will go* (the nearest folder that exists). Entries for a path that is gone are
+  disabled. `explorer.exe` is named in `core/deps.SYSTEM_TOOLS`; `SYSTEM_TOOLS` values are now
+  relative to `%SystemRoot%`.
+- **Open source:** the legacy copy of `python-find_duplicates.py` named the owner's Pictures
+  folder; it now uses the home folder (owner-approved change to the read-only legacy folder).
+  `tests/test_no_personal_paths.py` fails when any tracked file holds a real
+  `C:\Users\<account>` path. The old value is still in the git history; rewriting history
+  was not done.
+- Builder's calls: step 1 holds the folders and the basic options together (the form stays one
+  piece); extras and *More* sit in the step-2 row so they work without a scan; Empty Folder
+  Deleter counts "items to remove", because its plan also removes junk files.
+- Screenshots in `docs/images/` regenerated. Version 0.4.0.
+
 ### Version 0.3.0: a simpler tool page (2026-11-17)
 
 Owner's request: simplify the GUI without losing options or control.

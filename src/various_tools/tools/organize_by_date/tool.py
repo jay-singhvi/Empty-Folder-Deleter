@@ -838,6 +838,9 @@ def _summary(
 class OrganizeByDate:
     id = TOOL_ID
     name = "Organize photos and videos by date"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Plan the folders by date"
+    found_nouns = ("file to move", "files to move")
     description = (
         "Move photos and videos into year and month folders, by capture date (EXIF or the video's "
         "creation time), or by modified date when no capture date exists. Cloud-only files are "

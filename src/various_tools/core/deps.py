@@ -519,16 +519,19 @@ class ExternalTools:
 SYSTEM_TOOLS: dict[str, str] = {
     # Windows' own tool, used to pin and unpin OneDrive files. It is not one of the four
     # external programs, but its name lives here too, so that only this module names executables.
-    "attrib": "attrib.exe",
+    # Values are relative to %SystemRoot%.
+    "attrib": "System32\\attrib.exe",
+    # File Explorer, used by the GUI's "Show in File Explorer".
+    "explorer": "explorer.exe",
 }
 
 
 def system_tool(name: str) -> str:
-    """Path of a Windows system tool in ``%SystemRoot%\\System32``, or the bare name if absent."""
-    exe = SYSTEM_TOOLS[name]
+    """Path of a Windows system tool under ``%SystemRoot%``, or its bare name if absent."""
+    relative = Path(SYSTEM_TOOLS[name])
     system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
-    candidate = Path(system_root) / "System32" / exe
-    return str(candidate) if candidate.is_file() else exe
+    candidate = Path(system_root) / relative
+    return str(candidate) if candidate.is_file() else relative.name
 
 
 def install_hint(tool: str) -> str:

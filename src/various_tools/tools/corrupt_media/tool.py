@@ -399,6 +399,9 @@ def _run_checks(
 class CorruptMedia:
     id = TOOL_ID
     name = "Corrupt media finder"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Check photos and videos"
+    found_nouns = ("damaged file", "damaged files")
     description = (
         "Find pictures and videos that fail to open or decode (empty, truncated or damaged "
         "files). Corrupt files are listed unticked, and can be moved to a quarantine folder or "

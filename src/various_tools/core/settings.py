@@ -42,6 +42,9 @@ log = logging.getLogger(__name__)
 APP_NAME = "Various Tools"
 SETTINGS_FILE = "settings.toml"
 JOURNAL_FILE = "journal.sqlite"
+# The detailed online map (off by default). OpenStreetMap asks apps to cache tiles
+# and to say who they are.
+DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 # Defaults for the external-program timeouts. Core media code uses them as parameter defaults,
 # and tools pass the user's value from ``ctx.settings``. They live here, not in core/media, so
@@ -160,8 +163,39 @@ class Settings(BaseModel):
         ),
         json_schema_extra=_hint("Folders"),
     )
+    library_folders: list[Path] = Field(
+        default_factory=list[Path],
+        title="Photo and video folders",
+        description=(
+            "Folders the Timeline and the Map show photos and videos from. Their dates and "
+            "places are kept in a small cache, so only new or changed files are read on each "
+            "update. Files that are only in OneDrive are listed but never downloaded."
+        ),
+        json_schema_extra=_hint("Folders", widget="folders"),
+    )
+    map_online_tiles: bool = Field(
+        default=False,
+        title="Detailed online map",
+        description=(
+            "Off: the Map shows a simple world outline that is built into the app, and nothing "
+            "is sent anywhere. On: it also downloads map pictures from OpenStreetMap, which "
+            "shows streets and towns but tells that service which part of the world you look "
+            "at. Downloaded pictures are kept in the cache folder."
+        ),
+        json_schema_extra=_hint("Map"),
+    )
+    map_tile_url: str = Field(
+        default=DEFAULT_TILE_URL,
+        title="Online map address",
+        description=(
+            "Where the detailed map pictures come from, with {z}, {x} and {y} for the zoom and "
+            f"the picture's place. Default: {DEFAULT_TILE_URL} (OpenStreetMap). Used only when "
+            "Detailed online map is on."
+        ),
+        json_schema_extra=_hint("Map", advanced=True),
+    )
 
-    # ----- safety (🔒) -------------------------------------------------------
+    # ----- safety (🔒)-------------------------------------------------------
     delete_mode: Literal["trash", "permanent"] = Field(
         default="trash",
         title="Delete mode",

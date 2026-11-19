@@ -3,8 +3,9 @@
 Two views, switched by the person for any plan (the tool page picks the first one from the tool's
 optional ``plan_view`` attribute):
 
-* **Grouped**: duplicate plans group their actions under a "Keeps <name>" row. Other plans with a
-  ``group_id`` show the id; plans without groups are a flat list.
+* **Grouped**: duplicate plans group their actions under a "Keeps <full path>" row, with a
+  "Kept copy" column on each duplicate, so two kept files with the same name can be told
+  apart. Other plans with a ``group_id`` show the id; plans without groups are a flat list.
 * **Folder tree**: the folders under each plan root, with every action at its path. A folder row's
   tri-state check box covers everything inside it (plan 3.1).
 
@@ -30,23 +31,29 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     QPersistentModelIndex,
+    QPoint,
     QSortFilterProxyModel,
     Qt,
     Signal,
 )
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
 from various_tools.core.plan import ActionKind, Plan, PlannedAction
+from various_tools.gui import reveal
 from various_tools.gui.plan_edit import human_size
+from various_tools.gui.wording import kind_label
 
 ALL_KINDS = "All kinds"
 EM_DASH = "—"
@@ -69,6 +76,14 @@ def _empty_folders_hook(plan: Plan, action: PlannedAction, checked: bool) -> Non
 # The only per-tool code in the table. A tool id maps to what a check-box click should do.
 SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
 
+
+# Column titles, in plain words (exports and the CLI keep their own names).
+KIND = "What happens"
+FILE = "File"
+GOES_TO = "Goes to"
+KEPT = "Kept copy"
+WHY = "Why"
+SIZE = "Size"
 
 GROUPED = "grouped"
 FOLDER_TREE = "tree"
@@ -158,7 +173,7 @@ class PlanModel(QAbstractItemModel):
         self._rename_layout = False
         self._editable = True
         self._mode = GROUPED
-        self._columns = ["Kind", "Source", "Destination", "Reason", "Size"]
+        self._columns = [KIND, FILE, GOES_TO, WHY, SIZE]
         self._shown: Callable[[Node], bool] | None = None
 
     # ----- loading ------------------------------------------------------------------
@@ -188,11 +203,13 @@ class PlanModel(QAbstractItemModel):
             and all(a.kind is ActionKind.RENAME for a in actions)
         )
         if self._mode == FOLDER_TREE:
-            self._columns = ["Name", "Kind", "Destination", "Reason", "Size"]
+            self._columns = ["Name", KIND, GOES_TO, WHY, SIZE]
         elif self._rename_layout:
-            self._columns = ["Kind", "Folder", "Old name", "New name", "Reason", "Size"]
+            self._columns = [KIND, "Folder", "Old name", "New name", WHY, SIZE]
+        elif self.is_duplicates():
+            self._columns = [KIND, FILE, GOES_TO, KEPT, WHY, SIZE]
         else:
-            self._columns = ["Kind", "Source", "Destination", "Reason", "Size"]
+            self._columns = [KIND, FILE, GOES_TO, WHY, SIZE]
         self.top = []
         self._by_index = []
         if self._mode == FOLDER_TREE and plan is not None:
@@ -325,12 +342,16 @@ class PlanModel(QAbstractItemModel):
                 seen.setdefault(str(node.action.kind), None)
         return list(seen)
 
+    def is_duplicates(self) -> bool:
+        """The plan comes from the duplicate finder (its group ids are the kept files)."""
+        plan_tool = self._plan.tool if self._plan is not None else ""
+        return self._tool_id == "duplicates" or plan_tool == "duplicates"
+
     def group_label(self, node: Node) -> str:
         if node.path is not None:
             return node.label
-        plan_tool = self._plan.tool if self._plan is not None else ""
-        if self._tool_id == "duplicates" or plan_tool == "duplicates":
-            return f"Keeps {_name(Path(node.label))}"
+        if self.is_duplicates():
+            return f"Keeps {node.label}"
         return node.label
 
     def all_nodes(self) -> list[Node]:
@@ -483,6 +504,8 @@ class PlanModel(QAbstractItemModel):
             count = f"{len(node.children)} items"
             if self._rename_layout:
                 return ["", "", count, ""]
+            if KEPT in self._columns:
+                return ["", count, "", ""]
             return ["", count, ""]
         if self._rename_layout:
             folder = str(action.src.parent) if action.src is not None else ""
@@ -490,6 +513,13 @@ class PlanModel(QAbstractItemModel):
                 _dash(folder),
                 _dash(_name(action.src)),
                 _dash(_name(action.dst)),
+                action.reason,
+            ]
+        if KEPT in self._columns:
+            return [
+                _dash(str(action.src) if action.src is not None else ""),
+                _dash(str(action.dst) if action.dst is not None else ""),
+                _dash(action.group_id or ""),
                 action.reason,
             ]
         return [
@@ -507,11 +537,13 @@ class PlanModel(QAbstractItemModel):
             return node.label if column == 0 else None
         if name == "Folder":
             return str(action.src.parent) if action.src is not None else None
-        if name in ("Source", "Old name"):
+        if name == KEPT:
+            return action.group_id
+        if name in (FILE, "Old name"):
             return str(action.src) if action.src is not None else None
-        if name in ("Destination", "New name"):
+        if name in (GOES_TO, "New name"):
             return str(action.dst) if action.dst is not None else None
-        if name == "Reason":
+        if name == WHY:
             return action.reason or None
         return None
 
@@ -537,8 +569,11 @@ class PlanModel(QAbstractItemModel):
             if column == 0:
                 if self._mode == FOLDER_TREE or action is None:
                     return self.group_label(node)
-                return str(action.kind)
-            return self._cells(node)[column - 1]
+                return str(action.kind) if role == SORT_ROLE else kind_label(action.kind)
+            text = self._cells(node)[column - 1]
+            if role == Qt.ItemDataRole.DisplayRole and self._mode == FOLDER_TREE and column == 1:
+                return kind_label(text) if action is not None else text
+            return text
         return None
 
     def setData(self, index: AnyIndex, value: Any, role: int = 2) -> bool:  # type: ignore[override]
@@ -651,13 +686,23 @@ class PlanTable(QWidget):
         self.view.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.view.header().setStretchLastSection(False)
         self.view.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
+        # Hooks that tests replace, so nothing opens Explorer, an app or a message box.
+        self.reveal: Callable[[Path], bool] = reveal.show_in_explorer
+        self.open_file: Callable[[Path], bool] = reveal.open_path
+        self.confirm: Callable[[str, str], bool] = self._default_confirm
 
         top = QHBoxLayout()
         self._toolbar = top
         top.addWidget(self.filter_edit, 1)
         top.addWidget(self.kind_combo)
-        top.addWidget(QLabel("View:"))
+        self.view_label = QLabel("View:")
+        top.addWidget(self.view_label)
         top.addWidget(self.view_combo)
+        # Shown only with "Show all settings" on (the filter box is always shown).
+        self._full_only: list[QWidget] = [self.kind_combo, self.view_label, self.view_combo]
+        self._full_controls = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top)
@@ -710,9 +755,25 @@ class PlanTable(QWidget):
         """``GROUPED`` or ``FOLDER_TREE``."""
         return self._model.mode
 
-    def add_toolbar_widget(self, widget: QWidget) -> None:
-        """Put ``widget`` at the end of the toolbar above the table (filter, kind, view)."""
+    def add_toolbar_widget(self, widget: QWidget, *, full_only: bool = False) -> None:
+        """Put ``widget`` at the end of the toolbar above the table (filter, kind, view).
+
+        ``full_only``: shown only while :meth:`set_full_controls` is on.
+        """
         self._toolbar.addWidget(widget)
+        if full_only:
+            self._full_only.append(widget)
+            widget.setVisible(self._full_controls)
+
+    def set_full_controls(self, full: bool) -> None:
+        """Show the kind filter, the view switch and the other "full" toolbar widgets, or hide
+        them (the "Show all settings" switch). The text filter is always shown."""
+        self._full_controls = full
+        for widget in self._full_only:
+            widget.setVisible(full)
+        if not full and self.kind_combo.currentIndex() > 0:
+            # A filter nobody can see must not hide rows that Apply still acts on.
+            self.kind_combo.setCurrentIndex(0)
 
     def set_view_mode(self, mode: str) -> None:
         """Show the plan grouped or as a folder tree. The plan and its checks stay as they are."""
@@ -805,6 +866,69 @@ class PlanTable(QWidget):
 
     def totals_text(self) -> str:
         return self._model.totals_text()
+
+    # ----- right-click menu ------------------------------------------------------------------
+
+    def context_menu_at(self, pos: QPoint) -> QMenu | None:
+        """The right-click menu for the row at ``pos`` (viewport coordinates), not shown yet.
+
+        One "show" entry per place the row is about (for a duplicate: this copy and the kept
+        copy), then Open and Copy path for the row's own file. Entries for a path that no
+        longer exists are disabled. None when there is no row at ``pos``.
+        """
+        node = self._model.node_at(self._proxy.mapToSource(self.view.indexAt(pos)))
+        if node is None:
+            return None
+        targets = reveal.reveal_targets(node.action, node.path, self._model.is_duplicates())
+        if not targets:
+            return None
+        menu = QMenu(self.view)
+        for target in targets:
+            entry = menu.addAction(target.label)
+            entry.setEnabled(target.exists)
+            entry.setToolTip(str(target.path))
+            entry.triggered.connect(lambda _c=False, p=target.path: self.reveal(p))
+        own = targets[0]
+        menu.addSeparator()
+        open_entry = menu.addAction("Open")
+        open_entry.setEnabled(own.exists and not own.is_destination)
+        open_entry.triggered.connect(lambda _c=False, p=own.path: self._open(p))
+        copy_entry = menu.addAction("Copy path")
+        copy_entry.triggered.connect(lambda _c=False, p=own.own_path: self._copy_path(p))
+        menu.setToolTipsVisible(True)
+        return menu
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        menu = self.context_menu_at(pos)
+        if menu is not None:
+            menu.exec(self.view.viewport().mapToGlobal(pos))
+            menu.deleteLater()
+
+    def _open(self, path: Path) -> bool:
+        """Open ``path`` in its default app; a cloud-only file is downloaded only if asked."""
+        if reveal.needs_download(path) and not self.confirm(
+            "Download from OneDrive?",
+            f"{path.name} is only in OneDrive, not on this device. Opening it downloads it "
+            "to this device.\n\nDownload and open it?",
+        ):
+            return False
+        return self.open_file(path)
+
+    @staticmethod
+    def _copy_path(path: Path) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(str(path))
+
+    def _default_confirm(self, title: str, text: str) -> bool:
+        answer = QMessageBox.question(
+            self,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     # ----- internals ----------------------------------------------------------------------
 
@@ -900,19 +1024,22 @@ class PlanTable(QWidget):
         self.view.setColumnWidth(last - 1, 280)
         if self._model.mode == FOLDER_TREE:
             self.view.setColumnWidth(0, 340)
-            self.view.setColumnWidth(1, 80)
+            self.view.setColumnWidth(1, 150)
 
     def _sync_kinds(self) -> None:
         previous = self.kind_combo.currentText()
         self.kind_combo.blockSignals(True)
         self.kind_combo.clear()
         self.kind_combo.addItem(ALL_KINDS)
-        self.kind_combo.addItems(self._model.kinds())
+        for kind in self._model.kinds():
+            self.kind_combo.addItem(kind_label(kind), kind)
         self.kind_combo.setCurrentIndex(max(self.kind_combo.findText(previous), 0))
         self.kind_combo.blockSignals(False)
 
     def _kind_filter(self) -> str:
-        return "" if self.kind_combo.currentIndex() <= 0 else self.kind_combo.currentText()
+        if self.kind_combo.currentIndex() <= 0:
+            return ""
+        return str(self.kind_combo.currentData())
 
     def _filters_changed(self, *_: object) -> None:
         kind = self._kind_filter()

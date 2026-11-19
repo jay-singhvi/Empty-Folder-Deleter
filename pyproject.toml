@@ -1,6 +1,6 @@
 [project]
 name = "various-tools"
-version = "0.3.0"
+version = "0.5.0"
 description = "Various Tools: a Windows toolkit for cleaning up, deduplicating and organizing files and media."
 readme = "README.md"
 license = { text = "MIT" }
@@ -39,6 +39,8 @@ temp_cleaner = "various_tools.tools.temp_cleaner:TOOL"
 media_convert = "various_tools.tools.media_convert:TOOL"
 metadata_strip = "various_tools.tools.metadata_strip:TOOL"
 checksum = "various_tools.tools.checksum:TOOL"
+empty_files = "various_tools.tools.empty_files:TOOL"
+wrong_extension = "various_tools.tools.wrong_extension:TOOL"
 corrupt_media = "various_tools.tools.corrupt_media:TOOL"
 
 [dependency-groups]

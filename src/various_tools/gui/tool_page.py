@@ -1,5 +1,11 @@
 """One page per tool: options form, Scan, the plan table, Apply, Export and Undo.
 
+The page reads as three numbered steps in plain words (gui/wording.py): 1 choose where to look
+(the options form), 2 look (the scan button, named by the tool's ``scan_label``), 3 check the
+list, then confirm (the results, hidden until the first scan). One app-wide "Show all settings"
+switch (``AppState.show_all_settings``) opens every page's extra options and shows the table's
+extra controls; nothing is ever removed, only folded away.
+
 Everything here is generic. The page is built from the tool's options model through
 :class:`~various_tools.gui.widgets.schema_form.SchemaForm`. The only per-tool touches are the
 duplicates compare view (``COMPARE_TOOLS``) and the rename live preview (``LIVE_PREVIEW_TOOLS``).
@@ -40,6 +46,7 @@ from pydantic import ValidationError
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -80,12 +87,19 @@ from various_tools.gui.undo_rules import (
 from various_tools.gui.widgets.plan_table import FOLDER_TREE, PlanTable
 from various_tools.gui.widgets.schema_form import SchemaForm
 from various_tools.gui.widgets.size_map import SizeMapView, actions_under
+from various_tools.gui.wording import (
+    APPLY_TEXT,
+    apply_label,
+    found_nouns,
+    scan_label,
+    summary_text,
+)
 from various_tools.gui.workers import Worker, tool_worker
 from various_tools.tools.base import Tool, ToolOptions
 
 log = logging.getLogger(__name__)
 
-APPLY_TEXT = "Apply…"
+STEP_TEXTS = ("1  Choose where to look", "2  {scan}", "3  Check the list, then confirm")
 # An option value never remembered between sessions (a permanent delete).
 PERMANENT = "permanent"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
@@ -235,6 +249,14 @@ class ToolPage(QWidget):
         title = QLabel(f"<h2>{tool.name}</h2>")
         description = QLabel(tool.description)
         description.setWordWrap(True)
+        self.step_labels: list[QLabel] = []
+        for text in STEP_TEXTS:
+            label = QLabel(text.format(scan=scan_label(tool)))
+            font = label.font()
+            font.setBold(True)
+            font.setPointSizeF(font.pointSizeF() * 1.1)
+            label.setFont(font)
+            self.step_labels.append(label)
 
         # ----- options form ------------------------------------------------------------
         self.form = SchemaForm(
@@ -246,7 +268,7 @@ class ToolPage(QWidget):
         form_scroll.setWidget(self.form)
 
         # ----- actions -----------------------------------------------------------------
-        self.scan_button = QPushButton("Scan")
+        self.scan_button = QPushButton(scan_label(tool))
         self.scan_button.setToolTip("Preview what would change. Nothing on disk changes.")
         self.scan_button.setDefault(True)
         self.cancel_button = QPushButton("Cancel")
@@ -282,6 +304,11 @@ class ToolPage(QWidget):
         )
         self.select_none_button = QPushButton("Select none")
         self.select_none_button.setToolTip("Uncheck every action.")
+        self.show_all_check = QCheckBox("Show all settings")
+        self.show_all_check.setToolTip(
+            "Show every setting and control on every page: extra options, the kind filter, the "
+            "view switch, Select all and the log. Remembered for next time."
+        )
         self.undo_button = QPushButton("Undo this run")
         self.undo_button.setToolTip("Move and rename everything this run changed back.")
         self.progress_bar = QProgressBar()
@@ -290,16 +317,16 @@ class ToolPage(QWidget):
         self.status_label = QLabel("Choose options, then Scan to preview.")
         self.status_label.setWordWrap(True)
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Step 2: look. Step 3 (under the results): confirm.
         buttons = QHBoxLayout()
-        for button in (
-            self.scan_button,
-            self.cancel_button,
-            self.apply_button,
-            self.compare_button,
-            self.undo_button,
-        ):
-            buttons.addWidget(button)
+        buttons.addWidget(self.scan_button)
+        buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
+        buttons.addWidget(self.show_all_check)
+        confirm_row = QHBoxLayout()
+        for button in (self.apply_button, self.compare_button, self.undo_button):
+            confirm_row.addWidget(button)
+        confirm_row.addStretch(1)
 
         # ----- missing program banner --------------------------------------------------
         self.missing_banner = QFrame()
@@ -344,8 +371,8 @@ class ToolPage(QWidget):
         self.notes_view.setVisible(False)  # shown only when a scan left notes
         self.table = PlanTable()
         # Selecting rows belongs to the results, so the buttons sit in the table's toolbar.
-        self.table.add_toolbar_widget(self.select_all_button)
-        self.table.add_toolbar_widget(self.select_none_button)
+        self.table.add_toolbar_widget(self.select_all_button, full_only=True)
+        self.table.add_toolbar_widget(self.select_none_button, full_only=True)
         if getattr(tool, "plan_view", None) == FOLDER_TREE:
             self.table.set_view_mode(FOLDER_TREE)
         # A tool that can build a size tree from its plan gets a "Size map" tab (plan 7.1).
@@ -365,22 +392,35 @@ class ToolPage(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.addWidget(title)
         top_layout.addWidget(description)
+        top_layout.addWidget(self.step_labels[0])
         top_layout.addWidget(form_scroll, 1)
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.addWidget(self.step_labels[1])
         bottom_layout.addLayout(buttons)
         bottom_layout.addWidget(self.progress_bar)
         bottom_layout.addWidget(self.status_label)
         bottom_layout.addWidget(self.missing_banner)
         bottom_layout.addWidget(self.cloud_banner)
-        bottom_layout.addWidget(self.notes_view)
-        bottom_layout.addWidget(results, 1)
+        # Step 3, hidden until the first scan so a new page is short.
+        self.results = QWidget()
+        results_layout = QVBoxLayout(self.results)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(self.step_labels[2])
+        results_layout.addWidget(self.notes_view)
+        results_layout.addWidget(results, 1)
+        results_layout.addLayout(confirm_row)
+        self.results.setVisible(False)
+        bottom_layout.addWidget(self.results, 1)
+        bottom_layout.addStretch(0)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(top)
         splitter.addWidget(bottom)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
+        self.splitter = splitter
+        self._top = top
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)
 
@@ -401,12 +441,29 @@ class ToolPage(QWidget):
         self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
         self.select_none_button.clicked.connect(lambda _c=False: self.select_all(False))
         self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
+        self.show_all_check.toggled.connect(self._show_all_toggled)
         self.form.changed.connect(self._form_changed)
         self.table.selectionChanged.connect(self._update_buttons)
         self.table.currentActionChanged.connect(lambda _a: self._update_buttons())
         self.table.filterChanged.connect(self._label_select_buttons)
 
+        self.set_show_all(state.show_all_settings())
         self._update_buttons()
+
+    # ----- "Show all settings" ------------------------------------------------------------------
+
+    def set_show_all(self, on: bool) -> None:
+        """Show (or fold away) the extra options and the table's extra controls."""
+        if self.show_all_check.isChecked() != on:
+            self.show_all_check.blockSignals(True)
+            self.show_all_check.setChecked(on)
+            self.show_all_check.blockSignals(False)
+        self.form.set_advanced_visible(on)
+        self.table.set_full_controls(on)
+
+    def _show_all_toggled(self, on: bool) -> None:
+        self.set_show_all(on)
+        self.state.set_show_all_settings(on)  # remembered, and every other page follows
 
     # ----- options ----------------------------------------------------------------------------
 
@@ -487,13 +544,23 @@ class ToolPage(QWidget):
         self._show_missing(missing_programs(plan.notes))
         self._show_cloud_only(plan)
         self._show_size_map(plan)
-        count = len(plan.actions)
-        if count:
-            self._set_status(
-                f"Preview ready: {count} action(s). Uncheck anything you want to keep, then Apply."
-            )
-        else:
-            self._set_status("Nothing to do: the scan found no actions.")
+        if not self.results.isVisible():
+            self.results.setVisible(True)
+            QTimer.singleShot(0, self._give_results_room)
+        self._set_status(summary_text(plan, sizes, found_nouns(self.tool)))
+
+    def _give_results_room(self) -> None:
+        """After the first scan, the options keep only the height they need (at most 40% of
+        the page) and the results get the rest. The splitter can still be dragged."""
+        if not shiboken6.isValid(self):
+            return
+        total = sum(self.splitter.sizes())
+        if total <= 0:
+            return
+        top = min(
+            self._top.minimumSizeHint().height() + self.form.sizeHint().height(), total * 2 // 5
+        )
+        self.splitter.setSizes([top, total - top])
 
     def _show_notes(self, notes: list[str]) -> None:
         """The scan notes, in a box only as tall as they need (up to 5 lines), or hidden."""
@@ -1139,8 +1206,7 @@ class ToolPage(QWidget):
         self.cancel_button.setVisible(running)
         self.progress_bar.setVisible(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
-        count = len(self.plan.selected_actions()) if self.plan is not None else 0
-        self.apply_button.setText(f"Apply {count}…" if count and not self._applied else APPLY_TEXT)
+        self.apply_button.setText(APPLY_TEXT if self._applied else apply_label(self.plan))
         self.more_button.setEnabled(not busy)
         self.reset_options_action.setEnabled(not busy)
         self.export_button.setEnabled(not busy and has_plan)

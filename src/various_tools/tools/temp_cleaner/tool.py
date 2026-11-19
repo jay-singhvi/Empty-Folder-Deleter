@@ -586,6 +586,9 @@ def _plain(text: str) -> str:
 class TempCleaner:
     id = TOOL_ID
     name = "Temp Cleaner"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Look for temporary files"
+    found_nouns = ("temporary file", "temporary files")
     description = (
         "Remove old files from your temp folder (or folders you choose) to the Recycle Bin, "
         "and list browser caches without touching them."

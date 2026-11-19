@@ -251,6 +251,9 @@ def _assign_groups(scan: _Scan) -> None:
 class EmptyFolders:
     id = "empty_folders"
     name = "Empty Folder Deleter"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Look for empty folders"
+    found_nouns = ("item to remove", "items to remove")  # folders and the junk files in them
     description = (
         "Find folders that will be empty after their empty subfolders are removed, and "
         "remove them to the Recycle Bin."

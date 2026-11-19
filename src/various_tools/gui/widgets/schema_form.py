@@ -814,7 +814,7 @@ class SchemaForm(QWidget):
 
     def _add_advanced(self, outer: QVBoxLayout, specs: list[FieldSpec]) -> None:
         button = QToolButton(self)
-        button.setText("Advanced options")
+        button.setText("More settings for this tool")
         button.setCheckable(True)
         button.setChecked(False)
         button.setAutoRaise(True)

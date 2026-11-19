@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtWidgets import QPushButton
 from pytestqt.qtbot import QtBot
 
 from various_tools.core.context import RunContext
@@ -174,8 +175,11 @@ def test_duplicate_plan_groups_under_a_keeps_row(qtbot: QtBot, tmp_path: Path) -
     table.set_plan(plan, "duplicates", [100, 2000])
     assert top_rows(table) == 1
     assert child_rows(table, 0) == 2
-    assert cell(table, 0, 0).startswith("Keeps a.jpg")
-    assert header_labels(table) == ["Kind", "Source", "Destination", "Reason", "Size"]
+    assert cell(table, 0, 0) == f"Keeps {keeper}"
+    assert header_labels(table) == ["What happens", "File", "Goes to", "Kept copy", "Why", "Size"]
+    group = table.view.model().index(0, 0)
+    assert cell(table, 0, 3, group) == str(keeper)
+    assert cell(table, 0, 0, group) == "Move"
     assert table.sizes() == [100, 2000]
     assert table.plan() is plan
     assert str(keeper) in plan.actions[0].group_id  # type: ignore[operator]
@@ -272,8 +276,8 @@ def test_filter_by_text_and_kind(qtbot: QtBot, tmp_path: Path) -> None:
     assert top_rows(table) == 3
     assert [table.kind_combo.itemText(i) for i in range(table.kind_combo.count())] == [
         ALL_KINDS,
-        "move",
-        "trash",
+        "Move",
+        "Move to Recycle Bin",
     ]
     table.filter_edit.setText("PEAR")  # case-insensitive, on the path
     assert top_rows(table) == 1
@@ -281,7 +285,7 @@ def test_filter_by_text_and_kind(qtbot: QtBot, tmp_path: Path) -> None:
     assert top_rows(table) == 1
     table.filter_edit.setText("")
     assert top_rows(table) == 3
-    table.kind_combo.setCurrentText("trash")
+    table.kind_combo.setCurrentText("Move to Recycle Bin")
     assert top_rows(table) == 2
     table.filter_edit.setText("plum")
     assert top_rows(table) == 1
@@ -322,7 +326,7 @@ def test_rename_plans_get_folder_old_and_new_name_columns(qtbot: QtBot, tmp_path
     table = PlanTable()
     qtbot.addWidget(table)
     table.set_plan(plan, "rename", [10, 20])
-    assert header_labels(table) == ["Kind", "Folder", "Old name", "New name", "Reason", "Size"]
+    assert header_labels(table) == ["What happens", "Folder", "Old name", "New name", "Why", "Size"]
     assert cell(table, 0, 1) == str(sub)
     assert cell(table, 0, 2) == "IMG_1.jpg"
     assert cell(table, 0, 3) == "2024-01-01-001.jpg"
@@ -341,7 +345,7 @@ def test_a_plan_with_a_move_is_not_a_rename_layout(qtbot: QtBot, tmp_path: Path)
     table = PlanTable()
     qtbot.addWidget(table)
     table.set_plan(plan, "rename")
-    assert header_labels(table)[:3] == ["Kind", "Source", "Destination"]
+    assert header_labels(table)[:3] == ["What happens", "File", "Goes to"]
 
 
 def empty_folders_plan(tmp_path: Path) -> Plan:
@@ -446,3 +450,55 @@ def test_filtering_raises_no_deprecation_warning(qtbot: QtBot, tmp_path: Path) -
         warnings.simplefilter("error")
         table.set_plan(plan, "duplicates")
         table.filter_edit.setText("a")
+
+
+def test_duplicates_show_the_new_keeper_after_a_swap(qtbot: QtBot, tmp_path: Path) -> None:
+    plan, keeper, b, _c = dup_plan(tmp_path)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "duplicates")
+    plan_edit.change_keeper(plan, str(keeper), b)
+    table.refresh()
+    model = table.view.model()
+    assert cell(table, 0, 0) == f"Keeps {b}"
+    assert model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole) == str(b)
+    assert cell(table, 0, 3, model.index(0, 0)) == str(b)
+
+
+def test_full_controls_switch_hides_the_extra_filters(qtbot: QtBot, tmp_path: Path) -> None:
+    table = PlanTable()
+    qtbot.addWidget(table)
+    extra = QPushButton("Select all")
+    table.add_toolbar_widget(extra, full_only=True)
+    table.show()
+    table.set_full_controls(False)
+    assert not table.kind_combo.isVisibleTo(table)
+    assert not table.view_combo.isVisibleTo(table)
+    assert not extra.isVisibleTo(table)
+    assert table.filter_edit.isVisibleTo(table)
+    table.set_full_controls(True)
+    assert table.kind_combo.isVisibleTo(table)
+    assert table.view_combo.isVisibleTo(table)
+    assert extra.isVisibleTo(table)
+
+
+def test_switching_the_full_controls_off_clears_the_kind_filter(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    plan = Plan(
+        tool="mixed",
+        roots=[tmp_path],
+        actions=[
+            PlannedAction(ActionKind.MOVE, tmp_path / "a", tmp_path / "d" / "a", "x"),
+            PlannedAction(ActionKind.TRASH, tmp_path / "b", None, "junk"),
+        ],
+    )
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "mixed")
+    table.kind_combo.setCurrentText("Move")
+    assert top_rows(table) == 1
+    table.set_full_controls(False)
+    # A filter nobody can see must not hide rows that Apply would still act on.
+    assert top_rows(table) == 2
+    assert not table.filter_active()

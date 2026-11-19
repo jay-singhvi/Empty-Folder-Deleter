@@ -594,6 +594,9 @@ def _usable_roots(options: SortByTypeOptions, ctx: RunContext, notes: list[str])
 class SortByType:
     id = TOOL_ID
     name = "Sort by Type"
+    # Plain words for the GUI (gui/wording.py).
+    scan_label = "Plan the folders by type"
+    found_nouns = ("file to move", "files to move")
     description = (
         "Move files into sub-folders by simple name rules, such as *.pdf into Documents/PDF. "
         "Preview first; every move can be undone from History."

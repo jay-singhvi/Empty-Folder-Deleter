@@ -33,8 +33,10 @@ GUI_STATE_FILE = "gui_state.json"
 GUI_STATE_FORMAT = 1
 LAST_OPTIONS_KEY = "last_options"
 OLD_LAST_FOLDERS_KEY = "last_folders"
+SHOW_ALL_KEY = "show_all_settings"
 
 SettingsListener = Callable[["Settings"], None]
+ShowAllListener = Callable[[bool], None]
 
 
 @dataclass
@@ -50,6 +52,7 @@ class AppState:
     tools: dict[str, Tool]
     deps: ExternalTools = field(init=False)
     _listeners: list[SettingsListener] = field(default_factory=list[SettingsListener])
+    _show_all_listeners: list[ShowAllListener] = field(default_factory=list[ShowAllListener])
 
     def __post_init__(self) -> None:
         self.deps = make_deps(self.settings)
@@ -147,6 +150,33 @@ class AppState:
             tools = {}
             data[LAST_OPTIONS_KEY] = tools
         tools[tool_id] = json.loads(json.dumps(dict(values), default=str))
+        self._write_gui_state(data)
+
+    # ----- the "Show all settings" switch ----------------------------------------
+
+    def show_all_settings(self) -> bool:
+        """Whether every page shows all its settings and controls (off by default).
+
+        Kept in the GUI state file even when remembering options is switched off: it is a
+        display preference, not an option value.
+        """
+        return self._read_gui_state().get(SHOW_ALL_KEY) is True
+
+    def set_show_all_settings(self, on: bool) -> None:
+        """Store the switch and tell every listener."""
+        data = self._read_gui_state()
+        data["format"] = GUI_STATE_FORMAT
+        data[SHOW_ALL_KEY] = bool(on)
+        self._write_gui_state(data)
+        for listener in list(self._show_all_listeners):
+            listener(bool(on))
+
+    def on_show_all_changed(self, listener: ShowAllListener) -> None:
+        """Call ``listener(on)`` after every :meth:`set_show_all_settings`."""
+        self._show_all_listeners.append(listener)
+
+    def _write_gui_state(self, data: dict[str, Any]) -> None:
+        """Write the GUI state file atomically; a failure is logged, never raised."""
         path = self._gui_state_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,4 +185,4 @@ class AppState:
                 json.dump(data, handle, indent=2, ensure_ascii=False)
             os.replace(tmp_name, path)
         except OSError as exc:
-            log.warning("Could not remember options in %s: %s", path, exc)
+            log.warning("Could not save the GUI state in %s: %s", path, exc)

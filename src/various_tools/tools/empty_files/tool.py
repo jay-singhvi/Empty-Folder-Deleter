@@ -11,13 +11,21 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from pydantic import Field
 
 from various_tools.core.context import RunContext
-from various_tools.core.fs import is_inside, root_refusal, walk
-from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult, apply_plan
+from various_tools.core.fs import is_inside, root_refusal, stat_no_follow, walk
+from various_tools.core.plan import (
+    ActionKind,
+    ActionOutcome,
+    Plan,
+    PlannedAction,
+    RunResult,
+    apply_plan,
+)
 from various_tools.tools.base import Category, ToolOptions
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
@@ -145,7 +153,44 @@ class EmptyFiles:
         return plan
 
     def apply(self, plan: Plan, ctx: RunContext) -> RunResult:
-        return apply_plan(plan, ctx)
+        # A plan can be applied long after the scan: a file that has been written to since is
+        # no longer empty and must not be trashed. Attributes only, so nothing is opened.
+        kept: list[PlannedAction] = []
+        changed: list[ActionOutcome] = []
+        for action in plan.actions:
+            if action.selected and action.src is not None and _no_longer_empty(action.src):
+                kept.append(replace(action, selected=False))
+                changed.append(
+                    ActionOutcome(0, str(action.kind), "skipped", str(action.src), None, CHANGED)
+                )
+            else:
+                kept.append(action)
+        result = apply_plan(replace(plan, actions=kept), ctx)
+        journal = ctx.journal
+        seq = len(result.outcomes)
+        for outcome in changed:
+            seq += 1
+            if journal is not None:
+                journal.record_action(
+                    result.run_id,
+                    seq,
+                    outcome.kind,
+                    Path(outcome.src) if outcome.src else None,
+                    None,
+                    "checked again at apply",
+                    status="skipped",
+                    error=outcome.detail,
+                )
+            result.outcomes.append(replace(outcome, seq=seq))
+        return result
+
+
+CHANGED = "changed since the scan: no longer empty"
+
+
+def _no_longer_empty(path: Path) -> bool:
+    st = stat_no_follow(path)
+    return st is not None and st.st_size != 0
 
 
 TOOL = EmptyFiles()

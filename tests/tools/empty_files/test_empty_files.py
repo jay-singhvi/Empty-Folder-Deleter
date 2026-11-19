@@ -235,3 +235,26 @@ def test_protected_roots_are_refused(tmp_path: Path) -> None:
     plan = TOOL.scan(EmptyFilesOptions.model_validate({"roots": [drive_root]}), _ctx(tmp_path))
     assert plan.actions == [] and plan.roots == []
     assert plan.notes
+
+
+def test_apply_skips_a_file_written_to_after_the_scan(
+    tmp_path: Path, root: Path, journal: Journal, fake_bin: FakeBin
+) -> None:
+    _touch(root / "a.txt")
+    _touch(root / "b.txt")
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    (root / "a.txt").write_bytes(b"now has content")
+
+    result = TOOL.apply(plan, ctx)
+
+    assert (root / "a.txt").read_bytes() == b"now has content"
+    assert not (root / "b.txt").exists()
+    assert fake_bin.trashed == [root / "b.txt"]
+    skipped = [o for o in result.outcomes if o.status == "skipped"]
+    assert len(skipped) == 1
+    assert skipped[0].src == str(root / "a.txt")
+    assert skipped[0].detail == "changed since the scan: no longer empty"
+    assert result.count("done") == 1
+    rows = {a.src: a for a in journal.actions(result.run_id)}
+    assert rows[str(root / "a.txt")].status == "skipped"

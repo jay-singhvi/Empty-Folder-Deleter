@@ -31,6 +31,7 @@ TOOL_IDS = {
     "corrupt_media",
     "disk_usage",
     "duplicates",
+    "empty_files",
     "empty_folders",
     "media_convert",
     "media_resize",
@@ -40,6 +41,7 @@ TOOL_IDS = {
     "rename",
     "sort_by_type",
     "temp_cleaner",
+    "wrong_extension",
 }
 
 

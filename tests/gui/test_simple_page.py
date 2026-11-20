@@ -69,7 +69,7 @@ def test_switch_off_hides_the_extra_controls(open_tool: Open, scan: Scan, tmp_pa
     scan(page)
     assert not page.show_all_check.isChecked()
     assert not page.table.kind_combo.isVisibleTo(page)
-    assert not page.select_all_button.isVisibleTo(page)
+    assert page.select_all_button.isVisibleTo(page)  # always visible
     assert not page.form._advanced_button.isChecked()  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
     page.show_all_check.setChecked(True)
     assert page.table.kind_combo.isVisibleTo(page)

@@ -34,8 +34,10 @@ uses them to find the item in the Recycle Bin, and to recycle an output only if 
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat as stat_module
+import time
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -48,7 +50,7 @@ from typing import Any
 from send2trash import send2trash
 
 from various_tools.core import fs, recycle
-from various_tools.core.context import Cancelled, RunContext
+from various_tools.core.context import Cancelled, Pace, RunContext
 from various_tools.core.fs import (
     destination_refusal,
     is_case_only_rename,
@@ -475,6 +477,48 @@ def _final_destination(action: PlannedAction) -> Path | None:
     return unique_destination(dst.parent, dst.name)
 
 
+_STEP_S = 0.25
+_sleep = time.sleep  # tests replace this, so pacing never really waits
+
+
+def _clock_text(seconds: float) -> str:
+    whole = max(0, math.ceil(seconds))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _honour_pause(ctx: RunContext, done: int, total: int) -> None:
+    """Wait while the run is paused; still cancellable."""
+    while ctx.pause_event.is_set():
+        ctx.check_cancelled()
+        ctx.report(done, total, "Paused.")
+        _sleep(_STEP_S)
+
+
+def _wait_between_batches(
+    ctx: RunContext, pace: Pace, batch: int, batches: int, done: int, total: int
+) -> None:
+    """Wait ``pace.pause_s`` after a batch, in short steps. Cancel, pause and skip are honoured."""
+    remaining = pace.pause_s
+    while remaining > 0:
+        ctx.check_cancelled()
+        if ctx.skip_wait_event.is_set():
+            break
+        if ctx.pause_event.is_set():
+            ctx.report(done, total, "Paused.")
+            _sleep(_STEP_S)
+            continue
+        ctx.report(
+            done, total, f"Batch {batch} of {batches} done. Next batch in {_clock_text(remaining)}."
+        )
+        step = min(_STEP_S, remaining)
+        _sleep(step)
+        remaining -= step
+    ctx.skip_wait_event.clear()
+    ctx.check_cancelled()
+
+
 def apply_plan(
     plan: Plan,
     ctx: RunContext,
@@ -497,8 +541,24 @@ def apply_plan(
     actions = plan.selected_actions()
     total = len(actions)
     refused_roots = _refused_roots(plan, ctx)
+    pace = ctx.pace
+    batches = math.ceil(total / pace.batch_size) if pace is not None else 0
+    waited_at = 0
+    executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
     try:
         for seq, action in enumerate(actions, start=1):
+            ctx.check_cancelled()
+            _honour_pause(ctx, seq - 1, total)
+            if (
+                pace is not None
+                and executed
+                and executed % pace.batch_size == 0
+                and waited_at != executed
+            ):
+                waited_at = executed
+                _wait_between_batches(
+                    ctx, pace, executed // pace.batch_size, batches, seq - 1, total
+                )
             ctx.check_cancelled()
             ctx.report(seq - 1, total, f"{action.kind}: {action.src or action.dst or ''}")
             src = str(action.src) if action.src is not None else None
@@ -527,6 +587,7 @@ def apply_plan(
                 )
                 continue
 
+            executed += 1
             final_dst = _final_destination(action)
             action_id = journal.record_action(
                 run_id, seq, str(action.kind), action.src, final_dst, action.reason

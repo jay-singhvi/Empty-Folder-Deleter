@@ -214,15 +214,15 @@ def test_select_all_with_a_filter_ticks_only_the_shown_rows_and_says_so(
     page = _page(qtbot, gui_state, dialogs, FakeTool(), tmp_path)
     scan(page)
     assert page.plan is not None
-    assert page.select_all_button.text() == "Select all"
+    assert page.select_all_button.text() == "Tick all"
     page.table.filter_edit.setText("pea")  # pear and peach
-    assert page.select_all_button.text() == "Select all shown"
-    assert page.select_none_button.text() == "Select none shown"
+    assert page.select_all_button.text() == "Tick all shown"
+    assert page.select_none_button.text() == "Untick all shown"
     assert "Hidden rows are not changed" in page.select_all_button.toolTip()
     assert page.select_all(True) == 2
     assert [a.selected for a in page.plan.actions] == [False, True, True]
     page.table.filter_edit.setText("")
-    assert page.select_all_button.text() == "Select all"
+    assert page.select_all_button.text() == "Tick all"
     assert page.select_all(True) == 1
     page.table.filter_edit.setText("peach")
     assert page.select_all(False) == 1

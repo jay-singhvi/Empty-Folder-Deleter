@@ -106,7 +106,16 @@ def test_menu_reveals_each_file_of_a_duplicate_row(qtbot: QtBot, tmp_path: Path)
     table.reveal = lambda p: shown.append(p) or True  # type: ignore[method-assign]
     menu = table.context_menu_at(_row_point(table, 0, parent_row=0))
     assert menu is not None
-    assert _labels(menu) == ["Show this copy", "Show the kept copy", "Open", "Copy path"]
+    assert _labels(menu) == [
+        "Tick",
+        "Untick",
+        "Tick only these",
+        "Show this copy",
+        "Show the kept copy",
+        "Open",
+        "Properties",
+        "Copy path",
+    ]
     _action(menu, "Show this copy").trigger()
     _action(menu, "Show the kept copy").trigger()
     assert shown == [copy, keeper]

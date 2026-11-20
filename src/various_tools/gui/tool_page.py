@@ -36,6 +36,7 @@ import copy
 import logging
 import os
 import re
+import threading
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -72,11 +73,18 @@ from various_tools.cli.clipboard import (
 )
 from various_tools.cli.toolcmds import download_actions, is_download
 from various_tools.core import onedrive
+from various_tools.core.context import Pace
 from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
 from various_tools.core.schema import describe, format_value
+from various_tools.gui.apply_dialog import (
+    PACE_KEY,
+    ApplyAsk,
+    ApplyDialog,
+    onedrive_suggestion,
+)
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
     UndoInfo,
@@ -93,7 +101,15 @@ from various_tools.gui.wording import (
     CHOOSE_WORKSPACE_FIRST,
     HIDE_DETAILS,
     HIDE_SETTINGS,
+    PAUSE_TEXT,
+    RESUME_TEXT,
     SHOW_DETAILS,
+    SKIP_WAIT_TEXT,
+    STOP_TEXT,
+    TICK_ALL,
+    TICK_ALL_SHOWN,
+    UNTICK_ALL,
+    UNTICK_ALL_SHOWN,
     USE_OTHER_FOLDERS,
     WORKSPACE_CHANGED,
     apply_label,
@@ -127,6 +143,7 @@ Confirm = Callable[[str, str], bool]
 Inform = Callable[[str, str], None]
 ChooseExport = Callable[[], tuple[str, str] | None]
 ChooseExtraPath = Callable[[Any], str | None]  # a tool extra -> the chosen file, or None
+ChoosePace = Callable[[ApplyAsk], tuple[bool, Pace | None]]  # -> (confirmed, pace)
 
 
 def rememberable_fields(model: type[ToolOptions]) -> list[str]:
@@ -303,6 +320,9 @@ class ToolPage(QWidget):
         self.inform: Inform = _default_inform(self)
         self.choose_export: ChooseExport = _default_choose_export(self)
         self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
+        # The Apply window. Tests set ``choose_pace`` (or, as before, ``confirm``).
+        self.choose_pace: ChoosePace = self._open_apply_dialog
+        self._default_confirm_hook = self.confirm
 
         # ----- header ------------------------------------------------------------------
         title = QLabel(f"<h2>{tool.name}</h2>")
@@ -393,12 +413,13 @@ class ToolPage(QWidget):
             "or explain a match."
         )
         self.compare_button.setVisible(tool.id in COMPARE_TOOLS)
-        self.select_all_button = QPushButton("Select all")
-        self.select_all_button.setToolTip(
-            "Check every action, including ones the tool left unchecked. Apply still asks first."
-        )
-        self.select_none_button = QPushButton("Select none")
-        self.select_none_button.setToolTip("Uncheck every action.")
+        self.pause_button = QPushButton(PAUSE_TEXT)
+        self.pause_button.setToolTip("Hold after the current file. Resume to carry on.")
+        self.resume_button = QPushButton(RESUME_TEXT)
+        self.skip_wait_button = QPushButton(SKIP_WAIT_TEXT)
+        self.skip_wait_button.setToolTip("Do not wait for the next batch: start it now.")
+        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+            button.setVisible(False)  # shown only while an apply runs
         self.show_all_check = QCheckBox("Show all settings")
         self.show_all_check.setToolTip(
             "Show every setting and control on every page: extra options, the kind filter, the "
@@ -416,6 +437,8 @@ class ToolPage(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.scan_button)
         buttons.addWidget(self.cancel_button)
+        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+            buttons.addWidget(button)
         buttons.addStretch(1)
         buttons.addWidget(self.show_all_check)
         confirm_row = QHBoxLayout()
@@ -475,8 +498,8 @@ class ToolPage(QWidget):
         self._notes_details_built = False
         self.table = PlanTable()
         # Selecting rows belongs to the results, so the buttons sit in the table's toolbar.
-        self.table.add_toolbar_widget(self.select_all_button, full_only=True)
-        self.table.add_toolbar_widget(self.select_none_button, full_only=True)
+        self.select_all_button = self.table.tick_all_button
+        self.select_none_button = self.table.untick_all_button
         if getattr(tool, "plan_view", None) == FOLDER_TREE:
             self.table.set_view_mode(FOLDER_TREE)
         # A tool that can build a size tree from its plan gets a "Size map" tab (plan 7.1).
@@ -543,6 +566,9 @@ class ToolPage(QWidget):
         # ----- wiring ------------------------------------------------------------------
         self.scan_button.clicked.connect(lambda _c=False: self.scan())
         self.cancel_button.clicked.connect(lambda _c=False: self.cancel())
+        self.pause_button.clicked.connect(lambda _c=False: self.pause_apply())
+        self.resume_button.clicked.connect(lambda _c=False: self.resume_apply())
+        self.skip_wait_button.clicked.connect(lambda _c=False: self.skip_wait())
         self.apply_button.clicked.connect(lambda _c=False: self.apply())
         self.export_button.triggered.connect(lambda _c=False: self.export())
         self.reset_options_action.triggered.connect(lambda _c=False: self.reset_options())
@@ -867,23 +893,22 @@ class ToolPage(QWidget):
     def _label_select_buttons(self, filtered: bool) -> None:
         """Say on the buttons whether they act on every row or only on the shown ones."""
         if filtered:
-            self.select_all_button.setText("Select all shown")
+            self.select_all_button.setText(TICK_ALL_SHOWN)
             self.select_all_button.setToolTip(
-                "Check every action the filter shows, including ones the tool left unchecked. "
+                "Tick every row the filter shows, including ones the tool left unticked. "
                 "Hidden rows are not changed. Apply still asks first."
             )
-            self.select_none_button.setText("Select none shown")
+            self.select_none_button.setText(UNTICK_ALL_SHOWN)
             self.select_none_button.setToolTip(
-                "Uncheck every action the filter shows. Hidden rows are not changed."
+                "Untick every row the filter shows. Hidden rows are not changed."
             )
         else:
-            self.select_all_button.setText("Select all")
+            self.select_all_button.setText(TICK_ALL)
             self.select_all_button.setToolTip(
-                "Check every action, including ones the tool left unchecked. Apply still asks "
-                "first."
+                "Tick every row, including ones the tool left unticked. Apply still asks first."
             )
-            self.select_none_button.setText("Select none")
-            self.select_none_button.setToolTip("Uncheck every action.")
+            self.select_none_button.setText(UNTICK_ALL)
+            self.select_none_button.setToolTip("Untick every row.")
 
     # ----- apply ------------------------------------------------------------------------------
 
@@ -912,7 +937,14 @@ class ToolPage(QWidget):
             self.inform("Apply", "No action is checked, so there is nothing to apply.")
             return None
         permanent = any(a.kind is ActionKind.DELETE for a in selected)
-        if not self.confirm(f"Apply: {self.tool.name}", apply_summary(plan, permanent)):
+        ask = ApplyAsk(
+            f"Apply: {self.tool.name}",
+            apply_summary(plan, permanent),
+            len(selected),
+            onedrive_suggestion(plan, self.table.sizes()),
+        )
+        confirmed, pace = self._ask_to_apply(ask)
+        if not confirmed:
             self._set_status("Apply cancelled; nothing changed.")
             return None
         if permanent:
@@ -930,13 +962,70 @@ class ToolPage(QWidget):
         tool = self.tool
         self.applied_plan = plan
 
+        pause_event, skip_event = threading.Event(), threading.Event()
+        self._pause_event, self._skip_wait_event = pause_event, skip_event
+        self._pace = pace
+        self._paused = self._waiting = False
+
         def job(ctx: Any) -> RunResult:
+            ctx.pace = pace
+            ctx.pause_event = pause_event
+            ctx.skip_wait_event = skip_event
             return tool.apply(plan, ctx)
 
         worker = tool_worker(self.state, job, with_journal=True)
+        self._apply_worker = worker
         worker.succeeded.connect(self._apply_done)
         self._start(worker, "Applying…")
         return worker
+
+    def _ask_to_apply(self, ask: ApplyAsk) -> tuple[bool, Pace | None]:
+        """The Apply question. A test that replaced ``confirm`` (and not ``choose_pace``) is
+        asked through it, all at once, so older hooks keep working."""
+        if self.confirm is not self._default_confirm_hook and (
+            self.choose_pace == self._open_apply_dialog
+        ):
+            return self.confirm(ask.title, ask.summary), None
+        return self.choose_pace(ask)
+
+    def _open_apply_dialog(self, ask: ApplyAsk) -> tuple[bool, Pace | None]:
+        dialog = ApplyDialog(ask, self.state.last_options(PACE_KEY), self)
+        if dialog.exec() != ApplyDialog.DialogCode.Accepted:
+            return False, None
+        self.state.remember_options(PACE_KEY, dialog.values())
+        return True, dialog.pace()
+
+    # ----- pause, resume, skip the wait ------------------------------------------------------
+
+    _pause_event: threading.Event | None = None
+    _skip_wait_event: threading.Event | None = None
+    _apply_worker: Worker | None = None
+    _pace: Pace | None = None
+    _paused = False
+    _waiting = False
+
+    def _apply_running(self) -> bool:
+        return self.worker is not None and self.worker is self._apply_worker
+
+    def pause_apply(self) -> None:
+        """Hold the running apply after the file it is on."""
+        if self._apply_running() and self._pause_event is not None:
+            self._pause_event.set()
+            self._paused = True
+            self._set_status("Pausing: the current file finishes first. Press Resume to go on.")
+            self._update_buttons()
+
+    def resume_apply(self) -> None:
+        if self._apply_running() and self._pause_event is not None:
+            self._pause_event.clear()
+            self._paused = False
+            self._set_status("Applying…")
+            self._update_buttons()
+
+    def skip_wait(self) -> None:
+        """Start the next batch now instead of waiting."""
+        if self._apply_running() and self._skip_wait_event is not None:
+            self._skip_wait_event.set()
 
     def _apply_done(self, value: object) -> None:
         assert isinstance(value, RunResult)
@@ -1407,6 +1496,10 @@ class ToolPage(QWidget):
             self.progress_bar.setRange(0, 0)
         if message:
             self.progress_bar.setFormat(f"%v / %m  {message[:80]}" if total > 0 else message[:80])
+        waiting = "Next batch in" in message or (self._paused and message == "Paused.")
+        if waiting != self._waiting:
+            self._waiting = waiting
+            self._update_buttons()
 
     def _failed(self, exc: object) -> None:
         self._set_status(f"Failed: {type(exc).__name__}: {exc}", error=True)
@@ -1458,6 +1551,12 @@ class ToolPage(QWidget):
         self.scan_button.setEnabled(not busy)
         self.cancel_button.setEnabled(running)
         self.cancel_button.setVisible(running)
+        applying_now = running and self._apply_running()
+        self.cancel_button.setText(STOP_TEXT if applying_now else "Cancel")
+        self.pause_button.setVisible(applying_now and not self._paused)
+        self.resume_button.setVisible(applying_now and self._paused)
+        self.skip_wait_button.setVisible(applying_now and self._pace is not None)
+        self.skip_wait_button.setEnabled(self._waiting)
         self.progress_bar.setVisible(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
         self.apply_button.setText(APPLY_TEXT if self._applied else apply_label(self.plan))
@@ -1467,6 +1566,7 @@ class ToolPage(QWidget):
         can_select = not busy and has_plan and not self._applied
         self.select_all_button.setEnabled(can_select)
         self.select_none_button.setEnabled(can_select)
+        self.table.set_selection_enabled(can_select)
         if self.size_map is not None:
             self.size_map.set_tick_enabled(can_select)
         for button in self.extra_buttons.values():

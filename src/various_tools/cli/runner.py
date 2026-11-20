@@ -26,7 +26,7 @@ from rich.progress import (
 )
 
 from various_tools.cli.state import EXIT_CANCELLED, EXIT_FAILED, CliState, err, fail, note
-from various_tools.core.context import Cancelled, RunContext, make_context
+from various_tools.core.context import Cancelled, Pace, RunContext, make_context
 
 
 @dataclass
@@ -99,6 +99,7 @@ def run_job[T](
     label: str,
     with_journal: bool,
     show_progress: bool = True,
+    pace: Pace | None = None,
 ) -> JobOutcome[T]:
     """Run ``job(ctx)`` on a worker thread and wait for it on the main thread.
 
@@ -115,6 +116,7 @@ def run_job[T](
         progress=feed,
         cancel_event=cancel_event,
     )
+    ctx.pace = pace
     outcome: JobOutcome[T] = JobOutcome()
 
     def target() -> None:

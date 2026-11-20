@@ -465,6 +465,7 @@ class MainWindow(QMainWindow):
         elif page_id == TIMELINE_ID:
             if self.timeline_page is None:
                 self.timeline_page = TimelinePage(self.state)
+                self.timeline_page.showOnMap.connect(self.show_on_map)
                 self.stack.addWidget(self.timeline_page)
             page = self.timeline_page
         elif page_id == MAP_ID:
@@ -481,6 +482,12 @@ class MainWindow(QMainWindow):
             self.sidebar.setCurrentItem(item)
             self.sidebar.blockSignals(False)
         return page
+
+    def show_on_map(self, path: object) -> None:
+        """Timeline's "Show on map": open the Map page, centred on that photo or video."""
+        page = self.show_page(MAP_ID)
+        if isinstance(page, MapPage):
+            page.focus_item(Path(str(path)))
 
     def open_tool(self, tool_id: str, folder: str | None = None) -> ToolPage | None:
         """Show a tool's page and optionally put ``folder`` in its first folder field."""

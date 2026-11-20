@@ -194,3 +194,83 @@ def test_is_inside_onedrive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert onedrive.is_inside_onedrive(root)
     assert not onedrive.is_inside_onedrive(tmp_path / "OneDrive2" / "a.txt")
     assert not onedrive.is_inside_onedrive(tmp_path / "other.txt")
+
+
+def _fake_clock(monkeypatch: pytest.MonkeyPatch, ctx: RunContext, polls: int) -> list[float]:
+    """A clock that moves 5 s per sleep; the pause is lifted after ``polls`` sleeps."""
+    now = [0.0]
+    count = [0]
+
+    def sleep(_step: float) -> None:
+        now[0] += 5.0
+        count[0] += 1
+        if count[0] >= polls:
+            ctx.pause_event.clear()
+
+    monkeypatch.setattr(plan_module, "_sleep", sleep)
+    monkeypatch.setattr(plan_module, "_monotonic", lambda: now[0])
+    return now
+
+
+def test_a_paused_apply_touches_its_journal_run(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    touched: list[int] = []
+    real = journal.touch_run
+    monkeypatch.setattr(journal, "touch_run", lambda rid: (touched.append(rid), real(rid)))
+    ctx = _ctx(tmp_path, journal, None)
+    ctx.pause_event.set()
+    _fake_clock(monkeypatch, ctx, polls=20)  # 100 s of pause
+    result = apply_plan(_plan(tmp_path, 1), ctx)
+    assert result.status == "done"
+    assert len(touched) >= 3 and set(touched) == {result.run_id}
+
+
+def test_an_apply_waiting_between_batches_touches_its_journal_run(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    touched: list[int] = []
+    real = journal.touch_run
+    monkeypatch.setattr(journal, "touch_run", lambda rid: (touched.append(rid), real(rid)))
+    ctx = _ctx(tmp_path, journal, Pace(1, 100.0))  # waits 100 s, the clock moves 5 s per step
+    _fake_clock(monkeypatch, ctx, polls=10**9)
+    apply_plan(_plan(tmp_path, 2), ctx)
+    assert len(touched) >= 3
+
+
+def test_the_context_knows_the_run_it_is_applying(tmp_path: Path, journal: Journal) -> None:
+    ctx = _ctx(tmp_path, journal, None)
+    seen: list[int | None] = []
+    ctx.progress = lambda _d, _t, _m: seen.append(ctx.applying_run_id)
+    result = apply_plan(_plan(tmp_path, 1), ctx)
+    assert seen and set(seen) == {result.run_id}
+    assert ctx.applying_run_id is None
+
+
+def test_a_skip_asked_earlier_does_not_cut_a_later_wait_short(
+    tmp_path: Path, journal: Journal, sleeps: list[float]
+) -> None:
+    ctx = _ctx(tmp_path, journal, Pace(1, 1.0))
+    ctx.skip_wait_event.set()  # stale: set while not waiting
+    apply_plan(_plan(tmp_path, 2), ctx)
+    assert sleeps == [0.25] * 4  # the full wait ran
+
+
+def test_a_pause_inside_the_wait_says_it_is_waiting(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = _ctx(tmp_path, journal, Pace(1, 1.0))
+    messages: list[str] = []
+    ctx.progress = lambda _d, _t, m: messages.append(m)
+    orig = ctx.progress
+
+    def progress(d: int, t: int, m: str) -> None:
+        orig(d, t, m)
+        if m.startswith("Batch 1"):
+            ctx.pause_event.set()
+
+    ctx.progress = progress
+    monkeypatch.setattr(plan_module, "_sleep", _resume_after(ctx, 2))
+    apply_plan(_plan(tmp_path, 2), ctx)
+    assert plan_module.WAIT_PAUSED_MESSAGE in messages
+    assert "Paused." not in messages

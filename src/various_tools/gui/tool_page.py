@@ -76,7 +76,7 @@ from various_tools.core import onedrive
 from various_tools.core.context import Pace
 from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
-from various_tools.core.plan import ActionKind, Plan, RunResult
+from various_tools.core.plan import WAIT_PAUSED_MESSAGE, ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
 from various_tools.core.schema import describe, format_value
 from various_tools.gui.apply_dialog import (
@@ -119,7 +119,7 @@ from various_tools.gui.wording import (
     scan_label,
     summary_text,
 )
-from various_tools.gui.workers import Worker, tool_worker
+from various_tools.gui.workers import Worker, applying_run_ids, tool_worker
 from various_tools.tools.base import Tool, ToolOptions
 
 log = logging.getLogger(__name__)
@@ -1095,6 +1095,9 @@ class ToolPage(QWidget):
             return None
         if not self.can_undo():
             return None
+        if run_id in applying_run_ids():
+            self.inform("Undo", in_progress_message(run_id))
+            return None
         if not self.confirm(
             "Undo",
             f"Undo run {run_id}?\n\nMoves and renames are put back, and items sent to the "
@@ -1109,7 +1112,7 @@ class ToolPage(QWidget):
         def job(_worker: Worker) -> tuple[UndoReport, UndoInfo]:
             # Checked again here, off the UI thread: never undo a run that is still applying.
             before = read_undo_info(journal_path, run_id, limit=limit)
-            if before.in_progress:
+            if before.in_progress or run_id in applying_run_ids():
                 raise ValueError(in_progress_message(run_id, limit))
             with Journal(journal_path) as journal:
                 report = undo_run(journal, run_id, protection=protection)
@@ -1496,7 +1499,7 @@ class ToolPage(QWidget):
             self.progress_bar.setRange(0, 0)
         if message:
             self.progress_bar.setFormat(f"%v / %m  {message[:80]}" if total > 0 else message[:80])
-        waiting = "Next batch in" in message or (self._paused and message == "Paused.")
+        waiting = "Next batch in" in message or message == WAIT_PAUSED_MESSAGE
         if waiting != self._waiting:
             self._waiting = waiting
             self._update_buttons()

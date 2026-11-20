@@ -8,10 +8,11 @@ example only permanent deletes) cannot be undone.
 
 **Still applying.** A run whose journal entry has no ``finished`` time, or whose status is still
 ``running``, is in progress: undoing it would race the apply that is still changing files. It is
-refused, unless it is *stale*: nothing has been written to the journal for that run (its start or
-any of its actions) for :func:`stale_after` (at least :data:`STALE_AFTER`, two hours, and always
+refused, unless it is *stale*: nothing has been written to the journal for that run (its start, its
+heartbeat or any of its actions) for :func:`stale_after` (at least :data:`STALE_AFTER`, two hours, and always
 longer than the longest single step an apply may take, the transcode timeout). A live apply
-journals every action before and after it runs, so a gap that long means the program that owned
+journals every action before and after it runs, and while it is paused or waiting between
+batches it touches the run (a heartbeat) at least once a minute, so a gap that long means the program that owned
 the run stopped (it crashed or the computer was turned off), and its done actions may be undone.
 A time that cannot be read counts as recent, which is the safe side.
 
@@ -155,9 +156,14 @@ def read_undo_info(
     except sqlite3.Error:
         return UndoInfo(run_id, None)
     try:
-        row = conn.execute(
-            "SELECT status, finished, started FROM runs WHERE id = ?", (run_id,)
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT status, finished, started, heartbeat FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        except sqlite3.OperationalError:  # a journal written before the heartbeat column
+            row = conn.execute(
+                "SELECT status, finished, started, NULL FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
         kinds = conn.execute(
             "SELECT kind, COUNT(*) FROM actions WHERE run_id = ? AND status = 'done' GROUP BY kind",
             (run_id,),
@@ -171,7 +177,7 @@ def read_undo_info(
         return UndoInfo(run_id, None, {str(kind): int(count) for kind, count in kinds})
     status = str(row[0]) if row[0] is not None else None
     finished = str(row[1]) if row[1] else None
-    times = [str(t) for t in (row[2], newest[0] if newest else None) if t]
+    times = [str(t) for t in (row[2], row[3], newest[0] if newest else None) if t]
     last_write = max(times) if times else None
     busy = run_in_progress(status, finished, last_write, now=now, limit=limit)
     return UndoInfo(run_id, status, {str(kind): int(count) for kind, count in kinds}, busy)

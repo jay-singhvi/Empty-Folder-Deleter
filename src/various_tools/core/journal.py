@@ -164,6 +164,9 @@ class Journal:
         for name, kind in _ADDED_COLUMNS:
             if name not in present:
                 self._conn.execute(f"ALTER TABLE actions ADD COLUMN {name} {kind}")
+        run_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(runs)")}
+        if "heartbeat" not in run_columns:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN heartbeat TEXT")
 
     @property
     def path(self) -> Path:
@@ -186,6 +189,16 @@ class Journal:
         with self._lock:
             self._conn.execute(
                 "UPDATE runs SET status = ?, finished = ? WHERE id = ?", (status, _now(), run_id)
+            )
+            self._conn.commit()
+
+    def touch_run(self, run_id: int) -> None:
+        """Record that the run is still alive (an apply that is paused or waiting between
+        batches writes no actions). The undo rule's staleness reads this time."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE runs SET heartbeat = ? WHERE id = ? AND finished IS NULL",
+                (_now(), run_id),
             )
             self._conn.commit()
 

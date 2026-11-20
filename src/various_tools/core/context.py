@@ -60,6 +60,9 @@ class RunContext:
     pace: Pace | None = None
     pause_event: threading.Event = field(default_factory=threading.Event)
     skip_wait_event: threading.Event = field(default_factory=threading.Event)
+    # The journal run this context is applying right now (set by apply_plan), else None. The GUI
+    # reads it to refuse an undo of a run that is still being applied in this process.
+    applying_run_id: int | None = None
 
     def report(self, done: int, total: int, message: str = "") -> None:
         """Report progress. The GUI and the CLI each draw it their own way."""

@@ -34,6 +34,7 @@ uses them to find the item in the Recycle Bin, and to recycle an output only if 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import stat as stat_module
@@ -477,8 +478,32 @@ def _final_destination(action: PlannedAction) -> Path | None:
     return unique_destination(dst.parent, dst.name)
 
 
+log = logging.getLogger(__name__)
+
 _STEP_S = 0.25
+WAIT_PAUSED_MESSAGE = "Paused, waiting for the next batch."
 _sleep = time.sleep  # tests replace this, so pacing never really waits
+_monotonic = time.monotonic  # tests replace this too
+HEARTBEAT_S = 30.0  # a paused or waiting apply touches its journal run at least this often
+
+
+class _Heartbeat:
+    """Touches the journal run while apply waits (pause, pacing), so it never looks stale."""
+
+    def __init__(self, journal: Journal, run_id: int) -> None:
+        self._journal = journal
+        self._run_id = run_id
+        self._last = _monotonic()
+
+    def beat(self) -> None:
+        now = _monotonic()
+        if now - self._last < HEARTBEAT_S:
+            return
+        self._last = now
+        try:
+            self._journal.touch_run(self._run_id)
+        except Exception:  # a failed heartbeat must not stop the apply
+            log.warning("could not touch journal run %s", self._run_id, exc_info=True)
 
 
 def _clock_text(seconds: float) -> str:
@@ -488,25 +513,35 @@ def _clock_text(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
-def _honour_pause(ctx: RunContext, done: int, total: int) -> None:
+def _honour_pause(ctx: RunContext, done: int, total: int, beat: _Heartbeat) -> None:
     """Wait while the run is paused; still cancellable."""
+    ctx.skip_wait_event.clear()
     while ctx.pause_event.is_set():
         ctx.check_cancelled()
+        beat.beat()
         ctx.report(done, total, "Paused.")
         _sleep(_STEP_S)
 
 
 def _wait_between_batches(
-    ctx: RunContext, pace: Pace, batch: int, batches: int, done: int, total: int
+    ctx: RunContext,
+    pace: Pace,
+    batch: int,
+    batches: int,
+    done: int,
+    total: int,
+    beat: _Heartbeat,
 ) -> None:
     """Wait ``pace.pause_s`` after a batch, in short steps. Cancel, pause and skip are honoured."""
     remaining = pace.pause_s
+    ctx.skip_wait_event.clear()  # a skip asked for earlier must not cut this wait short
     while remaining > 0:
         ctx.check_cancelled()
+        beat.beat()
         if ctx.skip_wait_event.is_set():
             break
         if ctx.pause_event.is_set():
-            ctx.report(done, total, "Paused.")
+            ctx.report(done, total, WAIT_PAUSED_MESSAGE)
             _sleep(_STEP_S)
             continue
         ctx.report(
@@ -537,6 +572,8 @@ def apply_plan(
     handler_map: Mapping[ActionKind, Handler] = handlers or {}
 
     run_id = journal.start_run(plan.tool, plan.options_json)
+    ctx.applying_run_id = run_id
+    beat = _Heartbeat(journal, run_id)
     result = RunResult(run_id=run_id, status="done")
     actions = plan.selected_actions()
     total = len(actions)
@@ -548,7 +585,7 @@ def apply_plan(
     try:
         for seq, action in enumerate(actions, start=1):
             ctx.check_cancelled()
-            _honour_pause(ctx, seq - 1, total)
+            _honour_pause(ctx, seq - 1, total, beat)
             if (
                 pace is not None
                 and executed
@@ -557,7 +594,7 @@ def apply_plan(
             ):
                 waited_at = executed
                 _wait_between_batches(
-                    ctx, pace, executed // pace.batch_size, batches, seq - 1, total
+                    ctx, pace, executed // pace.batch_size, batches, seq - 1, total, beat
                 )
             ctx.check_cancelled()
             ctx.report(seq - 1, total, f"{action.kind}: {action.src or action.dst or ''}")
@@ -636,4 +673,5 @@ def apply_plan(
     if result.status != "cancelled":
         result.status = "partial" if result.count("failed") else "done"
     journal.finish_run(run_id, result.status)
+    ctx.applying_run_id = None
     return result

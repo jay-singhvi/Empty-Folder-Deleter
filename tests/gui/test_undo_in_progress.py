@@ -91,3 +91,13 @@ def test_read_undo_info_of_a_finished_run(tmp_path: Path) -> None:
         journal.finish_run(run_id, "done")
     info = read_undo_info(path, run_id)
     assert not info.in_progress and info.undoable
+
+
+def test_a_heartbeat_keeps_an_old_unfinished_run_in_progress(tmp_path: Path) -> None:
+    path = tmp_path / "journal.sqlite"
+    run_id = _journal_with_unfinished_run(path)
+    _age_run(path, run_id, STALE_AFTER + timedelta(hours=1))
+    assert not read_undo_info(path, run_id).in_progress  # stale without a heartbeat
+    with Journal(path) as journal:
+        journal.touch_run(run_id)
+    assert read_undo_info(path, run_id).in_progress

@@ -26,6 +26,23 @@ class Cancelled(Exception):
     """Raised by :meth:`RunContext.check_cancelled` once the user has cancelled the run."""
 
 
+@dataclass(frozen=True)
+class Pace:
+    """Apply in batches: after every ``batch_size`` executed actions wait ``pause_s`` seconds.
+
+    It keeps a sync client such as OneDrive from being flooded by thousands of changes at once.
+    """
+
+    batch_size: int
+    pause_s: float
+
+    def __post_init__(self) -> None:
+        if self.batch_size < 1:
+            raise ValueError("batch size must be at least 1")
+        if self.pause_s < 0:
+            raise ValueError("pause must not be negative")
+
+
 def _no_progress(done: int, total: int, message: str) -> None:
     return None
 
@@ -38,6 +55,11 @@ class RunContext:
     progress: ProgressSink = _no_progress
     cancel_event: threading.Event = field(default_factory=threading.Event)
     log: logging.Logger = field(default_factory=lambda: logging.getLogger("various_tools.run"))
+    # Paced apply: ``pace`` None means all at once. ``pause_event`` set means "paused" (checked
+    # between actions); ``skip_wait_event`` set cuts the wait between two batches short.
+    pace: Pace | None = None
+    pause_event: threading.Event = field(default_factory=threading.Event)
+    skip_wait_event: threading.Event = field(default_factory=threading.Event)
 
     def report(self, done: int, total: int, message: str = "") -> None:
         """Report progress. The GUI and the CLI each draw it their own way."""

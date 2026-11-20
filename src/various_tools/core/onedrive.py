@@ -59,6 +59,26 @@ class CloudOnlyFileError(RuntimeError):
         self.path = path
 
 
+_ONEDRIVE_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+
+
+def is_inside_onedrive(path: Path | str) -> bool:
+    """True when ``path`` is at or under a OneDrive folder named by the environment.
+
+    Reads only the ``OneDrive``, ``OneDriveConsumer`` and ``OneDriveCommercial`` variables and
+    compares names; it never touches the disk.
+    """
+    key = os.path.normcase(os.path.abspath(str(path)))
+    for name in _ONEDRIVE_ENV:
+        root = os.environ.get(name)
+        if not root:
+            continue
+        base = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+        if key == base or key.startswith(base + os.sep):
+            return True
+    return False
+
+
 def status_from_attributes(attributes: int) -> SyncStatus:
     """Map Windows file attributes to a sync status. Pure function, no I/O."""
     if attributes & _CLOUD_ONLY_MASK:

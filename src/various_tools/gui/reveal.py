@@ -121,3 +121,42 @@ def show_in_explorer(path: Path) -> bool:
 def open_path(path: Path) -> bool:
     """Open a file in its default app, or a folder in File Explorer."""
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def show_properties(path: Path) -> bool:
+    """Open the Windows Properties dialog of a file or folder (it does not open the file)."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class _ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [  # noqa: RUF012 (ctypes layout)
+            ("cbSize", wintypes.DWORD),
+            ("fMask", wintypes.ULONG),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIconOrMonitor", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    info = _ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x0000000C  # SEE_MASK_INVOKEIDLIST
+    info.lpVerb = "properties"
+    info.lpFile = str(path)
+    info.nShow = 1  # SW_SHOWNORMAL
+    try:
+        return bool(ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)))
+    except OSError:
+        log.warning("Could not open the Properties of %s", path)
+        return False

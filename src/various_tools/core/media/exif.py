@@ -211,3 +211,27 @@ def capture_time(
         if is_plausible_date(fallback, min_year=min_year, now=now):
             return fallback
     return None
+
+
+EXIFTOOL_DATE_FORMAT = "%Y:%m:%d %H:%M:%S"
+
+
+def photo_date_args(when: datetime) -> list[str]:
+    """ExifTool arguments that set a photo's taken date (and its created and edited dates)."""
+    text = when.strftime(EXIFTOOL_DATE_FORMAT)
+    return [f"-DateTimeOriginal={text}", f"-CreateDate={text}", f"-ModifyDate={text}"]
+
+
+def video_date_args(when: datetime) -> list[str]:
+    """ExifTool arguments that set the QuickTime dates of a video (local time, stored as UTC)."""
+    text = when.strftime(EXIFTOOL_DATE_FORMAT)
+    return [
+        "-api",
+        "QuickTimeUTC=1",
+        f"-QuickTime:CreateDate={text}",
+        f"-QuickTime:ModifyDate={text}",
+        f"-QuickTime:MediaCreateDate={text}",
+        f"-QuickTime:MediaModifyDate={text}",
+        f"-QuickTime:TrackCreateDate={text}",
+        f"-QuickTime:TrackModifyDate={text}",
+    ]

@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PIL import Image
+from PySide6.QtCore import QPointF
 from pytestqt.qtbot import QtBot
 
 from various_tools.core.context import make_context
-from various_tools.core.media.library import MediaLibrary, library_path
+from various_tools.core.media.library import MediaFilter, MediaLibrary, library_path
 from various_tools.core.settings import DEFAULT_TILE_URL, Settings
 from various_tools.gui.main_window import MainWindow
 from various_tools.gui.map_page import MapPage
@@ -18,10 +19,12 @@ from various_tools.gui.timeline_page import TimelinePage
 EXIF_IFD, GPS_IFD = 0x8769, 0x8825
 
 
-def gps_jpeg(path: Path, lat: float | None, lon: float | None) -> Path:
+def gps_jpeg(
+    path: Path, lat: float | None, lon: float | None, taken: str = "2024:05:01 10:00:00"
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = Image.Exif()
-    data.get_ifd(EXIF_IFD)[0x9003] = "2024:05:01 10:00:00"
+    data.get_ifd(EXIF_IFD)[0x9003] = taken
     if lat is not None and lon is not None:
         gps = data.get_ifd(GPS_IFD)
         gps[1], gps[2] = ("N" if lat >= 0 else "S"), (abs(lat), 0.0, 0.0)
@@ -49,38 +52,115 @@ def test_online_tiles_are_off_by_default() -> None:
 def _page(qtbot: QtBot, state: AppState) -> MapPage:
     page = MapPage(state)
     qtbot.addWidget(page)
+    page.resize(1000, 700)
     page.grid.load_thumbnail = lambda _p: None
     return page
+
+
+def _two_places(state: AppState, tmp_path: Path) -> Path:
+    root = tmp_path / "pics"
+    gps_jpeg(root / "paris.jpg", 48.0, 2.0, "2023:05:01 10:00:00")
+    gps_jpeg(root / "rome.jpg", 41.0, 12.0, "2024:07:01 10:00:00")
+    gps_jpeg(root / "nowhere.jpg", None, None)
+    state.update_settings(library_folders=[str(root)])
+    fill_library(state, [root])
+    return root
 
 
 def test_map_shows_only_photos_with_a_place(
     qtbot: QtBot, gui_state: AppState, tmp_path: Path
 ) -> None:
-    root = tmp_path / "pics"
-    gps_jpeg(root / "paris.jpg", 48.0, 2.0)
-    gps_jpeg(root / "rome.jpg", 41.0, 12.0)
-    gps_jpeg(root / "nowhere.jpg", None, None)
-    gui_state.update_settings(library_folders=[str(root)])
-    fill_library(gui_state, [root])
+    _two_places(gui_state, tmp_path)
     page = _page(qtbot, gui_state)
     page.refresh()
     assert sorted(p.name for p in page.located_paths()) == ["paris.jpg", "rome.jpg"]
     assert page.status_label.text().startswith("2 of 3 photos and videos have a place")
 
 
-def test_clicking_a_cluster_shows_its_photos(
+def test_clicking_a_circle_fills_the_side_panel(
     qtbot: QtBot, gui_state: AppState, tmp_path: Path
 ) -> None:
-    root = tmp_path / "pics"
-    gps_jpeg(root / "a.jpg", 48.0, 2.0)
-    gui_state.update_settings(library_folders=[str(root)])
-    fill_library(gui_state, [root])
+    _two_places(gui_state, tmp_path)
     page = _page(qtbot, gui_state)
-    page.refresh()
-    items = list(page.located_items())
+    items = page.located_items()
     page.map.clusterClicked.emit(items)
-    assert [i.path.name for i in page.grid.items()] == ["a.jpg"]
-    assert "1 photo or video here" in page.place_label.text()
+    assert sorted(i.path.name for i in page.grid.items()) == ["paris.jpg", "rome.jpg"]
+    text = page.place_label.text()
+    assert "2 photos and videos here" in text and "May 2023 to July 2024" in text
+    # the panel sits beside the map, not below it
+    side = page.grid.parentWidget()
+    assert side is not None and page.splitter.indexOf(side) == 1
+
+
+def test_hover_tooltip_has_count_and_date_span(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.show()
+    qtbot.waitExposed(page)
+    page.fit_all()
+    paris = next(i for i in page.located_items() if i.path.name == "paris.jpg")
+    assert paris.lat is not None and paris.lon is not None
+    point = page.map.lonlat_to_screen(paris.lon, paris.lat)
+    tip = page.map.tooltip_at(point)
+    assert tip is not None and "1 photo or video" in tip and "May 2023" in tip
+    assert page.map.tooltip_at(QPointF(1, 1)) is None
+
+
+def test_fit_all_shows_every_place_and_double_click_zooms(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.show()
+    qtbot.waitExposed(page)
+    page.map.set_view(0.0, 0.0, 1)
+    page.fit_button.click()
+    for item in page.located_items():
+        assert item.lat is not None and item.lon is not None
+        p = page.map.lonlat_to_screen(item.lon, item.lat)
+        assert 0 <= p.x() <= page.map.width() and 0 <= p.y() <= page.map.height()
+    before = page.map.zoom
+    from PySide6.QtCore import Qt
+
+    qtbot.mouseDClick(page.map, Qt.MouseButton.LeftButton, pos=page.map.rect().center())
+    assert page.map.zoom == before + 1 or page.map.zoom == 18
+
+
+def test_focus_item_centres_highlights_and_lists_the_place(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    root = _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.show()
+    qtbot.waitExposed(page)
+    assert page.focus_item(root / "rome.jpg")
+    assert page.map.highlight == (41.0, 12.0)
+    assert page.map.zoom >= 12
+    assert [i.path.name for i in page.grid.items()] == ["rome.jpg"]
+    assert page.grid.selected_rows() == [0]
+    centre = page.map.lonlat_to_screen(12.0, 41.0)
+    assert abs(centre.x() - page.map.width() / 2) < 2
+    assert not page.focus_item(root / "nowhere.jpg")  # it has no place
+
+
+def test_focus_item_clears_a_filter_that_hides_it(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    root = _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.model.set_filter(MediaFilter(text="paris"))
+    assert [p.name for p in page.located_paths()] == ["paris.jpg"]
+    assert page.focus_item(root / "rome.jpg")
+    assert page.model.filter == MediaFilter()
+
+
+def test_the_filters_apply_on_the_map(qtbot: QtBot, gui_state: AppState, tmp_path: Path) -> None:
+    _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.filter_bar.to_box.setCurrentIndex(page.filter_bar.to_box.findData("2023-05"))
+    assert [p.name for p in page.located_paths()] == ["paris.jpg"]
 
 
 def test_tiles_follow_the_setting(qtbot: QtBot, gui_state: AppState) -> None:
@@ -91,6 +171,24 @@ def test_tiles_follow_the_setting(qtbot: QtBot, gui_state: AppState) -> None:
     assert "openstreetmap" in page.attribution_text().lower()
     gui_state.update_settings(map_online_tiles=False)
     assert not page.map.tiles_enabled
+
+
+def test_the_banner_explains_privacy_and_asks_before_turning_the_online_map_on(
+    qtbot: QtBot, gui_state: AppState
+) -> None:
+    page = _page(qtbot, gui_state)
+    assert "OpenStreetMap" in page.banner_label.text() and "off" in page.banner_label.text()
+    asked: list[str] = []
+    page.confirm = lambda title, _t: asked.append(title) is None and False
+    assert not page.toggle_online_map()
+    assert asked and not gui_state.settings.map_online_tiles
+
+    page.confirm = lambda _t, _x: True
+    assert page.toggle_online_map()
+    assert gui_state.settings.map_online_tiles and page.map.tiles_enabled
+    assert page.online_button.text() == "Turn off the detailed map"
+    page.toggle_online_map()
+    assert not gui_state.settings.map_online_tiles
 
 
 def test_sidebar_has_a_photos_and_videos_section(window: MainWindow) -> None:

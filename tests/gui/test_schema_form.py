@@ -161,6 +161,16 @@ NON_DEFAULTS: dict[str, dict[str, Any]] = {
         "read_batch_size": 20,
         "duration_tolerance_s": 1.5,
     },
+    "set_date": {
+        "recursive": False,
+        "mode": "shift",
+        "new_date": "2021-03-04 10:12",
+        "year": 2020,
+        "month": 5,
+        "shift_days": -3,
+        "shift_hours": 2,
+        "shift_minutes": 15,
+    },
     "sort_by_type": {
         "recursive": True,
         "rules": ["*.pdf=Docs", "*.jpg|*.png=Pics"],

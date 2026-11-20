@@ -39,6 +39,7 @@ TOOL_IDS = {
     "organize_by_date",
     "project_export",
     "rename",
+    "set_date",
     "sort_by_type",
     "temp_cleaner",
     "wrong_extension",

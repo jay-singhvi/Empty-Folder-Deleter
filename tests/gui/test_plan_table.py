@@ -197,7 +197,7 @@ def test_totals_and_checks_update_together(qtbot: QtBot, tmp_path: Path) -> None
     assert plan.actions[0].selected is False
     assert plan.actions[1].selected is True
     assert table.totals_text() == "2 actions, 1 selected, 2.0 KB selected"
-    assert table.totals_label.text() == table.totals_text()
+    assert table.totals_label.text() == table.status_text() == "2 found · 1 ticked (2.0 KB)"
     assert changes == [1]
     table.set_action_checked(1, False)
     assert table.totals_text() == "2 actions, 0 selected, 0 B selected"

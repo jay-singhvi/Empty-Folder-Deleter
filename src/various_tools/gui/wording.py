@@ -86,3 +86,51 @@ def summary_text(plan: Plan, sizes: Sequence[int | None], nouns: tuple[str, str]
     if known:
         text += f" ({human_size(sum(known))})"
     return text + ". Only ticked rows are changed, and you confirm first."
+
+
+# ----- picking rows, applying in batches ---------------------------------------------------------
+
+TICK_ALL = "Tick all"
+UNTICK_ALL = "Untick all"
+TICK_ALL_SHOWN = "Tick all shown"
+UNTICK_ALL_SHOWN = "Untick all shown"
+PAUSE_TEXT = "Pause"
+RESUME_TEXT = "Resume"
+SKIP_WAIT_TEXT = "Skip the wait"
+STOP_TEXT = "Stop"
+
+HOW_FAST = "How fast?"
+ALL_AT_ONCE = "All at once"
+IN_BATCHES = "In batches"
+CUSTOM_PRESET = "Custom"
+# (label, files per batch, seconds to wait): the choices of the Apply window's preset list.
+PACE_PRESETS: tuple[tuple[str, int, int], ...] = (
+    ("50, then wait 5 minutes (gentle on OneDrive)", 50, 300),
+    ("100, then wait 1 minute", 100, 60),
+    ("1, then wait 2 seconds", 1, 2),
+)
+ONEDRIVE_BATCH_REASON = (
+    "This changes {count} files ({size}) in a OneDrive folder, so working in batches is "
+    "suggested. OneDrive copes better when it is not flooded."
+)
+
+
+def _unit(count: int, singular: str) -> str:
+    return f"{count} {singular}{'' if count == 1 else 's'}"
+
+
+def format_wait(seconds: float) -> str:
+    """A waiting time in plain words, for example ``3 hours 45 minutes`` or ``2 seconds``."""
+    whole = max(0, round(seconds))
+    if whole < 60:
+        return _unit(whole, "second")
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = []
+    if hours:
+        parts.append(_unit(hours, "hour"))
+    if minutes:
+        parts.append(_unit(minutes, "minute"))
+    if secs and not hours:
+        parts.append(_unit(secs, "second"))
+    return " ".join(parts)

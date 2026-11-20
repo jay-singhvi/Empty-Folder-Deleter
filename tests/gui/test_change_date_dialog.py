@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from PIL import Image
 from PySide6.QtCore import QDateTime
 from pytestqt.qtbot import QtBot
@@ -69,7 +70,7 @@ def test_preview_lists_old_and_new_then_apply_changes_and_refreshes(
     assert dialog.apply() is not None
     qtbot.waitUntil(lambda: dialog.worker is None, timeout=60000)
     assert asked == ["Change dates?"]
-    assert len(done) == 1 and trashed == [str(a)]
+    assert len(done) == 1 and len(trashed) == 1 and Path(trashed[0]).parent == a.parent
     assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 2, 28, 8, 30)
     assert "Changed 1 file" in dialog.status_label.text()
     # without ExifTool only the modified time changes, so the library may keep the camera date;
@@ -105,3 +106,28 @@ def test_apply_is_disabled_while_the_preview_is_out_of_date(
     qtbot.waitUntil(lambda: idle(dialog), timeout=30000)
     assert "Choose how many" in dialog.notes_label.text()
     assert not dialog.can_apply()
+
+
+def test_a_failed_library_refresh_still_spends_the_plan(
+    qtbot: QtBot,
+    tmp_path: Path,
+    make_state: Callable[..., AppState],
+    trashed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(_self: MediaLibrary, _paths: object, _ctx: object) -> None:
+        raise RuntimeError("library is locked")
+
+    monkeypatch.setattr(MediaLibrary, "refresh_paths", broken)
+    a = jpeg(tmp_path / "pics" / "a.jpg", "2019:01:31 08:30:00")
+    dialog = ChangeDateDialog(make_state(), [a])
+    qtbot.addWidget(dialog)
+    dialog.confirm = lambda _t, _x: True
+    dialog.exact_edit.setDateTime(QDateTime(2020, 1, 1, 9, 0, 0))
+    qtbot.waitUntil(lambda: idle(dialog), timeout=30000)
+    assert dialog.apply() is not None
+    qtbot.waitUntil(lambda: dialog.worker is None, timeout=60000)
+    assert "Changed 1 file" in dialog.status_label.text()
+    assert "could not be refreshed" in dialog.status_label.text()
+    assert dialog.plan is None and not dialog.can_apply()
+    assert dialog.apply() is None  # the same plan can never be applied twice

@@ -230,7 +230,7 @@ def test_apply_without_exiftool_sets_the_modified_time_and_undo_restores(
     assert result.count("done") == 1, [o.detail for o in result.outcomes]
     assert a.read_bytes() == original  # nothing inside the file changed
     assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
-    assert fake_trash == [a]
+    assert len(fake_trash) == 1 and fake_trash[0].parent == a.parent  # the aside copy
     assert list(a.parent.iterdir()) == [a]
     rows = journal.actions(result.run_id)
     assert [(r.kind, r.status) for r in rows] == [("convert", "done"), ("trash", "done")]
@@ -315,3 +315,111 @@ def test_read_media_item_of_a_missing_or_foreign_file(tmp_path: Path) -> None:
     note = tmp_path / "note.txt"
     note.write_text("x")
     assert read_media_item(note, ctx) is None
+
+
+# ----- review fixes ---------------------------------------------------------------------------
+
+
+def test_applying_one_shift_plan_twice_shifts_once(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    opts = SetDateOptions(roots=[a.parent], mode="shift", shift_days=1)
+    ctx = ctx_for(tmp_path, journal)
+    plan = TOOL.scan(opts, ctx)
+    TOOL.apply(plan, ctx)
+    TOOL.apply(plan, ctx)
+    # Without ExifTool the date read back is still the camera date, so the second apply runs;
+    # it writes the planned date again and never a second shift.
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2019, 7, 5, 10, 12)
+
+
+def test_a_file_whose_date_changed_since_the_preview_is_left_alone(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    ctx = ctx_for(tmp_path, journal)
+    plan = TOOL.scan(SetDateOptions(roots=[a.parent], mode="shift", shift_days=1), ctx)
+    jpeg(a, taken="2020:01:01 08:00:00")  # the camera date changed after the preview
+    before = a.read_bytes()
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 0 and result.count("failed") == 1
+    assert "changed since the preview" in (result.outcomes[0].detail or "")
+    assert a.read_bytes() == before and not fake_trash
+
+
+def test_the_planned_dates_survive_the_plan_file(tmp_path: Path) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    plan = scan(tmp_path, SetDateOptions(roots=[a.parent], new_date="2021-03-04 10:12"))
+    again = Plan.from_json(plan.to_json())
+    assert again.actions[0].extra == plan.actions[0].extra
+    assert plan.actions[0].extra["new_date"].startswith("2021-03-04T10:12")
+
+
+def test_apply_writes_the_planned_date_not_a_recomputed_one(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    ctx = ctx_for(tmp_path, journal)
+    plan = TOOL.scan(SetDateOptions(roots=[a.parent], mode="shift", shift_days=3), ctx)
+    # The options saved with the plan are changed afterwards: the planned date still wins.
+    plan.options_json = SetDateOptions(
+        roots=[a.parent], mode="shift", shift_days=9
+    ).model_dump_json()
+    TOOL.apply(plan, ctx)
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2019, 7, 7, 10, 12)
+
+
+def test_the_path_is_never_empty_and_undo_restores_the_original(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original, old_mtime = a.read_bytes(), a.stat().st_mtime_ns
+    seen: list[bool] = []
+    real = fake_trash.trash
+
+    def trash(path: str | os.PathLike[str]) -> None:
+        seen.append(a.exists())  # the copy is already in place when the original is recycled
+        assert Path(path) != a  # the aside name is recycled, not the path itself
+        real(path)
+
+    monkeypatch.setattr(plan_module, "send2trash", trash)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("done") == 1 and seen == [True]
+    rows = journal.actions(result.run_id)
+    trash_row = next(r for r in rows if r.kind == "trash")
+    assert trash_row.src == str(a)  # journaled against the ORIGINAL path
+    assert list(a.parent.iterdir()) == [a]
+    report = undo_run(
+        journal, result.run_id, send_to_trash=fake_trash.trash, locate_bin=fake_trash.locate
+    )
+    assert report.reverted == 2, (report.skipped, report.failed)
+    assert a.read_bytes() == original and a.stat().st_mtime_ns == old_mtime
+
+
+def test_a_failed_recycle_leaves_the_original_in_place(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original = a.read_bytes()
+
+    def broken(_path: str | os.PathLike[str]) -> None:
+        raise OSError("bin full")
+
+    monkeypatch.setattr(plan_module, "send2trash", broken)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("failed") == 1
+    assert a.read_bytes() == original
+    assert list(a.parent.iterdir()) == [a]
+
+
+def test_skipped_notes_follow_the_reason_colon_path_shape(tmp_path: Path) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg", taken="2099:12:31 23:00:00")
+    plan = scan(tmp_path, SetDateOptions(roots=[a.parent], mode="shift", shift_days=36500))
+    notes = [n for n in plan.notes if n.startswith("skipped:")]
+    assert notes and notes[0].endswith(f": {a}")
+    assert "range" in notes[0] or "between" in notes[0]
+
+
+def test_the_tool_has_no_working_folder_field() -> None:
+    assert TOOL.workspace_field is None

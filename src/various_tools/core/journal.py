@@ -461,6 +461,7 @@ class _Undo:
             size=action.item_size,
             mtime_ns=action.item_mtime_ns,
             locate_bin=self.locate_bin,
+            recorded_as=Path(action.dst) if action.dst else None,
         )
         return None if result.restored else result.detail
 

@@ -65,6 +65,7 @@ class ChangeDateDialog(QDialog):
         self.state = state
         self.paths = list(paths)
         self.plan: Plan | None = None
+        self._refresh_failed = False
         self.result: RunResult | None = None
         self.worker: Worker | None = None
         self._plan_options: str | None = None
@@ -305,16 +306,23 @@ class ChangeDateDialog(QDialog):
         changed = [a.src for a in plan.actions if a.src is not None]
         db = library_path(self.state.settings)
 
+        self._refresh_failed = False
+
         def job(ctx: RunContext) -> RunResult:
             result = TOOL.apply(plan, ctx)
             done = {o.src for o in result.outcomes if o.status == "done" and o.src}
-            with MediaLibrary(db) as lib:
-                lib.refresh_paths([p for p in changed if str(p) in done], ctx)
+            try:
+                with MediaLibrary(db) as lib:
+                    lib.refresh_paths([p for p in changed if str(p) in done], ctx)
+            except Exception:  # the dates are changed and journaled; only the library is behind
+                log.exception("Could not refresh the library after changing dates")
+                self._refresh_failed = True
             return result
 
         worker = tool_worker(self.state, job, with_journal=True)
         worker.succeeded.connect(lambda result, c=changed: self._applied(result, c))
         worker.failed.connect(lambda exc: self._failed(exc))
+        worker.cancelled.connect(self._clear_plan)
         worker.finished.connect(self._worker_finished)
         self.worker = worker
         self._update_buttons()
@@ -331,13 +339,22 @@ class ChangeDateDialog(QDialog):
         text = f"Changed {len(done):,} {'file' if len(done) == 1 else 'files'}."
         if failed:
             text += f" {failed:,} could not be changed (see History)."
-        self.status_label.setText(text + " You can undo this from History.")
+        text += " You can undo this from History."
+        if self._refresh_failed:
+            text += " The Timeline could not be refreshed; reopen it to see the new dates."
+        self.status_label.setText(text)
+        # The plan is spent on every end path: applying it again must not be possible.
+        self._clear_plan()
         self.datesChanged.emit(done)
-        self.plan = None
-        self.table.setRowCount(0)
         del changed
 
+    def _clear_plan(self) -> None:
+        self.plan = None
+        self.table.setRowCount(0)
+        self._update_buttons()
+
     def _failed(self, exc: object) -> None:
+        self._clear_plan()
         self.status_label.setText(f"Something went wrong: {type(exc).__name__}: {exc}")
 
     def _worker_finished(self) -> None:

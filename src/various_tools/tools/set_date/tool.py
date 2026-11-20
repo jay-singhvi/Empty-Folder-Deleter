@@ -11,9 +11,12 @@ Three ways to choose the new date:
 date, else the modified time) and writes nothing. Every file that would change is a planned
 ``convert`` action whose reason reads like ``2019-07-04 10:12 → 2021-03-04 10:12``.
 
-``apply()`` uses the in-place pattern of "Strip metadata": a copy with the new date is written
-next to the file, the original goes to the Recycle Bin (its own journal row), the copy takes
-its name and gets the new modified time. So the run is journaled and History can undo it.
+``apply()`` writes a copy with the new date next to the file. The original is renamed aside
+(a hidden name in the same folder), the copy is renamed into its place and gets the new
+modified time, and only then does the old content go to the Recycle Bin, as a journal row of
+the original path. The path is never empty, and History can undo the run. Apply writes the date
+the preview planned (kept in the action); it never works it out again, so applying one plan
+twice cannot shift a date twice, and a file whose date changed since the preview is left alone.
 
 * With ExifTool, a photo gets ``DateTimeOriginal``, ``CreateDate`` and ``ModifyDate``; an MP4 or
   QuickTime video gets the QuickTime create, modify, media and track dates.
@@ -27,6 +30,7 @@ its name and gets the new modified time. So the run is journaled and History can
 from __future__ import annotations
 
 import calendar
+import logging
 import os
 import shutil
 import subprocess
@@ -62,9 +66,11 @@ from various_tools.core.plan import (
     PlannedAction,
     RunResult,
     apply_plan,
-    trash_extra,
+    trash_replaced,
 )
 from various_tools.tools.base import Category, ToolOptions
+
+log = logging.getLogger(__name__)
 
 TOOL_ID = "set_date"
 # File types ExifTool can write without touching the picture or video data.
@@ -72,6 +78,8 @@ WRITABLE_PHOTO_EXTS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".dng"}
 )
 WRITABLE_VIDEO_EXTS = frozenset({".mp4", ".mov", ".m4v", ".3gp"})
+OLD_KEY = "old_date"
+NEW_KEY = "new_date"
 MIN_YEAR = 1980
 MAX_YEAR = 2100
 ARROW = "→"
@@ -283,7 +291,14 @@ class _Setter:
             raise DateChangeError("cloud-only files are never changed")
         if item.taken is None:
             raise DateChangeError("the file has no date to change")
-        new = new_date_for(item.taken, self.opts)
+        # The preview decided the new date. Apply never works it out again, so applying the
+        # same plan twice cannot shift a date twice, and a file that changed is left alone.
+        planned_old, planned_new = action.extra.get(OLD_KEY), action.extra.get(NEW_KEY)
+        if planned_old is None or planned_new is None:
+            raise DateChangeError("the plan has no planned dates; preview again")
+        if item.taken.isoformat() != planned_old:
+            raise DateChangeError("changed since the preview; its date is not the one planned")
+        new = datetime.fromisoformat(planned_new)
         refusal = destination_refusal(dst, stop=self._root_of(dst))
         if refusal is not None:
             raise ValueError(refusal)
@@ -302,6 +317,7 @@ class _Setter:
 
     def _replace_with_dated_copy(self, src: Path, new: datetime) -> Path:
         staging = src.parent / f".setdate-{uuid.uuid4().hex[:12]}.tmp"
+        aside = src.parent / f".setdate-{uuid.uuid4().hex[:12]}.orig"
         keep_staging = False
         try:
             exiftool = self.ctx.deps.exiftool()
@@ -311,22 +327,45 @@ class _Setter:
                 shutil.copy2(src, staging)
             stamp = new.timestamp()
             os.utime(staging, (stamp, stamp))
-            # Its own journal row (rule 5), so undo can put the original back from the Recycle
-            # Bin. When the recycle fails or is refused, the original stays and the error
-            # propagates.
-            trash_extra(src, reason="original replaced by the copy with the new date")
+            # The path is never empty: the original steps aside, the copy takes its place at
+            # once, then the old content goes to the Recycle Bin as a journal row of the
+            # ORIGINAL path (rule 5), so undo restores it there.
+            try:
+                rename_no_replace(src, aside)
+            except OSError as exc:
+                raise DateChangeError(f"could not move the original aside: {exc}") from exc
             try:
                 rename_no_replace(staging, src)
             except OSError as exc:
-                keep_staging = True
-                raise _KeptCopyError(
-                    f"the original is in the Recycle Bin, and the copy is at {staging}; "
-                    f"rename it to {src.name} to finish ({exc})"
-                ) from exc
+                try:
+                    rename_no_replace(aside, src)
+                except OSError as back:
+                    keep_staging = True
+                    raise _KeptCopyError(
+                        f"the original is at {aside} and the copy is at {staging}; rename the "
+                        f"original back to {src.name} ({back})"
+                    ) from exc
+                raise DateChangeError(f"could not put the copy in place: {exc}") from exc
+            try:
+                trash_replaced(src, aside, "original replaced by the copy with the new date")
+            except BaseException:
+                self._put_original_back(src, aside, staging)
+                raise
         finally:
             if not keep_staging:
                 staging.unlink(missing_ok=True)
         return src
+
+    @staticmethod
+    def _put_original_back(src: Path, aside: Path, staging: Path) -> None:
+        """The Recycle Bin refused or failed: undo the swap so the original stays as it was."""
+        if not os.path.lexists(aside):
+            return  # it did go to the Recycle Bin; the journal row says so
+        try:
+            rename_no_replace(src, staging)
+            rename_no_replace(aside, src)
+        except OSError:  # leave both files where they are; the error is journaled
+            log.warning("could not put %s back after a failed recycle", src, exc_info=True)
 
     def _write_copy(self, exiftool: Path, src: Path, staging: Path, new: datetime) -> None:
         video = src.suffix.lower() in WRITABLE_VIDEO_EXTS
@@ -370,6 +409,8 @@ class SetDate:
     )
     category: Category = "Organize"
     Options = SetDateOptions
+    # Driven by the Timeline selection or explicit paths, never by the whole working folder.
+    workspace_field = None
 
     def scan(self, opts: SetDateOptions, ctx: RunContext) -> Plan:
         if not isinstance(opts, SetDateOptions):
@@ -437,7 +478,7 @@ class SetDate:
                 new = new_date_for(old, opts)
             except ValueError as exc:
                 skipped += 1
-                plan.notes.append(f"skipped: {exc} {path}")
+                plan.notes.append(f"skipped: {exc}: {path}")
                 continue
             if new == old:
                 same += 1
@@ -465,7 +506,13 @@ def _action(
         reason += MTIME_ONLY_NO_TOOL
     elif not _writes_tags(item.path):
         reason += MTIME_ONLY_TYPE
-    return PlannedAction(kind=ActionKind.CONVERT, src=path, dst=path, reason=reason)
+    return PlannedAction(
+        kind=ActionKind.CONVERT,
+        src=path,
+        dst=path,
+        reason=reason,
+        extra={OLD_KEY: old.isoformat(), NEW_KEY: new.isoformat()},
+    )
 
 
 TOOL = SetDate()

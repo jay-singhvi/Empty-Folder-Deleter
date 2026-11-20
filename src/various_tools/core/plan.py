@@ -87,9 +87,12 @@ class PlannedAction:
     reason: str = ""
     group_id: str | None = None
     selected: bool = True
+    # Small tool-specific facts to check again at apply time (for example the planned old and
+    # new date of a file). Saved with the plan; only written when it is not empty.
+    extra: dict[str, str] = field(default_factory=dict[str, str])
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "kind": str(self.kind),
             "src": str(self.src) if self.src is not None else None,
             "dst": str(self.dst) if self.dst is not None else None,
@@ -97,6 +100,9 @@ class PlannedAction:
             "group_id": self.group_id,
             "selected": self.selected,
         }
+        if self.extra:
+            data["extra"] = dict(self.extra)
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PlannedAction:
@@ -108,6 +114,7 @@ class PlannedAction:
             reason=str(data.get("reason", "")),
             group_id=data.get("group_id"),
             selected=bool(data.get("selected", True)),
+            extra={str(k): str(v) for k, v in dict(data.get("extra") or {}).items()},
         )
 
 
@@ -411,7 +418,12 @@ def _execute(
 
 @contextmanager
 def extra_action(
-    kind: ActionKind, src: Path | None, dst: Path | None = None, reason: str = ""
+    kind: ActionKind,
+    src: Path | None,
+    dst: Path | None = None,
+    reason: str = "",
+    *,
+    stat_path: Path | None = None,
 ) -> Generator[None]:
     """Journal a side effect of the running ``write``/``convert`` action as its own row.
 
@@ -426,7 +438,8 @@ def extra_action(
     pending, then marked done when the block finishes, or failed (and the error re-raised) when
     it raises. A recycle that raised although the item is gone did happen: it is marked done,
     with the error kept, and nothing is raised. For a ``trash`` row the size and ``mtime_ns``
-    of ``src`` are recorded first. Raises :class:`RuntimeError` outside :func:`apply_plan`.
+    of ``src`` (or of ``stat_path``, when the item sits under another name) are recorded first.
+    Raises :class:`RuntimeError` outside :func:`apply_plan`.
     """
     running = _RUNNING.get()
     if running is None:
@@ -441,7 +454,7 @@ def extra_action(
         raise ActionRefused(f"{kind} of {src or dst} refused: {refusal}")
     row = journal.record_action(run_id, seq, str(kind), src, dst, reason)
     if kind is ActionKind.TRASH:
-        before = _file_stat(src)
+        before = _file_stat(stat_path or src)
         if before is not None:
             journal.set_item_stat(row, *before)
     try:
@@ -463,6 +476,17 @@ def trash_extra(path: Path, reason: str = "") -> None:
         if not os.path.lexists(long_path(path)):
             raise FileNotFoundError(f"source is gone: {path}")
         _send_to_trash(path)
+
+
+def trash_replaced(original: Path, aside: Path, reason: str = "") -> None:
+    """Recycle ``aside``, the old content of ``original``, journaled as a ``trash`` row of
+    ``original`` (the row's ``dst`` is the name the Recycle Bin knows it by). A handler uses
+    this after it moved the original aside and put its replacement in place, so the path is
+    never empty and undo still restores the old content to ``original``."""
+    with extra_action(ActionKind.TRASH, original, aside, reason, stat_path=aside):
+        if not os.path.lexists(long_path(aside)):
+            raise FileNotFoundError(f"source is gone: {aside}")
+        _send_to_trash(aside)
 
 
 def _final_destination(action: PlannedAction) -> Path | None:

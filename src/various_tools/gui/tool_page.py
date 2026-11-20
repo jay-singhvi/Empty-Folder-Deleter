@@ -76,7 +76,7 @@ from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import ActionKind, Plan, RunResult
 from various_tools.core.report import action_sizes
-from various_tools.core.schema import describe
+from various_tools.core.schema import describe, format_value
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
     UndoInfo,
@@ -85,12 +85,21 @@ from various_tools.gui.undo_rules import (
     stale_after,
 )
 from various_tools.gui.widgets.plan_table import FOLDER_TREE, PlanTable
-from various_tools.gui.widgets.schema_form import SchemaForm
+from various_tools.gui.widgets.schema_form import SchemaForm, folder_field_names
 from various_tools.gui.widgets.size_map import SizeMapView, actions_under
 from various_tools.gui.wording import (
     APPLY_TEXT,
+    CHANGE_SETTINGS,
+    CHOOSE_WORKSPACE_FIRST,
+    HIDE_DETAILS,
+    HIDE_SETTINGS,
+    SHOW_DETAILS,
+    USE_OTHER_FOLDERS,
+    WORKSPACE_CHANGED,
     apply_label,
     found_nouns,
+    looks_in_text,
+    plain_value,
     scan_label,
     summary_text,
 )
@@ -105,6 +114,14 @@ PERMANENT = "permanent"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
 COMPARE_TOOLS = frozenset({"duplicates"})
 LIVE_PREVIEW_DELAY_MS = 700
+# The remembered flag "this tool uses its own folders, not the working folder".
+OTHER_FOLDERS_KEY = "_use_other_folders"
+WORKSPACE_FIELD_NAMES = frozenset({"roots", "sources", "root"})
+MAX_SUMMARY_ITEMS = 8
+# A note kind ("skipped: <reason>: <path>") is shown as a count once it repeats this often.
+GROUP_NOTES_FROM = 3
+MAX_LOOSE_NOTES = 20
+_NOTE = re.compile(r"^(?P<label>[a-z][a-z ]*): (?P<reason>[^:]+?): (?P<path>.+)$")
 
 Confirm = Callable[[str, str], bool]
 Inform = Callable[[str, str], None]
@@ -120,6 +137,48 @@ def rememberable_fields(model: type[ToolOptions]) -> list[str]:
     permanent-delete value is also never remembered (see :data:`PERMANENT`).
     """
     return [s.name for s in describe(model) if not s.locked and not s.replaces_originals]
+
+
+def workspace_field_name(tool: Tool) -> str | None:
+    """The option that receives the working folder, or None when the tool opts out.
+
+    The tool's ``workspace_field`` attribute wins (``None`` opts out); otherwise the first
+    folder option, when it is named ``roots``, ``sources`` or ``root``.
+    """
+    folders = folder_field_names(tool.Options)
+    if hasattr(tool, "workspace_field"):
+        name = getattr(tool, "workspace_field")  # noqa: B009 (an optional capability)
+        return str(name) if name is not None and str(name) in folders else None
+    if folders and folders[0] in WORKSPACE_FIELD_NAMES:
+        return folders[0]
+    return None
+
+
+def group_notes(notes: list[str]) -> tuple[list[str], bool]:
+    """Short lines for the notes box: repeated ``label: reason: path`` notes become counts
+    ("86,691 skipped: already smaller than the target"), biggest kind first. Returns the lines
+    and whether anything was grouped."""
+    counts: Counter[tuple[str, str]] = Counter()
+    parsed: list[tuple[str, str] | None] = []
+    for note in notes:
+        match = _NOTE.match(note)
+        key = (match["label"], match["reason"]) if match else None
+        parsed.append(key)
+        if key is not None:
+            counts[key] += 1
+    grouped = {key for key, n in counts.items() if n >= GROUP_NOTES_FROM}
+    if not grouped:
+        return list(notes), False
+    lines = [
+        f"{n:,} {label}: {reason}"
+        for (label, reason), n in counts.most_common()
+        if (label, reason) in grouped
+    ]
+    loose = [n for n, key in zip(notes, parsed, strict=True) if key not in grouped]
+    lines += loose[:MAX_LOOSE_NOTES]
+    if len(loose) > MAX_LOOSE_NOTES:
+        lines.append(f"…and {len(loose) - MAX_LOOSE_NOTES:,} more notes")
+    return lines, True
 
 
 def missing_programs(notes: list[str]) -> list[str]:
@@ -259,9 +318,45 @@ class ToolPage(QWidget):
             self.step_labels.append(label)
 
         # ----- options form ------------------------------------------------------------
+        # The working folder: the tool's folder option is folded into one line unless the
+        # person chose other folders for this tool (remembered with the other options).
+        self._ws_name = workspace_field_name(tool)
+        self._override = bool(
+            self._ws_name and self.state.last_options(tool.id).get(OTHER_FOLDERS_KEY) is True
+        )
         self.form = SchemaForm(
             tool.Options, self._initial_values(), load_choices=self._choices_worker
         )
+        self.workspace_label = QLabel()
+        self.workspace_label.setWordWrap(True)
+        self.other_folders_check = QCheckBox(USE_OTHER_FOLDERS)
+        self.other_folders_check.setToolTip(
+            "Look in folders of your own for this tool instead of the working folder."
+        )
+        self.workspace_row = QWidget()
+        workspace_layout = QHBoxLayout(self.workspace_row)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.addWidget(self.workspace_label, 1)
+        workspace_layout.addWidget(self.other_folders_check)
+        self.workspace_row.setVisible(self._ws_name is not None)
+        self.other_folders_check.setChecked(self._override)
+        # Step 1 folds into one line after a scan.
+        self.options_summary = QLabel()
+        self.options_summary.setWordWrap(True)
+        self.change_settings_button = QPushButton(CHANGE_SETTINGS)
+        self.change_settings_button.setFlat(True)
+        self.change_settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.options_summary_row = QWidget()
+        summary_layout = QHBoxLayout(self.options_summary_row)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.addWidget(self.options_summary, 1)
+        summary_layout.addWidget(self.change_settings_button)
+        self.options_summary_row.setVisible(False)
+        self.options_collapsed = False
+        self.workspace_banner = QLabel(WORKSPACE_CHANGED)
+        self.workspace_banner.setWordWrap(True)
+        self.workspace_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        self.workspace_banner.setVisible(False)
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
         form_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -369,6 +464,15 @@ class ToolPage(QWidget):
         self.notes_view = QPlainTextEdit()
         self.notes_view.setReadOnly(True)
         self.notes_view.setVisible(False)  # shown only when a scan left notes
+        self._notes_full: list[str] = []
+        self.notes_toggle = QPushButton(SHOW_DETAILS)
+        self.notes_toggle.setFlat(True)
+        self.notes_toggle.setCheckable(True)
+        self.notes_toggle.setVisible(False)
+        self.notes_details = QPlainTextEdit()  # filled the first time it is opened
+        self.notes_details.setReadOnly(True)
+        self.notes_details.setVisible(False)
+        self._notes_details_built = False
         self.table = PlanTable()
         # Selecting rows belongs to the results, so the buttons sit in the table's toolbar.
         self.table.add_toolbar_widget(self.select_all_button, full_only=True)
@@ -393,7 +497,10 @@ class ToolPage(QWidget):
         top_layout.addWidget(title)
         top_layout.addWidget(description)
         top_layout.addWidget(self.step_labels[0])
+        top_layout.addWidget(self.options_summary_row)
+        top_layout.addWidget(self.workspace_row)
         top_layout.addWidget(form_scroll, 1)
+        self._form_scroll = form_scroll
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
@@ -401,6 +508,7 @@ class ToolPage(QWidget):
         bottom_layout.addLayout(buttons)
         bottom_layout.addWidget(self.progress_bar)
         bottom_layout.addWidget(self.status_label)
+        bottom_layout.addWidget(self.workspace_banner)
         bottom_layout.addWidget(self.missing_banner)
         bottom_layout.addWidget(self.cloud_banner)
         # Step 3, hidden until the first scan so a new page is short.
@@ -409,6 +517,8 @@ class ToolPage(QWidget):
         results_layout.setContentsMargins(0, 0, 0, 0)
         results_layout.addWidget(self.step_labels[2])
         results_layout.addWidget(self.notes_view)
+        results_layout.addWidget(self.notes_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        results_layout.addWidget(self.notes_details)
         results_layout.addWidget(results, 1)
         results_layout.addLayout(confirm_row)
         self.results.setVisible(False)
@@ -443,10 +553,15 @@ class ToolPage(QWidget):
         self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
         self.show_all_check.toggled.connect(self._show_all_toggled)
         self.form.changed.connect(self._form_changed)
+        self.other_folders_check.toggled.connect(self._other_folders_toggled)
+        self.change_settings_button.clicked.connect(lambda _c=False: self.toggle_options())
+        self.notes_toggle.toggled.connect(self._notes_toggled)
+        state.on_workspace_changed(self._workspace_changed)
         self.table.selectionChanged.connect(self._update_buttons)
         self.table.currentActionChanged.connect(lambda _a: self._update_buttons())
         self.table.filterChanged.connect(self._label_select_buttons)
 
+        self._apply_workspace_ui()
         self.set_show_all(state.show_all_settings())
         self._update_buttons()
 
@@ -470,7 +585,108 @@ class ToolPage(QWidget):
     def _initial_values(self) -> dict[str, Any]:
         remembered = self.state.last_options(self.tool.id)
         keep = set(rememberable_fields(self.tool.Options))
-        return {name: value for name, value in remembered.items() if name in keep}
+        values = {name: value for name, value in remembered.items() if name in keep}
+        if self._ws_name and not self._override:
+            values.pop(self._ws_name, None)  # the working folder decides, not an old value
+        return values
+
+    # ----- the working folder -----------------------------------------------------------------
+
+    @property
+    def uses_workspace(self) -> bool:
+        """The tool has a workspace field and the person has not chosen other folders."""
+        return self._ws_name is not None and not self._override
+
+    def _apply_workspace_ui(self) -> None:
+        """Show the one-line "Looks in" text or the real folder field, and fill the field."""
+        name = self._ws_name
+        if name is None:
+            return
+        paths = self.state.workspace()
+        self.workspace_label.setText(
+            "Looks in: folders chosen for this tool" if self._override else looks_in_text(paths)
+        )
+        self.form.hide_field(name, not self._override)
+        if not self._override:
+            self._put_workspace_in_field(paths)
+
+    def _put_workspace_in_field(self, paths: list[Path]) -> None:
+        name = self._ws_name
+        if name is None:
+            return
+        is_list = self.form.field_spec(name).kind == "list"
+        value: Any = [str(p) for p in paths] if is_list else (str(paths[0]) if paths else "")
+        self.form.set_field_value(name, value)
+
+    def _other_folders_toggled(self, on: bool) -> None:
+        self._override = on
+        self._apply_workspace_ui()
+        self.workspace_banner.setVisible(False)
+
+    def _workspace_changed(self, paths: list[Path]) -> None:
+        """The working folder changed. An idle page follows it; a page that already shows a
+        list keeps that list (Apply stays tied to it) and says to look again."""
+        if not shiboken6.isValid(self) or not self.uses_workspace:
+            return
+        self._apply_workspace_ui()
+        if self.plan is not None:
+            self.workspace_banner.setVisible(True)
+
+    def _workspace_missing(self) -> bool:
+        """No working folder, and nothing in the (hidden) folder field either."""
+        name = self._ws_name
+        if not self.uses_workspace or self.state.workspace() or name is None:
+            return False
+        return not self.form.raw_values().get(name)
+
+    # ----- folding the options after a scan -----------------------------------------------------
+
+    def options_summary_text(self) -> str:
+        """The non-default option values in plain words (field titles, not raw names)."""
+        values = self.form.raw_values()
+        parts: list[str] = []
+        if self.uses_workspace:
+            where = looks_in_text(self.state.workspace()).removeprefix("Looks in: ")
+            parts.append(f"Looking in: {where}")
+        for spec in describe(self.tool.Options):
+            if spec.name == self._ws_name and not self._override:
+                continue
+            if spec.name not in values:
+                continue
+            value = values[spec.name]
+            if format_value(value) == format_value(spec.default):
+                continue
+            parts.append(f"{spec.title}: {plain_value(value)}")
+        if len(parts) > MAX_SUMMARY_ITEMS:
+            extra = len(parts) - MAX_SUMMARY_ITEMS
+            parts = [*parts[:MAX_SUMMARY_ITEMS], f"and {extra} more"]
+        return "  ·  ".join(parts) if parts else "Default settings."
+
+    def collapse_options(self) -> None:
+        """Fold step 1 into one summary line (the list gets the room)."""
+        self.options_summary.setText(self.options_summary_text())
+        self.change_settings_button.setText(CHANGE_SETTINGS)
+        self._set_options_folded(True)
+        QTimer.singleShot(0, self._give_results_room)
+
+    def expand_options(self) -> None:
+        """Unfold step 1; the summary line stays, with a link to fold it again."""
+        self._set_options_folded(False)
+        self.options_summary_row.setVisible(True)
+        self.change_settings_button.setText(HIDE_SETTINGS)
+        QTimer.singleShot(0, self._give_results_room)
+
+    def toggle_options(self) -> None:
+        if self.options_collapsed:
+            self.expand_options()
+        else:
+            self.collapse_options()
+
+    def _set_options_folded(self, folded: bool) -> None:
+        self.options_collapsed = folded
+        self.options_summary_row.setVisible(folded)
+        self._form_scroll.setVisible(not folded)
+        self.workspace_row.setVisible(self._ws_name is not None and not folded)
 
     def reset_options(self) -> None:
         """Every option back to its default; the folder fields keep what they hold."""
@@ -480,7 +696,12 @@ class ToolPage(QWidget):
         self._set_status("Options reset to the defaults.")
 
     def set_folder(self, path: str) -> bool:
-        """Put a folder into the first folder field (used by ``--folder`` and the shell menu)."""
+        """Put a folder into the first folder field (used by ``--folder`` and the shell menu).
+
+        On a page that uses the working folder this chooses other folders for this tool.
+        """
+        if self._ws_name is not None and not self._override:
+            self.other_folders_check.setChecked(True)  # shows the real field
         return self.form.set_first_folder(path)
 
     def _build_options(self) -> ToolOptions | None:
@@ -493,14 +714,16 @@ class ToolPage(QWidget):
     def _remember_options(self, options: ToolOptions) -> None:
         """Remember what this scan used, except options that must start from the default."""
         values = options.model_dump(mode="json")
-        self.state.remember_options(
-            self.tool.id,
-            {
-                name: values[name]
-                for name in rememberable_fields(self.tool.Options)
-                if name in values and values[name] != PERMANENT
-            },
-        )
+        remembered = {
+            name: values[name]
+            for name in rememberable_fields(self.tool.Options)
+            if name in values and values[name] != PERMANENT
+        }
+        if self._ws_name:
+            if not self._override:
+                remembered.pop(self._ws_name, None)  # the working folder is not a tool option
+            remembered[OTHER_FOLDERS_KEY] = self._override
+        self.state.remember_options(self.tool.id, remembered)
 
     # ----- scan -------------------------------------------------------------------------------
 
@@ -514,6 +737,9 @@ class ToolPage(QWidget):
         Refused while busy, while an apply is being confirmed, and while the window closes.
         """
         if self.busy or self._apply_pending or self._closing:
+            return None
+        if self._workspace_missing():
+            self._set_status(CHOOSE_WORKSPACE_FIRST, True)
             return None
         options = self._build_options()
         if options is None:
@@ -541,6 +767,7 @@ class ToolPage(QWidget):
         self._applied = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
         self._show_notes(plan.notes)
+        self.workspace_banner.setVisible(False)
         self._show_missing(missing_programs(plan.notes))
         self._show_cloud_only(plan)
         self._show_size_map(plan)
@@ -548,6 +775,8 @@ class ToolPage(QWidget):
             self.results.setVisible(True)
             QTimer.singleShot(0, self._give_results_room)
         self._set_status(summary_text(plan, sizes, found_nouns(self.tool)))
+        if self.tool.id not in LIVE_PREVIEW_TOOLS:
+            self.collapse_options()
 
     def _give_results_room(self) -> None:
         """After the first scan, the options keep only the height they need (at most 40% of
@@ -557,19 +786,44 @@ class ToolPage(QWidget):
         total = sum(self.splitter.sizes())
         if total <= 0:
             return
-        top = min(
-            self._top.minimumSizeHint().height() + self.form.sizeHint().height(), total * 2 // 5
-        )
+        if self.options_collapsed:
+            top = min(self._top.sizeHint().height(), total * 2 // 5)
+        else:
+            top = min(
+                self._top.minimumSizeHint().height() + self.form.sizeHint().height(),
+                total * 2 // 5,
+            )
         self.splitter.setSizes([top, total - top])
 
     def _show_notes(self, notes: list[str]) -> None:
-        """The scan notes, in a box only as tall as they need (up to 5 lines), or hidden."""
-        self.notes_view.setPlainText("\n".join(notes))
+        """The scan notes, in a box only as tall as they need (up to 5 lines), or hidden.
+
+        Repeated "skipped: <reason>: <path>" notes are shown as counts; "Show details" opens
+        the full text, built only when asked (there can be 100,000 lines).
+        """
+        shown, grouped = group_notes(notes)
+        self._notes_full = notes
+        self._notes_details_built = False
+        self.notes_toggle.blockSignals(True)
+        self.notes_toggle.setChecked(False)
+        self.notes_toggle.setText(SHOW_DETAILS)
+        self.notes_toggle.blockSignals(False)
+        self.notes_toggle.setVisible(grouped)
+        self.notes_details.clear()
+        self.notes_details.setVisible(False)
+        self.notes_view.setPlainText("\n".join(shown))
         self.notes_view.setVisible(bool(notes))
-        lines = min(max(len(notes), 1), 5)
+        lines = min(max(len(shown), 1), 5)
         line = self.notes_view.fontMetrics().lineSpacing()
         margins = 2 * self.notes_view.frameWidth() + 12
         self.notes_view.setFixedHeight(lines * line + margins)
+
+    def _notes_toggled(self, on: bool) -> None:
+        self.notes_toggle.setText(HIDE_DETAILS if on else SHOW_DETAILS)
+        if on and not self._notes_details_built:
+            self.notes_details.setPlainText("\n".join(self._notes_full))
+            self._notes_details_built = True
+        self.notes_details.setVisible(on)
 
     def _applying(self) -> bool:
         """An apply is being confirmed or is running."""

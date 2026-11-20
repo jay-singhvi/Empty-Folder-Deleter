@@ -86,3 +86,34 @@ def summary_text(plan: Plan, sizes: Sequence[int | None], nouns: tuple[str, str]
     if known:
         text += f" ({human_size(sum(known))})"
     return text + ". Only ticked rows are changed, and you confirm first."
+
+
+# ----- the working folder and the options summary -------------------------------------------
+
+WORKSPACE_TITLE = "Working folder"
+NO_WORKSPACE = "not chosen yet"
+CHOOSE_WORKSPACE_FIRST = "Choose a working folder first (File menu, or Ctrl+O)."
+USE_OTHER_FOLDERS = "Use other folders for this tool"
+WORKSPACE_CHANGED = "The working folder changed. Look again to update the list."
+CHANGE_SETTINGS = "Change settings"
+HIDE_SETTINGS = "Hide settings"
+SHOW_DETAILS = "Show details"
+HIDE_DETAILS = "Hide details"
+
+
+def looks_in_text(paths: Sequence[object]) -> str:
+    """The one line on a tool page that says where it looks."""
+    where = "; ".join(str(p) for p in paths) if paths else NO_WORKSPACE
+    return f"Looks in: the working folder ({where})"
+
+
+def plain_value(value: object) -> str:
+    """An option value in plain words, for the folded options summary."""
+    if value is None or value == "":
+        return "not set"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, list | tuple | set | frozenset):
+        items = [plain_value(v) for v in value]  # pyright: ignore[reportUnknownVariableType]
+        return ", ".join(items) if items else "none"
+    return str(getattr(value, "value", value))

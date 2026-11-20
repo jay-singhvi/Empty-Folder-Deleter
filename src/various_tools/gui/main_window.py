@@ -7,22 +7,31 @@ Closing: no worker may outlive the window. While an apply or an undo runs, closi
 in progress. Stop it and close?". On yes every job is told to stop and the window stays open
 (disabled) until the last worker has finished, then closes; on no everything keeps running.
 Scans and other read-only jobs are cancelled and waited for without a question.
+
+Shell: a menu bar (File, View, Help), a toolbar with the working-folder chip, History and
+Settings, and the Home page (the first page). The working folder lives in ``AppState``; every
+tool page follows it.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QSplitter,
     QStackedWidget,
+    QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -32,18 +41,21 @@ from PySide6.QtWidgets import (
 from various_tools import __version__
 from various_tools.gui import shell
 from various_tools.gui.history_page import HistoryPage
+from various_tools.gui.home_page import HomePage
 from various_tools.gui.map_page import MapPage
 from various_tools.gui.settings_page import SettingsPage
 from various_tools.gui.state import AppState
 from various_tools.gui.timeline_page import TimelinePage
 from various_tools.gui.tool_page import ToolPage
 from various_tools.gui.widgets.log_panel import LogBridge, LogPanel
+from various_tools.gui.widgets.workspace_bar import WorkspaceBar
 from various_tools.gui.workers import active_workers, cancel_all
 from various_tools.tools.base import CATEGORIES
 
 log = logging.getLogger(__name__)
 
 APP_TITLE = "Various Tools"
+HOME_ID = "__home__"
 HISTORY_ID = "__history__"
 SETTINGS_ID = "__settings__"
 TIMELINE_ID = "__timeline__"
@@ -53,6 +65,22 @@ MEDIA_SECTION = "Photos & videos"
 _PAGE_ROLE = Qt.ItemDataRole.UserRole
 CLOSE_QUESTION = "A run is in progress. Stop it and close?"
 CLOSE_POLL_MS = 100
+MEDIA_PAGES = (
+    (TIMELINE_ID, "Timeline", "Browse your photos and videos by month."),
+    (MAP_ID, "Map", "See where your photos and videos were taken."),
+)
+# (what it does, the keys) for the Help > Keyboard shortcuts window. The last three act in the
+# results list of a tool page.
+SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("Choose working folder", "Ctrl+O"),
+    ("Settings", "Ctrl+,"),
+    ("Exit", "Ctrl+Q"),
+    ("Show or hide the log", "Ctrl+L"),
+    ("Find a tool (search the sidebar)", "Ctrl+K"),
+    ("Select every row in the results list", "Ctrl+A"),
+    ("Tick or untick the selected rows", "Space"),
+    ("Filter the results list", "Ctrl+F"),
+)
 
 
 def _default_confirm(parent: QWidget) -> Callable[[str, str], bool]:
@@ -69,6 +97,25 @@ def _default_confirm(parent: QWidget) -> Callable[[str, str], bool]:
     return confirm
 
 
+def _default_inform(parent: QWidget) -> Callable[[str, str], None]:
+    def inform(title: str, text: str) -> None:
+        QMessageBox.information(parent, title, text)
+
+    return inform
+
+
+def _default_choose_folder(parent: QWidget) -> Callable[[], str | None]:
+    def choose() -> str | None:
+        return QFileDialog.getExistingDirectory(parent, "Choose the working folder") or None
+
+    return choose
+
+
+def _default_open_folder(path: Path) -> None:
+    if hasattr(os, "startfile"):
+        os.startfile(path)  # noqa: S606 (a folder the app owns, opened in File Explorer)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -83,7 +130,10 @@ class MainWindow(QMainWindow):
         self.resize(1200, 820)
         # Tests replace this so no message box opens.
         self.confirm: Callable[[str, str], bool] = _default_confirm(self)
-        self.inform: Callable[[str, str], None] = lambda _title, _text: None
+        self.inform: Callable[[str, str], None] = _default_inform(self)
+        self.choose_folder: Callable[[], str | None] = _default_choose_folder(self)
+        self.open_folder: Callable[[Path], None] = _default_open_folder
+        self.shortcuts_dialog: QDialog | None = None
         self.closing = False  # a close was confirmed; waiting for the workers to finish
         self._close_timer = QTimer(self)
         self._close_timer.setInterval(CLOSE_POLL_MS)
@@ -113,13 +163,9 @@ class MainWindow(QMainWindow):
         self.map_page: MapPage | None = None
         self.history_page = HistoryPage(state)
         self.settings_page = SettingsPage(state, shell_backend=shell_backend)
-        self.welcome = QLabel(
-            f"<h2>{APP_TITLE}</h2><p>Pick a tool on the left. Every tool previews first: "
-            "Scan changes nothing, and only Apply does, after asking you.</p>"
-        )
-        self.welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.welcome.setWordWrap(True)
-        for page in (self.welcome, self.history_page, self.settings_page):
+        self.home_page = HomePage(state, media_section=MEDIA_SECTION, media_pages=MEDIA_PAGES)
+        self.welcome = self.home_page  # the first page (older name)
+        for page in (self.home_page, self.history_page, self.settings_page):
             self.stack.addWidget(page)
 
         self.log_panel = LogPanel()
@@ -140,13 +186,169 @@ class MainWindow(QMainWindow):
         main.setStretchFactor(1, 1)
         self.setCentralWidget(main)
 
+        self._build_menus()
+        self._build_toolbar()
+        self.home_page.openPage.connect(self.show_page)
+        self.home_page.chooseFolder.connect(self.choose_workspace)
+        self.home_page.openHistory.connect(lambda: self.show_page(HISTORY_ID))
+        state.on_workspace_changed(self._workspace_changed)
         self.search_edit.textChanged.connect(self.filter_tools)
         self.sidebar.currentItemChanged.connect(self._item_changed)
         self.history_page.runUndone.connect(self._run_undone)
         # The log is one of the "Show all settings" extras.
         self.log_panel.setVisible(state.show_all_settings())
+        self.show_all_action.setChecked(state.show_all_settings())
+        self.show_log_action.setChecked(state.show_all_settings())
         state.on_show_all_changed(self._show_all_changed)
         self.statusBar().showMessage("Ready")
+
+    # ----- menus and toolbar ------------------------------------------------------------------
+
+    def _action(
+        self, text: str, slot: Callable[[], object], shortcut: str | None = None
+    ) -> QAction:
+        action = QAction(text, self)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        # Resolved when triggered, so tests can replace the method on the window.
+        action.triggered.connect(lambda _checked=False: slot())
+        return action
+
+    def _build_menus(self) -> None:
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        self.choose_folder_action = self._action(
+            "Choose working folder…", lambda: self.choose_workspace(), "Ctrl+O"
+        )
+        self.add_folder_action = self._action(
+            "Add a folder to the working folder…", lambda: self.add_workspace_folder()
+        )
+        self.recent_menu = file_menu.addMenu("Recent folders")
+        self.settings_action = self._action(
+            "Settings…", lambda: self.show_page(SETTINGS_ID), "Ctrl+,"
+        )
+        self.exit_action = self._action("Exit", lambda: self.close(), "Ctrl+Q")
+        file_menu.insertAction(self.recent_menu.menuAction(), self.choose_folder_action)
+        file_menu.insertAction(self.recent_menu.menuAction(), self.add_folder_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.settings_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
+
+        view_menu = bar.addMenu("&View")
+        self.show_all_action = QAction("Show all settings", self)
+        self.show_all_action.setCheckable(True)
+        self.show_all_action.setToolTip("Show every setting and control on every page.")
+        self.show_all_action.triggered.connect(
+            lambda checked=False: self.state.set_show_all_settings(bool(checked))
+        )
+        self.show_log_action = QAction("Show log", self)
+        self.show_log_action.setCheckable(True)
+        self.show_log_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.show_log_action.triggered.connect(
+            lambda checked=False: self.log_panel.setVisible(bool(checked))
+        )
+        self.find_tool_action = self._action("Find a tool", lambda: self.focus_search(), "Ctrl+K")
+        self.home_action = self._action("Home", lambda: self.show_page(HOME_ID))
+        view_menu.addAction(self.show_all_action)
+        view_menu.addAction(self.show_log_action)
+        view_menu.addAction(self.find_tool_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.home_action)
+
+        help_menu = bar.addMenu("&Help")
+        self.shortcuts_action = self._action("Keyboard shortcuts", lambda: self.show_shortcuts())
+        self.open_settings_folder_action = self._action(
+            "Open settings folder", lambda: self.open_settings_folder()
+        )
+        self.about_action = self._action("About Various Tools", lambda: self.show_about())
+        help_menu.addAction(self.shortcuts_action)
+        help_menu.addAction(self.open_settings_folder_action)
+        help_menu.addSeparator()
+        help_menu.addAction(self.about_action)
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+
+    def _build_toolbar(self) -> None:
+        self.toolbar = QToolBar("Main")
+        self.toolbar.setMovable(False)
+        self.workspace_bar = WorkspaceBar()
+        self.workspace_bar.set_paths(self.state.workspace())
+        self.workspace_bar.set_recent(self.state.recent_workspaces())
+        self.workspace_bar.changeRequested.connect(self.choose_workspace)
+        self.workspace_bar.recentChosen.connect(self.state.set_workspace)
+        self.toolbar.addWidget(self.workspace_bar)
+        self.toolbar.addSeparator()
+        self.history_action = self._action("History", lambda: self.show_page(HISTORY_ID))
+        self.history_action.setToolTip("See what was applied, and undo it.")
+        self.toolbar.addAction(self.history_action)
+        self.toolbar.addAction(self.settings_action)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
+
+    def _fill_recent_menu(self) -> None:
+        self.recent_menu.clear()
+        recent = self.state.recent_workspaces()
+        self.recent_menu.setEnabled(bool(recent))
+        for entry in recent:
+            action = self.recent_menu.addAction("; ".join(str(p) for p in entry))
+            action.triggered.connect(lambda _c=False, e=list(entry): self.state.set_workspace(e))
+
+    # ----- the working folder -----------------------------------------------------------------
+
+    def choose_workspace(self) -> bool:
+        """Ask for a folder and make it the working folder. False when nothing was chosen."""
+        chosen = self.choose_folder()
+        if not chosen:
+            return False
+        self.state.set_workspace([Path(chosen)])
+        return True
+
+    def add_workspace_folder(self) -> bool:
+        """Ask for one more folder and add it to the working folder."""
+        chosen = self.choose_folder()
+        if not chosen:
+            return False
+        self.state.set_workspace([*self.state.workspace(), Path(chosen)])
+        return True
+
+    def _workspace_changed(self, paths: list[Path]) -> None:
+        self.workspace_bar.set_paths(paths)
+        self.workspace_bar.set_recent(self.state.recent_workspaces())
+        self.home_page.refresh()
+
+    # ----- menu commands ----------------------------------------------------------------------
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
+
+    def shortcuts_text(self) -> str:
+        return "\n".join(f"{keys}\t{what}" for what, keys in SHORTCUTS)
+
+    def show_shortcuts(self) -> QDialog:
+        """The list of every shortcut (a window that does not block the app)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard shortcuts")
+        layout = QVBoxLayout(dialog)
+        label = QLabel(
+            "<table cellspacing='6'>"
+            + "".join(f"<tr><td><b>{keys}</b></td><td>{what}</td></tr>" for what, keys in SHORTCUTS)
+            + "</table>"
+        )
+        layout.addWidget(label)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.shortcuts_dialog = dialog
+        dialog.show()
+        return dialog
+
+    def open_settings_folder(self) -> None:
+        self.open_folder(self.state.settings_path.parent)
+
+    def show_about(self) -> None:
+        self.inform(
+            f"About {APP_TITLE}",
+            f"{APP_TITLE} {__version__}\n\nOne app for tidying folders and photos. Every tool "
+            "previews first and changes nothing until you Apply.",
+        )
 
     # ----- sidebar ----------------------------------------------------------------------------
 
@@ -252,7 +454,10 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page_id: str) -> QWidget:
         page: QWidget
-        if page_id == HISTORY_ID:
+        if page_id == HOME_ID:
+            self.home_page.refresh()
+            page = self.home_page
+        elif page_id == HISTORY_ID:
             self.history_page.reload()
             page = self.history_page
         elif page_id == SETTINGS_ID:
@@ -292,6 +497,8 @@ class MainWindow(QMainWindow):
     def _show_all_changed(self, on: bool) -> None:
         """The "Show all settings" switch changed on some page: every page follows."""
         self.log_panel.setVisible(on)
+        for action in (self.show_all_action, self.show_log_action):
+            action.setChecked(on)
         for page in self.tool_pages.values():
             page.set_show_all(on)
 

@@ -595,6 +595,8 @@ class TempCleaner:
     )
     category: Category = "Clean up"
     Options = TempCleanerOptions
+    # Its folders are extra temp folders, not the working folder: opt out of the working folder.
+    workspace_field = None
 
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:
         # ``None`` means the real environment, read at scan time. Tests pass a fake mapping.

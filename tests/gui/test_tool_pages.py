@@ -97,6 +97,7 @@ def test_live_preview_and_compare_sets_are_what_the_plan_says() -> None:
 
 def test_scan_with_invalid_options_does_not_start(open_tool: OpenTool) -> None:
     page = open_tool("project_export")  # the root folder is required
+    page.other_folders_check.setChecked(True)  # its own folder field, left empty
     assert page.scan() is None
     assert page.worker is None
     assert "not valid" in page.status_label.text()

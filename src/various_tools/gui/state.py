@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,9 +34,13 @@ GUI_STATE_FORMAT = 1
 LAST_OPTIONS_KEY = "last_options"
 OLD_LAST_FOLDERS_KEY = "last_folders"
 SHOW_ALL_KEY = "show_all_settings"
+WORKSPACE_KEY = "workspace"
+RECENT_WORKSPACES_KEY = "recent_workspaces"
+MAX_RECENT_WORKSPACES = 8
 
 SettingsListener = Callable[["Settings"], None]
 ShowAllListener = Callable[[bool], None]
+WorkspaceListener = Callable[[list[Path]], None]
 
 
 @dataclass
@@ -53,6 +57,7 @@ class AppState:
     deps: ExternalTools = field(init=False)
     _listeners: list[SettingsListener] = field(default_factory=list[SettingsListener])
     _show_all_listeners: list[ShowAllListener] = field(default_factory=list[ShowAllListener])
+    _workspace_listeners: list[WorkspaceListener] = field(default_factory=list[WorkspaceListener])
 
     def __post_init__(self) -> None:
         self.deps = make_deps(self.settings)
@@ -174,6 +179,60 @@ class AppState:
     def on_show_all_changed(self, listener: ShowAllListener) -> None:
         """Call ``listener(on)`` after every :meth:`set_show_all_settings`."""
         self._show_all_listeners.append(listener)
+
+    # ----- the working folder ----------------------------------------------------
+
+    def _stored_paths(self, key: str) -> list[Path]:
+        raw: Any = self._read_gui_state().get(key, [])
+        if not isinstance(raw, list):
+            return []
+        return [Path(item) for item in raw if isinstance(item, str) and item]  # pyright: ignore[reportUnknownVariableType]
+
+    def workspace(self) -> list[Path]:
+        """The working folder: one or more folders every tool looks in by default (may be empty).
+
+        GUI state, kept even when "Remember last folders and options" is off.
+        """
+        return self._stored_paths(WORKSPACE_KEY)
+
+    def recent_workspaces(self) -> list[list[Path]]:
+        """The last working folders, newest first (at most 8 entries, each one or more folders)."""
+        raw: Any = self._read_gui_state().get(RECENT_WORKSPACES_KEY, [])
+        if not isinstance(raw, list):
+            return []
+        recents: list[list[Path]] = []
+        for entry in raw:  # pyright: ignore[reportUnknownVariableType]
+            if isinstance(entry, list):
+                paths = [Path(p) for p in entry if isinstance(p, str) and p]  # pyright: ignore[reportUnknownVariableType]
+                if paths:
+                    recents.append(paths)
+        return recents[:MAX_RECENT_WORKSPACES]
+
+    def set_workspace(self, paths: Sequence[Path | str]) -> None:
+        """Choose the working folder. Listeners are told only when it really changed."""
+        new: list[Path] = []
+        for item in paths:
+            path = Path(item)
+            if str(path) and path not in new:
+                new.append(path)
+        old = self.workspace()
+        data = self._read_gui_state()
+        data["format"] = GUI_STATE_FORMAT
+        data[WORKSPACE_KEY] = [str(p) for p in new]
+        if new:
+            recents = [r for r in self.recent_workspaces() if r != new]
+            recents.insert(0, new)
+            data[RECENT_WORKSPACES_KEY] = [
+                [str(p) for p in entry] for entry in recents[:MAX_RECENT_WORKSPACES]
+            ]
+        self._write_gui_state(data)
+        if new != old:
+            for listener in list(self._workspace_listeners):
+                listener(list(new))
+
+    def on_workspace_changed(self, listener: WorkspaceListener) -> None:
+        """Call ``listener(paths)`` after the working folder changed."""
+        self._workspace_listeners.append(listener)
 
     def _write_gui_state(self, data: dict[str, Any]) -> None:
         """Write the GUI state file atomically; a failure is logged, never raised."""

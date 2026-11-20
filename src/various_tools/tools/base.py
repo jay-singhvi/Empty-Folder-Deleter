@@ -17,6 +17,12 @@ Options conventions (every tool, owner requirement "nothing is constant"):
 exporting its catalog. It lists them in an optional ``extras`` attribute (a tuple of
 :class:`ToolExtra`); callers read it with ``getattr(tool, "extras", ())``, so tools without
 extras need nothing. The CLI turns each extra into a subcommand and the GUI into a button.
+
+**Working folder.** The GUI has one working folder that every tool looks in by default. A tool's
+*workspace field* is the option that receives it: the optional ``workspace_field`` attribute (the
+option's name; ``None`` opts out, as the Temp Cleaner does because its folders are extra temp
+folders), else the tool's first folder option when it is named ``roots``, ``sources`` or ``root``.
+Callers read it with ``getattr(tool, "workspace_field", ...)``; tools that need nothing set nothing.
 """
 
 from __future__ import annotations

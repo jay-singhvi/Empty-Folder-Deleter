@@ -1019,7 +1019,9 @@ class PlanTable(QWidget):
         result: list[Node] = []
         proxy, model = self._proxy, self._model
         # Walk the selected ranges (selectedRows() is far too slow for 100,000 rows).
-        for block in self.view.selectionModel().selection():
+        blocks = self.view.selectionModel().selection()
+        for k in range(blocks.count()):
+            block = blocks.at(k)
             parent = block.parent()
             for row in range(block.top(), block.bottom() + 1):
                 node = model.node_at(proxy.mapToSource(proxy.index(row, 0, parent)))

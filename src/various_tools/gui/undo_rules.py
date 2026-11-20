@@ -8,12 +8,13 @@ example only permanent deletes) cannot be undone.
 
 **Still applying.** A run whose journal entry has no ``finished`` time, or whose status is still
 ``running``, is in progress: undoing it would race the apply that is still changing files. It is
-refused, unless it is *stale*: nothing has been written to the journal for that run (its start, its
-heartbeat or any of its actions) for :func:`stale_after` (at least :data:`STALE_AFTER`, two hours, and always
-longer than the longest single step an apply may take, the transcode timeout). A live apply
-journals every action before and after it runs, and while it is paused or waiting between
-batches it touches the run (a heartbeat) at least once a minute, so a gap that long means the program that owned
-the run stopped (it crashed or the computer was turned off), and its done actions may be undone.
+refused, unless it is *stale*: nothing has been written to the journal for that run (its
+start, its heartbeat or any of its actions) for :func:`stale_after` (at least
+:data:`STALE_AFTER`, two hours, and always longer than the longest single step an apply may
+take, the transcode timeout). A live apply journals every action before and after it runs, and
+while it is paused or waiting between batches it touches the run (a heartbeat) at least once a
+minute, so a gap that long means the program that owned the run stopped (it crashed or the
+computer was turned off), and its done actions may be undone.
 A time that cannot be read counts as recent, which is the safe side.
 
 The journal is read with one small read-only query, so this can run in a worker thread while an

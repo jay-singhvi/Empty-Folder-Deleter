@@ -213,3 +213,45 @@ def test_the_timeline_order_is_made_once_and_not_again_per_keystroke(
     assert model.timeline_shown == timeline_order(model.shown)
     model.set_filter(MediaFilter())
     assert model.timeline_shown == timeline_order(model.shown)
+
+
+def test_update_duplicates_works_off_the_gui_thread_and_reloads_once_saved(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gui.test_library_places_duplicates import _library, _plan  # noqa: PLC2701
+
+    from various_tools.core.media import library_duplicates as ld
+
+    root = _library(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    threads: list[int] = []
+    real = ld.LibraryDuplicates.update_from_plan
+
+    def spy(self: ld.LibraryDuplicates, *args: object, **kwargs: object) -> int:
+        threads.append(threading.get_ident())
+        return real(self, *args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(ld.LibraryDuplicates, "update_from_plan", spy)
+    assert model.update_duplicates(_plan(root)) == 0  # the work is in the background
+    qtbot.waitUntil(lambda: len(model.duplicate_index) == 1, timeout=10000)
+    assert threads and threads[0] != threading.get_ident()
+
+
+def test_a_scan_outside_the_library_keeps_the_saved_groups(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    from tests.gui.test_library_places_duplicates import _library, _plan  # noqa: PLC2701
+
+    from various_tools.core.plan import Plan
+
+    root = _library(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    model.update_duplicates(_plan(root))
+    qtbot.waitUntil(lambda: len(model.duplicate_index) == 1, timeout=10000)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    model.update_duplicates(Plan(tool="duplicates", roots=[elsewhere]))
+    qtbot.wait(300)
+    assert len(model.duplicate_index) == 1

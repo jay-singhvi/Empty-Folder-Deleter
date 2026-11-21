@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -51,6 +52,7 @@ from various_tools.gui.workers import Worker
 log = logging.getLogger(__name__)
 
 _ATTRIBUTE = "_library_model"
+_DUPLICATES_LOCK = threading.Lock()  # one writer of library_duplicates.json at a time
 LOADING_TEXT = "Loading your photos…"
 
 
@@ -133,6 +135,14 @@ def _read_library(
             log.warning("Could not read the media library %s: %s", path, exc)
     duplicates = LibraryDuplicates(duplicates_file) if duplicates_file is not None else None
     return prepare(generation, stamp, items, duplicates)
+
+
+def _merge_duplicates(plan: Plan, library_roots: list[Path], file: Path) -> tuple[int, bool]:
+    """Keep the groups of a Duplicate Finder plan (stats files, writes JSON: worker thread)."""
+    with _DUPLICATES_LOCK:
+        store = LibraryDuplicates(file)
+        count = store.update_from_plan(plan, library_roots)
+        return count, store.changed
 
 
 class LibraryModel(QObject):
@@ -339,13 +349,34 @@ class LibraryModel(QObject):
     def update_duplicates(self, plan: Plan) -> int:
         """Remember the groups of a Duplicate Finder plan and read the library again.
 
-        Call it when that tool's scan is done. Other tools' plans change nothing (returns 0).
-        Returns the number of groups kept (some may not be in the library).
+        Call it when that tool's scan is done. Other tools' plans, and plans of folders outside
+        the library folders, change nothing (returns 0). Only the groups under the scanned folders
+        are replaced. The library is read again only when the saved groups changed.
+
+        The files are statted and the JSON written in a worker thread, so a big plan never
+        freezes the window; then this returns 0 and the model reloads when the worker is done.
+        With :attr:`synchronous` (tests) it works at once and returns the number of groups the
+        plan has (some may not be in the library).
         """
-        count = LibraryDuplicates(self.duplicates_file()).update_from_plan(plan)
-        if plan.tool == "duplicates":
+        if plan.tool != "duplicates":
+            return 0
+        roots, file = self.roots(), self.duplicates_file()
+        if self.synchronous:
+            count, changed = _merge_duplicates(plan, roots, file)
+            if changed:
+                self.reload()
+            return count
+        worker = Worker(lambda _w: _merge_duplicates(plan, roots, file))
+        worker.succeeded.connect(self._duplicates_merged)
+        worker.failed.connect(lambda exc: log.warning("Could not save the duplicates: %s", exc))
+        worker.start()
+        return 0
+
+    def _duplicates_merged(self, result: object) -> None:
+        # Each result says only that the file changed; ``reload`` drops any older read, so a burst
+        # of scans ends with one read of the latest file.
+        if isinstance(result, tuple) and len(result) == 2 and result[1] is True:  # pyright: ignore[reportUnknownArgumentType]
             self.reload()
-        return count
 
     def months(self) -> list[tuple[int, int]]:
         """Every (year, month) that has a dated item, newest first."""

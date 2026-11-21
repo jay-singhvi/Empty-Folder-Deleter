@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,6 +79,20 @@ class DuplicateIndex:
 EMPTY = DuplicateIndex([], {})
 
 
+def _prefix(root: Path | str) -> str:
+    key = path_key(root)
+    return key if key.endswith(os.sep) else key + os.sep
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return a.startswith(b) or b.startswith(a)
+
+
+def _under(path: str, prefixes: Sequence[str]) -> bool:
+    key = path_key(path) + os.sep
+    return any(key.startswith(p) for p in prefixes)
+
+
 class LibraryDuplicates:
     """The saved duplicate groups. Light: ``load`` and ``save`` read and write one JSON file."""
 
@@ -86,6 +100,7 @@ class LibraryDuplicates:
         self.path = path
         self.saved = ""
         self.groups: list[list[Member]] = []
+        self.changed = False  # the last update_from_plan changed the saved groups
         self.load()
 
     # ----- file ------------------------------------------------------------------------------
@@ -129,15 +144,26 @@ class LibraryDuplicates:
 
     # ----- from a plan -----------------------------------------------------------------------
 
-    def update_from_plan(self, plan: Plan) -> int:
-        """Keep the duplicate groups of a Duplicate Finder plan. Returns how many groups.
+    def update_from_plan(self, plan: Plan, library_roots: Sequence[Path] | None = None) -> int:
+        """Keep the duplicate groups of a Duplicate Finder plan. Returns how many groups the
+        plan has (the plan's, not the whole file's).
 
         Other tools' plans are ignored (returns 0 and changes nothing). Each group is its
         keeper (the action's ``group_id``) and the files the plan moves or deletes. Size and
         modified time are read with ``os.stat``; a missing file leaves its group.
+
+        With ``library_roots``, a plan whose folders do not overlap any of them is ignored too.
+        Otherwise only the saved groups that have a file under the plan's folders are replaced;
+        the groups of other folders stay. :attr:`changed` says whether the saved groups changed.
         """
+        self.changed = False
         if plan.tool != DUPLICATES_TOOL_ID:
             return 0
+        scanned = [_prefix(r) for r in plan.roots]
+        if library_roots is not None:
+            library = [_prefix(r) for r in library_roots]
+            if not any(_overlaps(s, lib) for s in scanned for lib in library):
+                return 0
         by_group: dict[str, list[str]] = {}
         for action in plan.actions:
             if action.group_id is None or action.src is None:
@@ -160,9 +186,12 @@ class LibraryDuplicates:
                 group.append(Member(p, st.st_size, st.st_mtime))
             if len(group) >= 2:
                 groups.append(group)
-        self.groups = groups
-        self.saved = plan.created
-        self.save()
+        kept = [g for g in self.groups if not any(_under(m.path, scanned) for m in g)]
+        merged = kept + groups
+        self.changed = merged != self.groups
+        self.groups, self.saved = merged, plan.created
+        if self.changed:
+            self.save()
         return len(groups)
 
     # ----- matching the library --------------------------------------------------------------

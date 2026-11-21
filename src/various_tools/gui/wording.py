@@ -101,8 +101,17 @@ SHOW_DETAILS = "Show details"
 HIDE_DETAILS = "Hide details"
 
 
-def looks_in_text(paths: Sequence[object]) -> str:
-    """The one line on a tool page that says where it looks."""
+def looks_in_text(paths: Sequence[object], *, first_only: bool = False) -> str:
+    """The one line on a tool page that says where it looks.
+
+    ``first_only`` is for a tool whose folder option takes one folder: with several working
+    folders it uses the first, and the line says so.
+    """
+    if first_only and len(paths) > 1:
+        return (
+            f"Looks in: the first working folder only ({paths[0]}); this tool uses one folder, "
+            f"so the other {len(paths) - 1} are not used"
+        )
     where = "; ".join(str(p) for p in paths) if paths else NO_WORKSPACE
     return f"Looks in: the working folder ({where})"
 

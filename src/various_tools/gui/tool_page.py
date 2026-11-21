@@ -630,11 +630,18 @@ class ToolPage(QWidget):
             return
         paths = self.state.workspace()
         self.workspace_label.setText(
-            "Looks in: folders chosen for this tool" if self._override else looks_in_text(paths)
+            "Looks in: folders chosen for this tool"
+            if self._override
+            else looks_in_text(paths, first_only=self._workspace_is_single())
         )
         self.form.hide_field(name, not self._override)
         if not self._override:
             self._put_workspace_in_field(paths)
+
+    def _workspace_is_single(self) -> bool:
+        """True when the working-folder option takes one folder (it then uses the first)."""
+        name = self._ws_name
+        return name is not None and self.form.field_spec(name).kind != "list"
 
     def _put_workspace_in_field(self, paths: list[Path]) -> None:
         name = self._ws_name
@@ -646,6 +653,7 @@ class ToolPage(QWidget):
 
     def _other_folders_toggled(self, on: bool) -> None:
         self._override = on
+        self._override_session_only = False  # a tick by the person is remembered
         self._apply_workspace_ui()
         self.workspace_banner.setVisible(False)
 
@@ -672,7 +680,9 @@ class ToolPage(QWidget):
         values = self.form.raw_values()
         parts: list[str] = []
         if self.uses_workspace:
-            where = looks_in_text(self.state.workspace()).removeprefix("Looks in: ")
+            where = looks_in_text(
+                self.state.workspace(), first_only=self._workspace_is_single()
+            ).removeprefix("Looks in: ")
             parts.append(f"Looking in: {where}")
         for spec in describe(self.tool.Options):
             if spec.name == self._ws_name and not self._override:
@@ -728,6 +738,7 @@ class ToolPage(QWidget):
         """
         if self._ws_name is not None and not self._override:
             self.other_folders_check.setChecked(True)  # shows the real field
+            self._override_session_only = True  # this launch only: not remembered
         return self.form.set_first_folder(path)
 
     def _build_options(self) -> ToolOptions | None:
@@ -746,9 +757,14 @@ class ToolPage(QWidget):
             if name in values and values[name] != PERMANENT
         }
         if self._ws_name:
-            if not self._override:
+            if not self._override or self._override_session_only:
                 remembered.pop(self._ws_name, None)  # the working folder is not a tool option
-            remembered[OTHER_FOLDERS_KEY] = self._override
+            if self._override_session_only:  # set by --folder or the shell menu: keep what was
+                remembered[OTHER_FOLDERS_KEY] = (
+                    self.state.last_options(self.tool.id).get(OTHER_FOLDERS_KEY) is True
+                )
+            else:
+                remembered[OTHER_FOLDERS_KEY] = self._override
         self.state.remember_options(self.tool.id, remembered)
 
     # ----- scan -------------------------------------------------------------------------------
@@ -1003,6 +1019,7 @@ class ToolPage(QWidget):
 
     _pause_event: threading.Event | None = None
     _skip_wait_event: threading.Event | None = None
+    _override_session_only = False  # "Use other folders" was set by set_folder, not ticked
     _scan_workspace: list[Path] = []  # the working folder when the running scan started
     _apply_worker: Worker | None = None
     _pace: Pace | None = None

@@ -442,3 +442,41 @@ def test_a_scan_running_when_the_working_folder_changes_gets_the_banner(
     qtbot.waitUntil(lambda: page.plan is not None, timeout=30000)
     assert not page.workspace_banner.isHidden()
     qtbot.waitUntil(lambda: page.worker is None, timeout=30000)
+
+
+def test_a_folder_set_by_the_shell_menu_is_not_remembered_as_other_folders(
+    window: MainWindow, gui_state: AppState, tmp_path: Path, scan: Callable[[ToolPage], None]
+) -> None:
+    work = _tree(tmp_path, "work")
+    other = _tree(tmp_path, "other")
+    gui_state.set_workspace([work])
+    page = window.tool_page("empty_folders")
+    assert page.set_folder(str(other))
+    assert page.other_folders_check.isChecked()
+    scan(page)
+    fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
+    assert not fresh.other_folders_check.isChecked()
+    fresh.deleteLater()
+
+
+def test_a_tick_of_use_other_folders_by_the_person_is_remembered(
+    window: MainWindow, gui_state: AppState, tmp_path: Path, scan: Callable[[ToolPage], None]
+) -> None:
+    gui_state.set_workspace([_tree(tmp_path, "work")])
+    page = window.tool_page("empty_folders")
+    page.other_folders_check.setChecked(True)
+    page.form.set_first_folder(str(_tree(tmp_path, "mine")))
+    scan(page)
+    fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
+    assert fresh.other_folders_check.isChecked()
+    fresh.deleteLater()
+
+
+def test_a_one_folder_tool_says_it_uses_the_first_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    first, second = _tree(tmp_path, "first"), _tree(tmp_path, "second")
+    gui_state.set_workspace([first, second])
+    page = window.tool_page("project_export")
+    text = page.workspace_label.text()
+    assert str(first) in text and "first" in text and str(second) not in text

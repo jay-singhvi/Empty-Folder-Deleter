@@ -291,7 +291,9 @@ def test_cloud_only_video_is_not_probed(
     cloud.add("clip.mp4")
     monkeypatch.setattr(ctx.deps, "path", lambda _name: Path("C:/fake/ffprobe.exe"))
     probed: list[Path] = []
-    monkeypatch.setattr(ffmpeg, "creation_time", lambda _p, path, **_k: probed.append(path))
+    monkeypatch.setattr(
+        ffmpeg, "probe_video_info", lambda _p, path, **_k: probed.append(path) or ffmpeg.VideoInfo()
+    )
 
     lib.sync([root], ctx)
 
@@ -368,11 +370,11 @@ def test_video_uses_ffprobe_creation_time(
     monkeypatch.setattr(ctx.deps, "path", lambda name: probe if name == "ffprobe" else None)
     calls: list[tuple[Path, Path]] = []
 
-    def fake_creation_time(ffprobe: Path, path: Path, **_kw: object) -> datetime:
+    def fake_probe(ffprobe: Path, path: Path, **_kw: object) -> ffmpeg.VideoInfo:
         calls.append((ffprobe, path))
-        return datetime(2023, 8, 9, 10, 11, 12)
+        return ffmpeg.VideoInfo(creation_time=datetime(2023, 8, 9, 10, 11, 12))
 
-    monkeypatch.setattr(ffmpeg, "creation_time", fake_creation_time)
+    monkeypatch.setattr(ffmpeg, "probe_video_info", fake_probe)
 
     lib.sync([root], ctx)
 
@@ -514,3 +516,164 @@ def test_file_that_goes_cloud_only_after_being_read_keeps_its_date_and_gps(
     assert item.lat == pytest.approx(37.775, abs=1e-3)
     assert (item.width, item.height) == (40, 30)
     assert len(lib.with_location()) == 1
+
+
+# ----- nested roots (part 1, item 1) --------------------------------------------------------
+
+
+def test_a_folder_inside_another_chosen_folder_is_read_and_counted_once(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, reads: list[Path]
+) -> None:
+    outer = tmp_path / "pics"
+    inner = outer / "2024" / "trip"
+    make_jpeg(inner / "a.jpg")
+    make_jpeg(outer / "b.jpg")
+
+    report = lib.sync([outer, inner, outer], ctx)
+
+    assert report.added == 2
+    assert sorted(p.name for p in reads) == ["a.jpg", "b.jpg"]
+    assert len(lib.items([outer, inner])) == 2
+    assert library_module.fold_roots([inner, outer]) == [outer]
+    assert library_module.fold_roots([outer, tmp_path / "pics2"]) == [outer, tmp_path / "pics2"]
+
+
+# ----- folders that cannot be listed (item 2) -------------------------------------------------
+
+
+def test_a_subfolder_that_cannot_be_listed_keeps_its_rows(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "pics"
+    make_jpeg(root / "ok" / "a.jpg")
+    make_jpeg(root / "locked" / "b.jpg")
+    make_jpeg(root / "locked" / "deeper" / "c.jpg")
+    lib.sync([root], ctx)
+    assert len(lib.items()) == 3
+
+    real_scandir = os.scandir
+
+    def scandir(path: str) -> object:
+        if Path(str(path).removeprefix("\\?\\")).name == "locked":
+            raise PermissionError(13, "Access is denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    report = lib.sync([root], ctx)
+
+    assert len(lib.items()) == 3
+    assert report.removed == 0
+    assert any("locked" in note and "could not be listed" in note for note in report.errors)
+
+    monkeypatch.undo()
+    (root / "locked" / "b.jpg").unlink()
+    report = lib.sync([root], ctx)
+    assert report.removed == 1
+    assert sorted(i.path.name for i in lib.items()) == ["a.jpg", "c.jpg"]
+
+
+# ----- RAW and video details (item 3) ---------------------------------------------------------
+
+
+def test_raw_files_are_read_in_batches_with_gps_and_size(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "raws"
+    root.mkdir()
+    for n in range(7):
+        (root / f"IMG_{n}.CR3").write_bytes(b"raw")
+    exiftool = Path("C:/fake/exiftool.exe")
+    monkeypatch.setattr(ctx.deps, "path", lambda name: exiftool if name == "exiftool" else None)
+    monkeypatch.setattr(exif, "EXIFTOOL_BATCH_SIZE", 3)
+    monkeypatch.setattr(library_module.exif, "EXIFTOOL_BATCH_SIZE", 3)
+    calls: list[list[Path]] = []
+
+    def fake(tool: Path, paths: list[Path], timeout: float, **_kw: object) -> dict[Path, object]:
+        assert tool == exiftool
+        calls.append(list(paths))
+        return {
+            p: exif.RawInfo(datetime(2022, 3, 4, 5, 6, 7), (48.85, 2.35), 6000, 4000)
+            for p in paths
+            if p.name != "IMG_6.CR3"
+        }
+
+    monkeypatch.setattr(exif, "exiftool_raw_info", fake)
+
+    report = lib.sync([root], ctx)
+
+    assert [len(c) for c in calls] == [3, 3, 1]
+    assert report.added == 7
+    items = {i.path.name: i for i in lib.items()}
+    first = items["IMG_0.CR3"]
+    assert (first.lat, first.lon, first.width, first.height) == (48.85, 2.35, 6000, 4000)
+    assert first.taken == datetime(2022, 3, 4, 5, 6, 7)
+    assert first.date_source == "camera"
+    assert items["IMG_6.CR3"].lat is None and items["IMG_6.CR3"].date_source == "modified"
+
+
+def test_cloud_only_raw_is_not_given_to_exiftool(
+    tmp_path: Path,
+    lib: MediaLibrary,
+    ctx: RunContext,
+    cloud: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "raws"
+    root.mkdir()
+    (root / "far.CR3").write_bytes(b"raw")
+    cloud.add("far.CR3")
+    monkeypatch.setattr(ctx.deps, "path", lambda _n: Path("C:/fake/tool.exe"))
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        exif, "exiftool_raw_info", lambda _t, paths, *_a, **_k: seen.extend(paths) or {}
+    )
+
+    lib.sync([root], ctx)
+
+    assert seen == []
+    assert lib.items()[0].cloud_only
+
+
+def test_video_gets_place_and_size_from_ffprobe(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vids"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"x")
+    monkeypatch.setattr(
+        ctx.deps, "path", lambda n: Path("C:/fake/ffprobe") if n == "ffprobe" else None
+    )
+    monkeypatch.setattr(
+        ffmpeg,
+        "probe_video_info",
+        lambda *_a, **_k: ffmpeg.VideoInfo(
+            datetime(2023, 1, 2, 3, 4, 5), (37.422, -122.084), 1080, 1920
+        ),
+    )
+
+    lib.sync([root], ctx)
+
+    item = lib.items()[0]
+    assert (item.lat, item.lon, item.width, item.height) == (37.422, -122.084, 1080, 1920)
+    assert lib.with_location() == [item]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("+37.4220-122.0840/", (37.422, -122.084)),
+        ("+37.4220-122.0840+012.300/", (37.422, -122.084)),
+        ("-33.8688+151.2093/", (-33.8688, 151.2093)),
+        ("+3725.32-12205.04/", (37.422, -122.084)),
+        ("+372519.2-1220502.4/", (37.422, -122.084)),
+        ("+95.0-122.0/", None),
+        ("nonsense", None),
+        ("", None),
+    ],
+)
+def test_iso6709_parsing(text: str, expected: tuple[float, float] | None) -> None:
+    found = ffmpeg.parse_iso6709(text)
+    if expected is None:
+        assert found is None
+    else:
+        assert found == pytest.approx(expected, abs=1e-3)

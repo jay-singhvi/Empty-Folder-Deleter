@@ -15,6 +15,7 @@ from __future__ import annotations
 import calendar
 import logging
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -36,7 +37,7 @@ from various_tools.core.context import RunContext
 from various_tools.core.media.library import MediaItem, MediaLibrary, SyncReport, library_path
 from various_tools.gui.change_date_dialog import ChangeDateDialog
 from various_tools.gui.library_folders_dialog import LibraryFoldersDialog
-from various_tools.gui.library_model import LibraryModel, library_model
+from various_tools.gui.library_model import LOADING_TEXT, LibraryModel, library_model
 from various_tools.gui.state import AppState
 from various_tools.gui.widgets.filter_bar import FilterBar
 from various_tools.gui.widgets.media_grid import (
@@ -77,11 +78,12 @@ def summary_text(photos: int, videos: int, report: SyncReport | None = None) -> 
 def timeline_order(items: Sequence[MediaItem]) -> list[MediaItem]:
     """Newest month and day first; inside a day oldest first; items without a date last."""
 
-    def key(item: MediaItem) -> tuple[int, float, float, str]:
-        if item.taken is None:
-            return (1, 0.0, 0.0, str(item.path).casefold())
-        day = item.taken.replace(hour=0, minute=0, second=0, microsecond=0)
-        return (0, -day.timestamp(), item.taken.timestamp(), str(item.path).casefold())
+    def key(item: MediaItem) -> tuple[int, int, datetime, str]:
+        taken = item.taken
+        if taken is None:
+            return (1, 0, datetime.min, str(item.path).casefold())
+        # Plain integers and datetimes compare much faster than timestamps (200,000 items).
+        return (0, -taken.toordinal(), taken, str(item.path).casefold())
 
     return sorted(items, key=key)
 
@@ -96,6 +98,7 @@ class TimelinePage(QWidget):
         self.worker: Worker | None = None
         self._closing = False
         self._shown: list[MediaItem] = []
+        self._pending_report: SyncReport | None = None
         self.confirm: Callable[[str, str], bool] | None = None
         self.change_dialog: ChangeDateDialog | None = None
         self.viewer: PhotoViewer | None = None
@@ -188,6 +191,7 @@ class TimelinePage(QWidget):
 
         self.grid.previewToggleRequested.connect(self.toggle_preview)
         self.model.changed.connect(self._model_changed)
+        self.model.loadingChanged.connect(self._loading_changed)
         self._rebuild()
         self.status_label.setText(self._summary())
 
@@ -215,8 +219,14 @@ class TimelinePage(QWidget):
 
     def _model_changed(self) -> None:
         self._rebuild()
-        if self.worker is None:
+        if self._pending_report is not None and not self.model.loading:
+            self._show_report()
+        elif self.worker is None:
             self._set_status(self._summary())
+
+    def _loading_changed(self, loading: bool) -> None:
+        if loading and self.worker is None:
+            self._set_status(LOADING_TEXT)
 
     def _rebuild(self) -> None:
         shown = timeline_order(self.model.shown)
@@ -284,6 +294,8 @@ class TimelinePage(QWidget):
                     return
 
     def _summary(self, report: SyncReport | None = None) -> str:
+        if self.model.loading:
+            return LOADING_TEXT
         shown = self.model.shown
         videos = sum(1 for i in shown if i.kind == "video")
         text = summary_text(len(shown) - videos, videos, report)
@@ -405,8 +417,15 @@ class TimelinePage(QWidget):
             self.progress_bar.setRange(0, 0)
 
     def _update_done(self, report: object) -> None:
-        self.refresh()
         if isinstance(report, SyncReport):
+            self._pending_report = report  # shown once the library has been read again
+        self.refresh()
+        if not self.model.loading:
+            self._show_report()
+
+    def _show_report(self) -> None:
+        report, self._pending_report = self._pending_report, None
+        if report is not None:
             self._set_status(self._summary(report))
             self.status_label.setToolTip("\n".join(report.errors[:50]))
             for note in report.errors:

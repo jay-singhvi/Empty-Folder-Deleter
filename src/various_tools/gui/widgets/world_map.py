@@ -17,8 +17,12 @@ The widget never touches the user's files; the only disk writes are tile cache f
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import math
+import os
+import shutil
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -53,11 +57,74 @@ _DRAG_THRESHOLD_PX = 4
 _MAX_TILES_IN_MEMORY = 256
 _TILE_RETRY_S = 5 * 60  # a failed tile is not asked for again for this long
 _MAX_TILE_FAILURES = 5  # this many failures in a row stop all requests until the source is reset
+_PRUNE_EVERY_BYTES = 5 * 1024 * 1024  # look at the cache size again after this much was written
 
 
 def _now() -> float:
     """Monotonic seconds. A function so tests can replace the clock."""
     return time.monotonic()
+
+
+def tile_source_folder(root: Path, template: str) -> Path:
+    """The folder for the pictures of one map address: a short hash of it, inside ``root``.
+
+    The name starts with a letter so it can never be taken for an old ``<zoom>`` folder.
+    """
+    digest = hashlib.sha256(template.encode("utf-8")).hexdigest()[:16]
+    return root / f"s{digest}"
+
+
+def prune_tile_cache(root: Path, max_bytes: int) -> int:
+    """Delete the oldest files under ``root`` until it holds at most ``max_bytes``.
+
+    Age is the file's modified time (when the picture was downloaded). Empty folders are
+    removed. A missing folder or a file that cannot be removed is ignored. Returns how many
+    files were deleted.
+    """
+    files: list[tuple[float, int, str]] = []
+    total = 0
+    for folder, _dirs, names in os.walk(root):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, path))
+            total += st.st_size
+    if total <= max_bytes:
+        return 0
+    files.sort()
+    removed = 0
+    for _mtime, size, path in files:
+        if total <= max_bytes:
+            break
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        total -= size
+        removed += 1
+    for folder, _dirs, _names in os.walk(root, topdown=False):
+        if folder != str(root):
+            with contextlib.suppress(OSError):
+                os.rmdir(folder)  # only succeeds when empty
+    return removed
+
+
+def remove_legacy_tile_folders(root: Path) -> None:
+    """Delete ``<zoom>`` folders that older versions put straight under ``root``.
+
+    Those pictures were not tied to a map address, so they could belong to another source. It is
+    only a cache; the pictures are downloaded again when needed.
+    """
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.isdigit() and entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path, ignore_errors=True)
 
 
 def lonlat_to_world(lon: float, lat: float) -> tuple[float, float]:
@@ -88,11 +155,24 @@ class Cluster:
 
 def _world_arrays(points: Sequence[tuple[float, float, object]]) -> tuple[Any, Any]:
     n = len(points)
-    xs = np.empty(n, dtype=np.float64)
-    ys = np.empty(n, dtype=np.float64)
-    for i, (lat, lon, _payload) in enumerate(points):
-        xs[i], ys[i] = lonlat_to_world(lon, lat)
+    if n == 0:
+        return np.empty(0), np.empty(0)
+    lats = np.fromiter((p[0] for p in points), dtype=np.float64, count=n)
+    lats = np.clip(lats, -MAX_LAT, MAX_LAT)
+    lons = np.fromiter((p[1] for p in points), dtype=np.float64, count=n)
+    xs = (lons + 180.0) / 360.0
+    ys = 0.5 - np.log(np.tan(np.pi / 4 + np.radians(lats) / 2)) / (2 * np.pi)
     return xs, ys
+
+
+@dataclass
+class _ClusterSet:
+    """The circles of one zoom level, with numpy arrays of where they are and how big."""
+
+    clusters: list[Cluster]
+    wx: Any
+    wy: Any
+    counts: Any
 
 
 def _cluster_world(
@@ -171,7 +251,7 @@ class WorldMap(QWidget):
         self._payloads: list[object] = []
         self._xs: Any = np.empty(0)
         self._ys: Any = np.empty(0)
-        self._cluster_cache: dict[int, list[Cluster]] = {}
+        self._cluster_cache: dict[int, _ClusterSet] = {}
         self._zoom = 1
         self._cx = 0.5
         self._cy = 0.5
@@ -182,6 +262,9 @@ class WorldMap(QWidget):
         self._manager: Any | None = network_manager
         self._template: str | None = None
         self._cache_dir: Path | None = None
+        self._cache_root: Path | None = None
+        self._cache_limit_bytes = 0
+        self._written_since_prune = 0
         self._user_agent = ""
         self._tiles: dict[tuple[int, int, int], QPixmap] = {}
         self._pending: set[tuple[int, int, int]] = set()
@@ -239,6 +322,16 @@ class WorldMap(QWidget):
         hit = self._cluster_at(pos)
         return self.describe(list(hit.members)) if hit is not None else None
 
+    def center_lonlat(self) -> tuple[float, float]:
+        """``(lon, lat)`` of the middle of the view; the longitude is in -180 to 180."""
+        return world_to_lonlat(self._cx, self._cy)
+
+    def screen_to_lonlat(self, pos: QPointF) -> tuple[float, float]:
+        """``(lon, lat)`` under a position of the widget (the longitude is wrapped)."""
+        wx, wy = self._screen_to_world(pos)
+        lon, lat = world_to_lonlat(wx, min(1.0, max(0.0, wy)))
+        return (lon + 180.0) % 360.0 - 180.0, lat
+
     def set_view(self, lat: float, lon: float, zoom: int) -> None:
         self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
         self._cx, self._cy = lonlat_to_world(lon, lat)
@@ -252,16 +345,34 @@ class WorldMap(QWidget):
         self._zoom_by(-1, anchor)
 
     def lonlat_to_screen(self, lon: float, lat: float) -> QPointF:
+        """Where a place is drawn: the copy of the world that is nearest to the view's middle."""
         x, y = lonlat_to_world(lon, lat)
+        x -= math.floor(x - self._cx + 0.5)
         return self._world_to_screen(x, y)
 
     def set_tile_source(
-        self, url_template: str | None, cache_dir: Path | None, user_agent: str
+        self,
+        url_template: str | None,
+        cache_dir: Path | None,
+        user_agent: str,
+        *,
+        cache_root: Path | None = None,
+        cache_limit_mb: int = 200,
     ) -> None:
-        """Turn raster tiles on (a URL template with ``{z}/{x}/{y}``) or off (``None``)."""
+        """Turn raster tiles on (a URL template with ``{z}/{x}/{y}``) or off (``None``).
+
+        Pictures are kept in ``cache_dir``. When ``cache_root`` (the folder that holds the
+        folders of every source) is given, it is kept under ``cache_limit_mb``: the oldest
+        pictures go first, when the source is set and again as new ones are saved.
+        """
         self._template = url_template
         self._cache_dir = cache_dir
         self._user_agent = user_agent
+        self._cache_root = cache_root if url_template is not None else None
+        self._cache_limit_bytes = max(1, cache_limit_mb) * 1024 * 1024
+        self._written_since_prune = 0
+        if self._cache_root is not None:
+            prune_tile_cache(self._cache_root, self._cache_limit_bytes)
         self._tiles.clear()
         self._pending.clear()
         self._failed.clear()
@@ -289,8 +400,16 @@ class WorldMap(QWidget):
         )
 
     def _clamp_center(self) -> None:
-        self._cx = min(1.0, max(0.0, self._cx))
+        """The map wraps sideways (across the 180 degree line) and stops at the poles."""
+        self._cx %= 1.0
         self._cy = min(1.0, max(0.0, self._cy))
+
+    def _copies(self, margin_px: float) -> range:
+        """Which sideways copies of the world (shifts of whole world widths) can be on screen."""
+        s = self._scale()
+        left = self._cx - (self.width() / 2 + margin_px) / s
+        right = self._cx + (self.width() / 2 + margin_px) / s
+        return range(math.floor(left) - 1, math.floor(right) + 1)
 
     def _zoom_by(self, delta: int, anchor: QPointF | None) -> None:
         new = max(MIN_ZOOM, min(MAX_ZOOM, self._zoom + delta))
@@ -306,16 +425,26 @@ class WorldMap(QWidget):
         self._clamp_center()
         self.update()
 
-    def _clusters(self) -> list[Cluster]:
-        clusters = self._cluster_cache.get(self._zoom)
-        if clusters is None:
+    def _cluster_set(self) -> _ClusterSet:
+        found = self._cluster_cache.get(self._zoom)
+        if found is None:
             clusters = _cluster_world(self._xs, self._ys, self._payloads, self._zoom, self.CELL_PX)
-            self._cluster_cache[self._zoom] = clusters
-        return clusters
+            wx, wy = _world_arrays([(c.lat, c.lon, None) for c in clusters])
+            counts = np.fromiter((len(c.members) for c in clusters), dtype=np.int64)
+            found = _ClusterSet(clusters, wx, wy, counts)
+            self._cluster_cache[self._zoom] = found
+        return found
+
+    def _clusters(self) -> list[Cluster]:
+        return self._cluster_set().clusters
 
     @staticmethod
     def _radius(count: int) -> float:
         return 10.0 + 4.0 * math.log10(max(1, count)) * 2
+
+    @staticmethod
+    def _radii(counts: Any) -> Any:
+        return 10.0 + 8.0 * np.log10(np.maximum(1, counts))
 
     # ---- interaction -------------------------------------------------------------------------
 
@@ -374,14 +503,24 @@ class WorldMap(QWidget):
         event.accept()
 
     def _cluster_at(self, pos: QPointF) -> Cluster | None:
-        best: Cluster | None = None
+        found = self._cluster_set()
+        if not found.clusters:
+            return None
+        s = self._scale()
+        ox = self.width() / 2 - self._cx * s
+        oy = self.height() / 2 - self._cy * s
+        py = found.wy * s + oy
+        radii = self._radii(found.counts)
+        best: int | None = None
         best_d = math.inf
-        for c in self._clusters():
-            p = self.lonlat_to_screen(c.lon, c.lat)
-            d = math.hypot(p.x() - pos.x(), p.y() - pos.y())
-            if d <= self._radius(len(c.members)) and d < best_d:
-                best, best_d = c, d
-        return best
+        for k in self._copies(0.0):
+            px = (found.wx + k) * s + ox
+            d = np.hypot(px - pos.x(), py - pos.y())
+            d = np.where(d <= radii, d, np.inf)
+            i = int(np.argmin(d))
+            if d[i] < best_d:
+                best, best_d = i, float(d[i])
+        return found.clusters[best] if best is not None else None
 
     # ---- tiles -------------------------------------------------------------------------------
 
@@ -453,6 +592,11 @@ class WorldMap(QWidget):
                 path.write_bytes(data)
             except OSError:
                 pass  # the cache is only a convenience
+            else:
+                self._written_since_prune += len(data)
+                if self._cache_root is not None and self._written_since_prune >= _PRUNE_EVERY_BYTES:
+                    self._written_since_prune = 0
+                    prune_tile_cache(self._cache_root, self._cache_limit_bytes)
         if self._template is not None:
             self._remember(key, pix)
             self.update()
@@ -485,14 +629,15 @@ class WorldMap(QWidget):
         ox = self.width() / 2 - self._cx * s
         oy = self.height() / 2 - self._cy * s
         view = QRectF(self.rect()).adjusted(-50, -50, 50, 50)
-        for ring in _land_world():
-            xs = ring[:, 0] * s + ox
-            ys = ring[:, 1] * s + oy
-            if xs.max() < view.left() or xs.min() > view.right():
-                continue
-            if ys.max() < view.top() or ys.min() > view.bottom():
-                continue
-            painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in zip(xs, ys, strict=True)]))
+        for k in self._copies(50.0):
+            for ring in _land_world():
+                xs = (ring[:, 0] + k) * s + ox
+                ys = ring[:, 1] * s + oy
+                if xs.max() < view.left() or xs.min() > view.right():
+                    continue
+                if ys.max() < view.top() or ys.min() > view.bottom():
+                    continue
+                painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in zip(xs, ys, strict=True)]))
 
     def _paint_tiles(self, painter: QPainter) -> None:
         z = self._zoom
@@ -500,13 +645,13 @@ class WorldMap(QWidget):
         s = self._scale()
         left, top = self._screen_to_world(QPointF(0, 0))
         right, bottom = self._screen_to_world(QPointF(self.width(), self.height()))
-        x0 = max(0, math.floor(left * n))
-        x1 = min(n - 1, math.floor(right * n))
+        x0 = math.floor(left * n)
+        x1 = math.floor(right * n)
         y0 = max(0, math.floor(top * n))
         y1 = min(n - 1, math.floor(bottom * n))
         for tx in range(x0, x1 + 1):
             for ty in range(y0, y1 + 1):
-                pix = self._tile(z, tx, ty)
+                pix = self._tile(z, tx % n, ty)  # sideways, the world repeats
                 if pix is None:
                     continue
                 p = self._world_to_screen(tx / n, ty / n)
@@ -523,22 +668,26 @@ class WorldMap(QWidget):
         s = self._scale()
         ox = self.width() / 2 - self._cx * s
         oy = self.height() / 2 - self._cy * s
-        for c in self._clusters():
-            wx, wy = lonlat_to_world(c.lon, c.lat)
-            px, py = wx * s + ox, wy * s + oy
-            if not view.contains(px, py):
-                continue
-            count = len(c.members)
-            r = self._radius(count)
-            painter.setPen(ring)
-            painter.drawEllipse(QPointF(px, py), r, r)
-            if count > 1:
-                painter.setPen(label)
-                painter.drawText(
-                    QRectF(px - r, py - r, 2 * r, 2 * r),
-                    Qt.AlignmentFlag.AlignCenter,
-                    _short_count(count),
-                )
+        found = self._cluster_set()
+        if not found.clusters:
+            return
+        py = found.wy * s + oy
+        row = (py >= view.top()) & (py <= view.bottom())
+        for k in self._copies(40.0):
+            px = (found.wx + k) * s + ox
+            for i in np.flatnonzero(row & (px >= view.left()) & (px <= view.right())).tolist():
+                count = int(found.counts[i])
+                r = self._radius(count)
+                cx, cy = float(px[i]), float(py[i])
+                painter.setPen(ring)
+                painter.drawEllipse(QPointF(cx, cy), r, r)
+                if count > 1:
+                    painter.setPen(label)
+                    painter.drawText(
+                        QRectF(cx - r, cy - r, 2 * r, 2 * r),
+                        Qt.AlignmentFlag.AlignCenter,
+                        _short_count(count),
+                    )
 
     def _paint_highlight(self, painter: QPainter, pal: QPalette) -> None:
         if self._highlight is None:

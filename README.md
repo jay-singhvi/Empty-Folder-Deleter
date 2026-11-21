@@ -246,6 +246,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - The app icon is drawn in code (`src/various_tools/gui/icon.py`).
+- Place names: GeoNames (geonames.org), CC BY 4.0.
 
 ## Support
 

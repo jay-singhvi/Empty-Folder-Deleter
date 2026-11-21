@@ -15,6 +15,7 @@ instead, which works for any name.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import subprocess
@@ -188,6 +189,109 @@ def exiftool_capture_time(
         if parsed:
             return parsed
     return None
+
+
+@dataclass(frozen=True)
+class RawInfo:
+    """What ExifTool reports for one RAW file: capture time, GPS position and pixel size."""
+
+    capture_time: datetime | None = None
+    gps: tuple[float, float] | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+EXIFTOOL_BATCH_SIZE = 50
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _positive_int(*values: object) -> int | None:
+    for value in values:
+        number = _number(value)
+        if number is not None and number >= 1:
+            return int(number)
+    return None
+
+
+def _raw_info_from_record(record: dict[str, Any]) -> RawInfo:
+    capture: datetime | None = None
+    for tag in ("DateTimeOriginal", "CreateDate"):  # same order as exiftool_capture_time
+        capture = parse_exif_datetime(record.get(tag))
+        if capture:
+            break
+    lat, lon = _number(record.get("GPSLatitude")), _number(record.get("GPSLongitude"))
+    gps = None
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+        gps = (round(lat, 6), round(lon, 6))
+    return RawInfo(
+        capture_time=capture,
+        gps=gps,
+        width=_positive_int(record.get("ExifImageWidth"), record.get("ImageWidth")),
+        height=_positive_int(record.get("ExifImageHeight"), record.get("ImageHeight")),
+    )
+
+
+def _same_file(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def exiftool_raw_info(
+    exiftool: Path,
+    paths: Sequence[Path],
+    timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
+    *,
+    batch_size: int = EXIFTOOL_BATCH_SIZE,
+) -> dict[Path, RawInfo]:
+    """Date, GPS and size of RAW files, one ExifTool process per chunk of ``batch_size`` files.
+
+    Files ExifTool could not read are missing from the result. The caller checks OneDrive
+    state first (this opens the files). A chunk that fails or times out is logged and skipped.
+    """
+    found: dict[Path, RawInfo] = {}
+    for start in range(0, len(paths), max(1, batch_size)):
+        chunk = list(paths[start : start + max(1, batch_size)])
+        args = [
+            "-json",
+            "-n",
+            "-DateTimeOriginal",
+            "-CreateDate",
+            "-GPSLatitude",
+            "-GPSLongitude",
+            "-ExifImageWidth",
+            "-ExifImageHeight",
+            "-ImageWidth",
+            "-ImageHeight",
+            *(str(p) for p in chunk),
+        ]
+        try:
+            result = run_exiftool(exiftool, args, timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("ExifTool timed out on a batch of %d files", len(chunk))
+            continue
+        except (OSError, ValueError) as exc:
+            log.warning("ExifTool failed on a batch of %d files: %s", len(chunk), exc)
+            continue
+        try:
+            records = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            log.warning("ExifTool gave unreadable output for a batch of %d files", len(chunk))
+            continue
+        if not isinstance(records, list):
+            continue
+        for record in records:  # pyright: ignore[reportUnknownVariableType]
+            if not isinstance(record, dict):
+                continue
+            rec: dict[str, Any] = record  # pyright: ignore[reportUnknownVariableType]
+            source = str(rec.get("SourceFile", ""))
+            match = next((p for p in chunk if _same_file(str(p), source)), None)
+            if match is not None:
+                found[match] = _raw_info_from_record(rec)
+    return found
 
 
 def capture_time(

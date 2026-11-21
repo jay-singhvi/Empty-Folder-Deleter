@@ -13,9 +13,11 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -138,6 +140,10 @@ def creation_time(
     except MediaError as exc:
         log.warning("No creation time for %s: %s", path, exc)
         return None
+    return _creation_from_probe(data)
+
+
+def _creation_from_probe(data: dict[str, Any]) -> datetime | None:
     raw: object = as_dict(as_dict(data.get("format")).get("tags")).get("creation_time")
     if not raw:
         for stream in as_list(data.get("streams")):
@@ -155,6 +161,98 @@ def creation_time(
         return parsed.astimezone().replace(tzinfo=None)
     except OverflowError, OSError, ValueError:
         return None
+
+
+_ISO6709 = re.compile(r"^\s*([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
+
+
+def _iso6709_part(text: str, degree_digits: int) -> float | None:
+    """One ISO 6709 coordinate: ``+DD.DDD``, ``+DDMM.MM`` or ``+DDMMSS.SS`` (and the longitude)."""
+    sign = -1.0 if text.startswith("-") else 1.0
+    digits = text[1:]
+    whole = digits.split(".")[0]
+    try:
+        value = float(digits)
+        extra = len(whole) - degree_digits
+        if extra == 0:
+            degrees = value
+        elif extra == 2:
+            degrees = int(whole[:degree_digits]) + float(digits[degree_digits:]) / 60.0
+        elif extra == 4:
+            degrees = (
+                int(whole[:degree_digits])
+                + int(whole[degree_digits : degree_digits + 2]) / 60.0
+                + float(digits[degree_digits + 2 :]) / 3600.0
+            )
+        else:
+            return None
+    except ValueError:
+        return None
+    return sign * degrees
+
+
+def parse_iso6709(text: object) -> tuple[float, float] | None:
+    """``(lat, lon)`` from an ISO 6709 string such as ``+37.4220-122.0840/``, else None."""
+    match = _ISO6709.match(str(text or ""))
+    if match is None:
+        return None
+    lat = _iso6709_part(match.group(1), 2)
+    lon = _iso6709_part(match.group(2), 3)
+    if lat is None or lon is None or abs(lat) > 90 or abs(lon) > 180:
+        return None
+    return round(lat, 6), round(lon, 6)
+
+
+@dataclass(frozen=True)
+class VideoInfo:
+    """What ffprobe reports about a video: when it was made, where, and its picture size."""
+
+    creation_time: datetime | None = None
+    gps: tuple[float, float] | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+_LOCATION_TAGS = ("com.apple.quicktime.location.iso6709", "location")
+
+
+def _gps_from_tags(tags: dict[str, Any]) -> tuple[float, float] | None:
+    lowered = {str(k).lower(): v for k, v in tags.items()}
+    for name in _LOCATION_TAGS:
+        for key, value in lowered.items():
+            if key == name or key.startswith(name + "-"):  # "location-eng" and the like
+                found = parse_iso6709(value)
+                if found is not None:
+                    return found
+    return None
+
+
+def probe_video_info(ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOUT_S) -> VideoInfo:
+    """Creation time, GPS tags and display size from one ffprobe call. Failures give empty info.
+
+    Reads the ``location`` and ``com.apple.quicktime.location.ISO6709`` tags (format or video
+    stream) and the video stream's width and height (swapped for a 90 or 270 degree rotation).
+    """
+    try:
+        data = ffprobe_json(ffprobe, path, timeout=timeout)
+    except MediaError as exc:
+        log.warning("No video details for %s: %s", path, exc)
+        return VideoInfo()
+    streams = as_list(data.get("streams"))
+    stream = as_dict(streams[0]) if streams else {}
+    gps = _gps_from_tags(as_dict(as_dict(data.get("format")).get("tags")))
+    if gps is None:
+        gps = _gps_from_tags(as_dict(stream.get("tags")))
+    width = height = None
+    try:
+        width, height = int(stream["width"]), int(stream["height"])
+        if width < 1 or height < 1:
+            width = height = None
+        elif _rotation_degrees(stream) in (90, 270):
+            width, height = height, width
+    except KeyError, TypeError, ValueError:
+        width = height = None
+    return VideoInfo(_creation_from_probe(data), gps, width, height)
 
 
 def grab_frame(

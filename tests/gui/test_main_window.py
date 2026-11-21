@@ -112,6 +112,23 @@ def test_a_duplicates_scan_is_handed_to_the_photo_library(
     assert seen == ["duplicates"]
 
 
+def test_a_recipe_step_scan_and_copy_reach_the_window(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core.plan import Plan
+    from various_tools.gui.library_model import LibraryModel
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        LibraryModel, "update_duplicates", lambda _self, plan: seen.append(plan.tool) or 0
+    )
+    recipes = window.recipes()
+    recipes.scanFinished.emit(Plan(tool="duplicates", roots=[]))
+    assert seen == ["duplicates"]
+    recipes.clipboardCopied.emit("Copied 3 paths.")
+    assert "Copied 3 paths." in window.statusBar().currentMessage()
+
+
 def test_about_credits_the_place_names(window: MainWindow) -> None:
     from various_tools.core.media.places import PLACES_ATTRIBUTION
 

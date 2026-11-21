@@ -44,6 +44,7 @@ from various_tools.core.recipe import (
     RecipeStep,
     check_step,
     new_recipe_run_id,
+    result_failed,
     recipe_tag,
     starter_recipes,
     step_title,
@@ -112,6 +113,7 @@ class _Run:
     skipped: int = 0
     stopping: bool = False
     step_applied: bool = False
+    step_problem: str = ""  # the step's apply did not finish cleanly: why
     page: ToolPage | None = None
 
 
@@ -122,6 +124,8 @@ class RecipesPage(QWidget):
     runUndone = Signal(int)
     busyChanged = Signal(bool)
     runFinished = Signal(str)
+    scanFinished = Signal(object)  # a runner step's scan is done (the plan), like a tool page's
+    clipboardCopied = Signal(str)  # a runner step copied its result to the clipboard
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -440,6 +444,13 @@ class RecipesPage(QWidget):
         recipe, index = self.current_recipe(), self.current_step_index()
         if recipe is None or index < 0 or self.running:
             return False
+        if recipe.steps[index].tool not in self.state.tools:
+            self.inform(
+                "Change step",
+                f"The tool {recipe.steps[index].tool!r} is not available any more, so this step "
+                "cannot be changed. Remove it and add a new step instead.",
+            )
+            return False
         step = self.edit_step(recipe.steps[index])
         if step is None:
             return False
@@ -517,8 +528,11 @@ class RecipesPage(QWidget):
         page.runApplied.connect(lambda run_id, p=page: self._page_applied(p, run_id))
         page.runUndone.connect(self.runUndone)
         page.busyChanged.connect(lambda busy, p=page: self._page_busy(p, busy))
+        page.scanFinished.connect(self.scanFinished)
+        page.clipboardCopied.connect(self.clipboardCopied)
         run.page = page
         run.step_applied = False
+        run.step_problem = ""
         self._runner_layout.addWidget(page, 1)
         self.step_label.setText(
             f"{run.recipe_name}: step {run.index + 1} of {len(run.steps)}: "
@@ -532,9 +546,29 @@ class RecipesPage(QWidget):
         run = self.run
         if run is None or run.page is not page:
             return
-        run.step_applied = True
-        run.applied += 1
+        problem = self._apply_problem(page)
+        if problem:
+            run.step_problem = problem  # the recipe stops once the page is idle again
+        else:
+            run.step_applied = True
+            run.applied += 1
         self.runApplied.emit(run_id)
+
+    @staticmethod
+    def _apply_problem(page: ToolPage) -> str:
+        """Why the step's apply did not finish cleanly, or "" when it did (as in the core run
+        and the CLI: cancelled, or any failed action, stops the recipe)."""
+        result = page.result
+        if result is None:
+            return ""
+        applied = page.applied_plan
+        selected = len(applied.selected_actions()) if applied is not None else 0
+        if result.status == "cancelled":
+            return "the apply was cancelled"
+        if result.status != "done" or result_failed(result, selected):
+            failed = result.count("failed")
+            return f"{failed} action(s) failed" if failed else "the apply did not finish"
+        return ""
 
     def _page_busy(self, page: ToolPage, busy: bool) -> None:
         run = self.run
@@ -546,6 +580,9 @@ class RecipesPage(QWidget):
         # The worker is done (after its message box, if any). Go on only after an apply or a stop.
         if run.stopping:
             QTimer.singleShot(0, lambda: self._end("Stopped."))
+        elif run.step_problem:
+            problem = f"Stopped at step {run.index + 1}: {run.step_problem}."
+            QTimer.singleShot(0, lambda: self._end(problem))
         elif run.step_applied:
             QTimer.singleShot(0, self._advance)
 
@@ -609,7 +646,10 @@ class RecipesPage(QWidget):
         )
         self.status_label.setText(summary)
         self.right.setCurrentWidget(self.editor)
-        self._recipe_chosen()
+        # A step may have been saved from a tool page during the run: read the file again, so the
+        # next edit does not write the old list over it.
+        self.store.reload()
+        self._fill_list(run.recipe_name)
         self.busyChanged.emit(False)
         self.runFinished.emit(summary)
 

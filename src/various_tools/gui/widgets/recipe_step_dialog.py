@@ -84,6 +84,8 @@ class RecipeStepDialog(QDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
 
+        # A step whose tool is gone can only be removed: never turn it into another tool.
+        self._missing_tool = step is not None and step.tool not in tools
         if step is not None:
             index = self.tool_combo.findData(step.tool)
             if index >= 0:
@@ -91,6 +93,12 @@ class RecipeStepDialog(QDialog):
         self.tool_combo.currentIndexChanged.connect(lambda _i: self._show_tool(None))
         self.other_folders_check.toggled.connect(self._other_folders_toggled)
         self._show_tool(step)
+        if self._missing_tool and step is not None:
+            self.description.setText(
+                f"The tool {step.tool!r} is not available any more. This step can only be removed."
+            )
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+            self._scroll.setEnabled(False)
 
     @property
     def form(self) -> SchemaForm | None:
@@ -134,7 +142,7 @@ class RecipeStepDialog(QDialog):
 
     def accept(self) -> None:
         tool, form = self._tool, self._form
-        if tool is None or form is None:
+        if tool is None or form is None or self._missing_tool:
             return
         name = workspace_field(tool)
         own = bool(name) and self.other_folders_check.isChecked()

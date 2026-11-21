@@ -430,3 +430,88 @@ def test_a_plain_run_has_no_recipe_button(
     qtbot.waitUntil(lambda: not history.loading, timeout=15000)
     assert history.undo_recipe_button.isHidden()
     assert "Recipe" not in history.runs_view.item(0, 1).text()  # type: ignore[union-attr]
+
+
+def test_a_step_whose_tool_is_missing_cannot_be_changed(
+    make_page: Callable[..., RecipesPage], dialogs: Dialogs, gui_state: AppState
+) -> None:
+    page = make_page(Recipe("R", [RecipeStep("gone_tool", {"x": 1})]))
+    asked: list[object] = []
+    page.edit_step = lambda step: asked.append(step)
+    page.steps_list.setCurrentRow(0)
+    assert not page.change_step()
+    assert not asked and "not available" in dialogs.informs[-1][1]
+    assert page.store.recipes[0].steps[0].tool == "gone_tool"
+    dialog = RecipeStepDialog(gui_state.tools, Path.home(), RecipeStep("gone_tool"))
+    dialog.accept()
+    assert dialog.result_step is None
+
+
+def test_a_step_saved_during_a_run_is_not_overwritten(
+    qtbot: QtBot,
+    make_page: Callable[..., RecipesPage],
+    gui_state: AppState,
+    tmp_path: Path,
+) -> None:
+    from various_tools.gui.recipe_store import RecipeStore
+
+    gui_state.set_workspace([_tree(tmp_path)])
+    page = make_page(_tidy())
+    assert page.run_recipe()
+    _wait_scanned(qtbot, page)
+    other = RecipeStore(gui_state.settings_path)  # a tool page saved a step meanwhile
+    other.add_step("Tidy", RecipeStep("temp_cleaner"))
+    assert page.stop()
+    assert [s.tool for s in page.store.recipes[0].steps] == [
+        "empty_files",
+        "empty_folders",
+        "temp_cleaner",
+    ]
+    page.steps_list.setCurrentRow(0)
+    assert page.move_step(1)
+    assert len(_saved(gui_state)[0].steps) == 3
+
+
+def test_the_runner_relays_the_steps_scan_and_clipboard(
+    qtbot: QtBot,
+    make_page: Callable[..., RecipesPage],
+    gui_state: AppState,
+    tmp_path: Path,
+) -> None:
+    gui_state.set_workspace([_tree(tmp_path)])
+    page = make_page(_tidy())
+    plans: list[object] = []
+    copied: list[str] = []
+    page.scanFinished.connect(plans.append)
+    page.clipboardCopied.connect(copied.append)
+    assert page.run_recipe()
+    runner = _wait_scanned(qtbot, page)
+    assert len(plans) == 1
+    runner.clipboardCopied.emit("Copied.")
+    assert copied == ["Copied."]
+    assert page.stop()
+
+
+def test_a_step_that_did_not_finish_cleanly_stops_the_recipe(
+    qtbot: QtBot,
+    make_page: Callable[..., RecipesPage],
+    gui_state: AppState,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from various_tools.core.plan import ActionOutcome, RunResult
+
+    root = _tree(tmp_path)
+    gui_state.set_workspace([root])
+    page = make_page(_tidy())
+    finished: list[str] = []
+    page.runFinished.connect(finished.append)
+    assert page.run_recipe()
+    first = _wait_scanned(qtbot, page)
+    failed = RunResult(1, "partial", [ActionOutcome(1, "trash", "failed", "x", None, "locked")])
+    monkeypatch.setattr(type(first.tool), "apply", lambda _self, _plan, _ctx: failed)
+    assert first.apply() is not None
+    qtbot.waitUntil(lambda: page.run is None, timeout=60000)
+    assert finished and "Stopped at step 1: 1 action(s) failed" in finished[0]
+    assert "0 step(s) applied" in finished[0]
+    assert page.run is None  # step 2 was never opened

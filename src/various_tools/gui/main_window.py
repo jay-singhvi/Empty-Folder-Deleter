@@ -463,6 +463,7 @@ class MainWindow(QMainWindow):
             page.runUndone.connect(self._run_undone)
             page.busyChanged.connect(self._busy_changed)
             page.scanFinished.connect(self._scan_finished)
+            page.clipboardCopied.connect(self._clipboard_copied)
             self.stack.addWidget(page)
             self.tool_pages[tool_id] = page
         return page
@@ -474,6 +475,8 @@ class MainWindow(QMainWindow):
             page.runApplied.connect(lambda _run: self.history_page.reload())
             page.runUndone.connect(self._run_undone)
             page.busyChanged.connect(self._busy_changed)
+            page.scanFinished.connect(self._scan_finished)
+            page.clipboardCopied.connect(self._clipboard_copied)
             self.stack.addWidget(page)
             self.recipes_page = page
         else:
@@ -532,6 +535,9 @@ class MainWindow(QMainWindow):
         if page is not None:
             page.set_folders([str(folder) for folder in folders])
         return page
+
+    def _clipboard_copied(self, message: str) -> None:
+        self.statusBar().showMessage(message, 5000)
 
     def _scan_finished(self, plan: object) -> None:
         """A Duplicate Finder scan is remembered by the photo library, so the Timeline can show

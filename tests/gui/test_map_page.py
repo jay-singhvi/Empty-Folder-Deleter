@@ -227,3 +227,22 @@ def test_focus_item_says_when_it_cleared_a_filter(
     page.model.set_filter(MediaFilter(text="paris"))
     assert page.focus_item(root / "rome.jpg")
     assert "filter was cleared" in page.status_label.text()
+
+
+def test_tiles_use_a_folder_per_source_and_the_old_layout_is_removed(
+    qtbot: QtBot, gui_state: AppState
+) -> None:
+    from various_tools.gui.map_page import TILE_FOLDER
+    from various_tools.gui.widgets.world_map import tile_source_folder
+
+    root = gui_state.settings.resolved_cache_folder() / TILE_FOLDER
+    (root / "4" / "2").mkdir(parents=True)
+    (root / "4" / "2" / "1.png").write_bytes(b"old")
+    page = _page(qtbot, gui_state)
+
+    gui_state.update_settings(map_online_tiles=True, map_tile_cache_mb=50)
+
+    assert page.map.tiles_enabled
+    qtbot.waitUntil(lambda: not (root / "4").exists())  # removed in the background
+    assert page.map._cache_dir == tile_source_folder(root, gui_state.settings.map_tile_url)  # pyright: ignore[reportPrivateUsage]
+    assert page.map._cache_limit_bytes == 50 * 1024 * 1024  # pyright: ignore[reportPrivateUsage]

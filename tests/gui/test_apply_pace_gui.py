@@ -113,7 +113,7 @@ def test_dialog_restores_the_remembered_choice(qtbot: QtBot) -> None:
     dialog = ApplyDialog(ApplyAsk("t", "s", 100), saved)
     qtbot.addWidget(dialog)
     assert dialog.pace() == Pace(25, 180)
-    assert dialog.values() == saved
+    assert dialog.values() == saved | {"wait_for_upload": True, "upload_minutes": 30}
     junk = ApplyDialog(ApplyAsk("t", "s", 100), {"batch_size": "x"})
     qtbot.addWidget(junk)
     assert junk.pace() is None
@@ -272,3 +272,58 @@ def test_a_remembered_batches_choice_is_preselected_only_when_it_applies() -> No
     assert pace_to_preselect(all_at_once, touches_onedrive=True, picked_this_session=True) == (
         all_at_once
     )
+
+
+# ----- wait for the OneDrive upload --------------------------------------------------------------
+
+
+def _ask(touches: bool) -> ApplyAsk:
+    return ApplyAsk("t", "s", 100, touches_onedrive=touches)
+
+
+def test_upload_checkbox_is_hidden_unless_the_plan_touches_onedrive(qtbot: QtBot) -> None:
+    plain = ApplyDialog(_ask(False))
+    qtbot.addWidget(plain)
+    assert plain.upload_check.isHidden()
+    assert plain.pace() is None
+    plain.batch_radio.setChecked(True)
+    pace = plain.pace()
+    assert pace is not None and pace.wait_for_upload is False
+
+
+def test_upload_checkbox_is_on_by_default_with_batches_on_onedrive(qtbot: QtBot) -> None:
+    dialog = ApplyDialog(_ask(True))
+    qtbot.addWidget(dialog)
+    assert not dialog.upload_check.isHidden() and dialog.upload_check.isChecked()
+    assert not dialog.upload_check.isEnabled()  # all at once: nothing to wait between
+    dialog.batch_radio.setChecked(True)
+    assert dialog.upload_check.isEnabled()
+    assert dialog.pace() == Pace(50, 300, wait_for_upload=True, upload_timeout_s=1800)
+    dialog.upload_spin.setValue(5)
+    dialog.upload_check.setChecked(False)
+    assert dialog.pace() == Pace(50, 300, upload_timeout_s=300.0)
+
+
+def test_upload_choice_is_remembered(qtbot: QtBot) -> None:
+    dialog = ApplyDialog(_ask(True))
+    qtbot.addWidget(dialog)
+    dialog.batch_radio.setChecked(True)
+    dialog.upload_spin.setValue(12)
+    values = dialog.values()
+    assert values["wait_for_upload"] is True and values["upload_minutes"] == 12
+    again = ApplyDialog(_ask(True), values)
+    qtbot.addWidget(again)
+    assert again.upload_spin.value() == 12 and again.upload_check.isChecked()
+    off = ApplyDialog(_ask(True), values | {"wait_for_upload": False})
+    qtbot.addWidget(off)
+    assert not off.upload_check.isChecked()
+
+
+def test_an_old_remembered_choice_without_the_upload_keys_still_loads(qtbot: QtBot) -> None:
+    old = {"mode": "batches", "batch_size": 25, "wait": 3, "unit": "minutes"}
+    dialog = ApplyDialog(_ask(True), old)
+    qtbot.addWidget(dialog)
+    assert dialog.upload_check.isChecked() and dialog.upload_spin.value() == 30
+    junk = ApplyDialog(_ask(True), old | {"upload_minutes": "x", "wait_for_upload": "maybe"})
+    qtbot.addWidget(junk)
+    assert junk.upload_spin.value() == 30

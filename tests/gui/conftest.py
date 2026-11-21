@@ -28,6 +28,7 @@ from various_tools.core import recycle as recycle_module
 from various_tools.gui import app as gui_app
 from various_tools.gui import history_page as history_module
 from various_tools.gui import workers as workers_module
+from various_tools.gui.library_model import LibraryModel
 from various_tools.gui.main_window import MainWindow
 from various_tools.gui.shell import FakeRegistry
 from various_tools.gui.state import AppState
@@ -280,3 +281,9 @@ def undo(wait_idle: Callable[[ToolPage], None]) -> Callable[[ToolPage], None]:
         wait_idle(page)
 
     return _undo
+
+
+@pytest.fixture(autouse=True)
+def _library_reads_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most tests want the library read when they ask; the worker path has its own tests."""
+    monkeypatch.setattr(LibraryModel, "synchronous", True)

@@ -17,7 +17,12 @@ from various_tools.core.onedrive import SyncStatus
 from various_tools.core.plan import ActionKind, Plan
 from various_tools.core.settings import Settings
 from various_tools.tools.base import discover
-from various_tools.tools.wrong_extension import TOOL, WrongExtensionOptions
+from various_tools.tools.wrong_extension import (
+    TOOL,
+    WrongExtensionOptions,
+    set_many_selected,
+    set_selected,
+)
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 32
@@ -219,3 +224,177 @@ def test_protected_roots_are_refused(tmp_path: Path) -> None:
         WrongExtensionOptions.model_validate({"roots": [Path(tmp_path.anchor)]}), _ctx(tmp_path)
     )
     assert plan.actions == [] and plan.roots == [] and plan.notes
+
+
+# ----- sidecar files go with their file --------------------------------------------------------
+
+SIDE = b"sidecar"
+
+
+def test_name_dot_ext_sidecars_follow_the_rename_case_insensitively(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "IMG_1.jpg", PNG)
+    _write(root / "img_1.JPG.XMP", SIDE)  # other letter case: matched too
+    _write(root / "other.jpg.xmp", SIDE)  # not ours
+    before = _files(root)
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    renames = _renames(plan, root)
+    assert renames["IMG_1.jpg"] == "IMG_1.png"
+    assert renames["img_1.JPG.XMP"] == "IMG_1.png.XMP"
+    assert "other.jpg.xmp" not in renames
+    result = TOOL.apply(plan, ctx)
+    assert result.status == "done", [o.detail for o in result.outcomes]
+    assert "IMG_1.png" in _files(root) and "IMG_1.png.XMP" in _files(root)
+    assert {a.kind for a in journal.actions(result.run_id)} == {"rename"}
+    report = undo_run(journal, result.run_id)
+    assert report.failed == () and report.skipped == ()
+    assert _files(root) == before
+
+
+def test_a_stem_sidecar_is_left_alone_when_another_file_shares_the_stem(
+    tmp_path: Path, root: Path
+) -> None:
+    _write(root / "photo.jpg", PNG)
+    _write(root / "photo.png", PNG)  # forces photo_dup1.png, and may own photo.xmp itself
+    for ext in (".xmp", ".aae", ".thm"):
+        _write(root / f"photo{ext}", SIDE)
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert _renames(plan, root) == {"photo.jpg": "photo_dup1.png"}
+
+
+def test_a_stem_sidecar_stays_when_the_stem_does_not_change(tmp_path: Path, root: Path) -> None:
+    _write(root / "photo.jpg", PNG)
+    _write(root / "photo.xmp", SIDE)
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert _renames(plan, root) == {"photo.jpg": "photo.png"}
+
+
+def test_a_sidecar_whose_new_name_is_taken_is_skipped_and_noted(tmp_path: Path, root: Path) -> None:
+    _write(root / "IMG_1.jpg", PNG)
+    _write(root / "IMG_1.jpg.xmp", SIDE)
+    _write(root / "IMG_1.png.xmp", b"already here")
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert _renames(plan, root) == {"IMG_1.jpg": "IMG_1.png"}
+    assert any("IMG_1.jpg.xmp" in note and "skipped" in note for note in plan.notes)
+
+
+def test_a_file_and_its_sidecars_form_one_group_so_they_tick_together(
+    tmp_path: Path, root: Path
+) -> None:
+    _write(root / "a.jpg", PNG)
+    _write(root / "a.jpg.xmp", SIDE)
+    _write(root / "b.jpg", PNG)
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    by_src = {a.src.name: a for a in plan.actions if a.src is not None}
+    assert by_src["a.jpg"].group_id is not None
+    assert by_src["a.jpg"].group_id == by_src["a.jpg.xmp"].group_id
+    assert by_src["b.jpg"].group_id is None
+    assert "a.jpg" in by_src["a.jpg.xmp"].reason
+
+
+def test_mp2_content_named_mp3_is_renamed_to_mp2(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    header = b"\xff\xfd\x80\x00"
+    frame = header + b"\x00" * (144 * 128000 // 44100 - 4)
+    _write(root / "song.mp3", frame * 3)
+    _write(root / "tagged.flac", b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 3000)
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    assert _renames(plan, root) == {"song.mp3": "song.mp2"}
+
+
+# ----- review fixes: sidecars stay tied to their file -----------------------------------------
+
+
+def _pair_plan(tmp_path: Path, root: Path) -> Plan:
+    _write(root / "a.jpg", PNG)
+    _write(root / "a.jpg.xmp", SIDE)
+    _write(root / "b.jpg", PNG)
+    return TOOL.scan(_opts(root), _ctx(tmp_path))
+
+
+def test_ticking_a_file_ticks_its_sidecars_and_a_sidecar_needs_its_file(
+    tmp_path: Path, root: Path
+) -> None:
+    plan = _pair_plan(tmp_path, root)
+    by = {a.src.name: a for a in plan.actions if a.src is not None}
+    set_selected(plan, by["a.jpg"], False)
+    assert not by["a.jpg"].selected and not by["a.jpg.xmp"].selected and by["b.jpg"].selected
+    set_selected(plan, by["a.jpg.xmp"], True)  # its file is not ticked: stays unticked
+    assert not by["a.jpg.xmp"].selected
+    set_selected(plan, by["a.jpg"], True)
+    assert by["a.jpg"].selected and by["a.jpg.xmp"].selected
+    set_selected(plan, by["a.jpg.xmp"], False)  # a sidecar alone may be unticked
+    assert by["a.jpg"].selected and not by["a.jpg.xmp"].selected
+
+
+def test_the_batch_form_ticks_files_before_their_sidecars(tmp_path: Path, root: Path) -> None:
+    plan = _pair_plan(tmp_path, root)
+    by = {a.src.name: a for a in plan.actions if a.src is not None}
+    set_many_selected(plan, list(plan.actions), False)
+    assert not any(a.selected for a in plan.actions)
+    set_many_selected(plan, [by["a.jpg.xmp"], by["a.jpg"]], True)  # sidecar first in the list
+    assert by["a.jpg"].selected and by["a.jpg.xmp"].selected and not by["b.jpg"].selected
+    set_many_selected(plan, [by["a.jpg.xmp"]], True)  # nothing breaks for a lone sidecar
+    set_many_selected(plan, [by["a.jpg"]], False)
+    assert not by["a.jpg.xmp"].selected
+    set_many_selected(plan, [by["a.jpg.xmp"], by["b.jpg"]], True)  # file a.jpg is not ticked
+    assert not by["a.jpg.xmp"].selected and by["b.jpg"].selected
+
+
+def test_the_gui_table_has_the_hooks_for_this_tool() -> None:
+    from various_tools.gui.widgets.plan_table import BATCH_SELECTION_HOOKS, SELECTION_HOOKS
+
+    assert "wrong_extension" in SELECTION_HOOKS and "wrong_extension" in BATCH_SELECTION_HOOKS
+
+
+def test_a_sidecar_is_skipped_when_its_file_was_not_renamed(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    ctx = _ctx(tmp_path, journal)
+    plan = _pair_plan(tmp_path, root)
+    (root / "a.jpg").unlink()  # the main rename will fail: the source is gone
+    result = TOOL.apply(plan, ctx)
+    by = {o.src: o for o in result.outcomes}
+    assert by[str(root / "a.jpg")].status == "failed"
+    side = by[str(root / "a.jpg.xmp")]
+    assert side.status == "skipped" and "its file was not renamed" in side.detail
+    assert (root / "a.jpg.xmp").exists() and (root / "b.png").exists()
+
+
+def test_a_sidecar_follows_the_name_its_file_really_got(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    ctx = _ctx(tmp_path, journal)
+    plan = _pair_plan(tmp_path, root)
+    _write(root / "a.png", b"appeared after the preview")  # a.jpg will land on a_dup1.png
+    result = TOOL.apply(plan, ctx)
+    assert result.status == "done", [o.detail for o in result.outcomes]
+    files = _files(root)
+    assert "a_dup1.png" in files and "a_dup1.png.xmp" in files
+    assert "a.png.xmp" not in files and files["a.png"] == b"appeared after the preview"
+    report = undo_run(journal, result.run_id)
+    assert report.failed == () and "a.jpg" in _files(root) and "a.jpg.xmp" in _files(root)
+
+
+def test_a_sidecar_whose_followed_name_is_taken_is_skipped(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    ctx = _ctx(tmp_path, journal)
+    plan = _pair_plan(tmp_path, root)
+    _write(root / "a.png", b"x")
+    _write(root / "a_dup1.png.xmp", b"x")
+    result = TOOL.apply(plan, ctx)
+    side = next(o for o in result.outcomes if o.src == str(root / "a.jpg.xmp"))
+    assert side.status == "skipped"
+    assert (root / "a.jpg.xmp").read_bytes() == SIDE
+
+
+def test_sidecars_obey_the_never_touch_list(tmp_path: Path, root: Path) -> None:
+    _write(root / "a.jpg", PNG)
+    _write(root / "a.jpg.xmp", SIDE)
+    plan = TOOL.scan(_opts(root, exclude_globs=["*.xmp"]), _ctx(tmp_path))
+    assert _renames(plan, root) == {"a.jpg": "a.png"}

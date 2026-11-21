@@ -70,7 +70,11 @@ def test_preview_lists_old_and_new_then_apply_changes_and_refreshes(
     assert dialog.apply() is not None
     qtbot.waitUntil(lambda: dialog.worker is None, timeout=60000)
     assert asked == ["Change dates?"]
-    assert len(done) == 1 and len(trashed) == 1 and Path(trashed[0]).parent == a.parent
+    assert len(done) == 1 and len(trashed) == 1
+    # the original is recycled from a hidden holder folder next to it, under its own file name
+    assert Path(trashed[0]).name == a.name
+    assert Path(trashed[0]).parent.parent == a.parent
+    assert Path(trashed[0]).parent.name.startswith(".setdate-")
     assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 2, 28, 8, 30)
     assert "Changed 1 file" in dialog.status_label.text()
     # without ExifTool only the modified time changes, so the library may keep the camera date;

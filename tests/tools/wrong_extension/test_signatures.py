@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from various_tools.tools.wrong_extension.signatures import detect, family_of, is_equivalent
+from various_tools.tools.wrong_extension.signatures import (
+    detect,
+    family_of,
+    is_equivalent,
+    mpeg_frame_length,
+)
 
 RIFF = b"RIFF\x24\x00\x00\x00"
 
@@ -120,3 +125,65 @@ def test_families() -> None:
     assert family_of(".docx") == "documents"
     assert family_of(".7z") == "archives"
     assert family_of(".txt") is None
+
+
+# ----- MP1 / MP2: two consecutive valid frame headers --------------------------------------
+
+MP2_HEADER = b"\xff\xfd\x80\x00"  # MPEG-1 layer II, 128 kbps, 44.1 kHz, no padding
+MP1_HEADER = b"\xff\xff\x40\x00"  # MPEG-1 layer I, 128 kbps, 44.1 kHz, no padding
+
+
+def mpeg_frames(header: bytes, count: int) -> bytes:
+    """``count`` frames of an MPEG audio stream, each ``header`` plus silence to its length."""
+    length = mpeg_frame_length(header)
+    assert length is not None, header.hex()
+    return (header + b"\x00" * (length - 4)) * count
+
+
+def test_mp2_two_frames_is_mp2() -> None:
+    assert detect(mpeg_frames(MP2_HEADER, 3)) == ".mp2"
+
+
+def test_mp1_two_frames_is_mp1() -> None:
+    assert detect(mpeg_frames(MP1_HEADER, 3)) == ".mp1"
+
+
+def test_frame_length_comes_from_bitrate_rate_and_padding() -> None:
+    assert mpeg_frame_length(MP2_HEADER) == 144 * 128000 // 44100  # 417
+    assert mpeg_frame_length(b"\xff\xfd\x82\x00") == 144 * 128000 // 44100 + 1  # padded
+    assert mpeg_frame_length(MP1_HEADER) == (12 * 128000 // 44100) * 4  # 4-byte slots
+    assert mpeg_frame_length(b"\xff\xff\x42\x00") == (12 * 128000 // 44100 + 1) * 4
+    assert mpeg_frame_length(b"\xff\xfb\x90\x00") == 144 * 128000 // 44100  # layer III
+
+
+def test_one_mp2_frame_alone_is_not_enough() -> None:
+    assert detect(mpeg_frames(MP2_HEADER, 1) + b"\x00" * 600) is None
+
+
+def test_a_header_with_no_second_header_where_the_frame_ends_is_unknown() -> None:
+    assert detect(MP2_HEADER + b"\x12" * 2000) is None
+
+
+def test_an_id3_tag_alone_never_decides_mpeg_audio() -> None:
+    assert detect(b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 3000) is None
+    assert detect(b"ID3\x04\x00\x00\x00\x00\x00\x00" + mpeg_frames(MP2_HEADER, 3)) is None
+
+
+def test_reserved_values_are_never_a_frame() -> None:
+    assert mpeg_frame_length(b"\xff\xfd\x00\x00") is None  # free-format bitrate
+    assert mpeg_frame_length(b"\xff\xfd\xf0\x00") is None  # bad bitrate
+    assert mpeg_frame_length(b"\xff\xfd\x8c\x00") is None  # reserved sample rate
+    assert mpeg_frame_length(b"\xff\xe9\x90\x00") is None  # reserved version
+    assert mpeg_frame_length(b"\xff\xf9\x90\x00") is None  # reserved layer
+    assert mpeg_frame_length(b"\xff\xfe\x00\x00") is None  # UTF-16 byte order mark
+
+
+def test_mp3_stays_mp3_and_mpeg2_layer_ii_is_mp2() -> None:
+    assert detect(mpeg_frames(b"\xff\xfb\x90\x00", 3)) == ".mp3"
+    assert detect(mpeg_frames(b"\xff\xf5\x80\x00", 3)) == ".mp2"  # MPEG-2, 64 kbps, 22.05 kHz
+
+
+def test_mp1_and_mp2_are_audio_and_not_mp3() -> None:
+    assert family_of(".mp2") == "audio" and family_of(".mp1") == "audio"
+    assert not is_equivalent(".mp3", ".mp2")
+    assert is_equivalent(".MP2", ".mp2")

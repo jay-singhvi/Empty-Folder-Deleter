@@ -57,7 +57,12 @@ from PySide6.QtWidgets import (
 from various_tools.core.plan import ActionKind, Plan, PlannedAction
 from various_tools.gui import reveal
 from various_tools.gui.plan_edit import human_size
-from various_tools.gui.wording import kind_label
+from various_tools.gui.wording import (
+    LIST_OUT_OF_DATE,
+    REFRESH_LIST,
+    REFRESH_LIST_TIP,
+    kind_label,
+)
 
 ALL_KINDS = "All kinds"
 SHOW_ALL = "all"
@@ -97,12 +102,31 @@ def _empty_folders_batch(plan: Plan, actions: list[PlannedAction], checked: bool
     set_folders_selected(plan, folders, checked)
 
 
+def _wrong_extension_hook(plan: Plan, action: PlannedAction, checked: bool) -> None:
+    """Fix File Extensions: a file and its sidecars tick together; a sidecar needs its file."""
+    from various_tools.tools.wrong_extension import set_selected
+
+    set_selected(plan, action, checked)
+
+
+def _wrong_extension_batch(plan: Plan, actions: list[PlannedAction], checked: bool) -> None:
+    from various_tools.tools.wrong_extension import set_many_selected
+
+    set_many_selected(plan, actions, checked)
+
+
 # The only per-tool code in the table. A tool id maps to what a check-box click should do.
-SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
+SELECTION_HOOKS: dict[str, SelectionHook] = {
+    "empty_folders": _empty_folders_hook,
+    "wrong_extension": _wrong_extension_hook,
+}
 # The batch form of a hook: many actions, one value, one pass. Bulk operations use it, so that
 # ticking thousands of rows does not cost one pass over the plan per row.
 BatchSelectionHook = Callable[[Plan, list[PlannedAction], bool], None]
-BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {"empty_folders": _empty_folders_batch}
+BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {
+    "empty_folders": _empty_folders_batch,
+    "wrong_extension": _wrong_extension_batch,
+}
 
 
 # Column titles, in plain words (exports and the CLI keep their own names).
@@ -194,6 +218,9 @@ class PlanModel(QAbstractItemModel):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._plan: Plan | None = None
+        # True when the last change of check boxes was one row ticked by itself, so a view with
+        # a Ticked / Not ticked filter need not re-filter the whole list for it.
+        self.last_change_was_single = False
         self._tool_id = ""
         self._sizes: list[int | None] = []
         self.top: list[Node] = []
@@ -441,7 +468,7 @@ class PlanModel(QAbstractItemModel):
         """
         self._shown = shown
 
-    def set_node_checked(self, node: Node, checked: bool) -> None:
+    def set_node_checked(self, node: Node, checked: bool, *, single: bool = False) -> None:
         """Check or uncheck one row, as a user click does. A group or folder row sets every
         action below it that the filter shows (and its own action, in the folder tree). Each
         action goes through the tool's selection hook, the same in both views.
@@ -450,7 +477,7 @@ class PlanModel(QAbstractItemModel):
         """
         shown = self._shown
         targets = [n for n in _subtree_actions(node) if n is node or shown is None or shown(n)]
-        self.set_actions_checked(targets, checked)
+        self.set_actions_checked(targets, checked, single=single and node.action is not None)
 
     def _apply_checked(self, targets: Iterable[Node], checked: bool) -> None:
         plan = self._plan
@@ -468,7 +495,9 @@ class PlanModel(QAbstractItemModel):
             else:
                 action.selected = checked
 
-    def set_actions_checked(self, targets: Iterable[Node], checked: bool) -> None:
+    def set_actions_checked(
+        self, targets: Iterable[Node], checked: bool, *, single: bool = False
+    ) -> None:
         """Check or uncheck these action rows, each through the tool's selection hook.
 
         The views are told once, after the last row, never per row.
@@ -477,6 +506,7 @@ class PlanModel(QAbstractItemModel):
             return
         self._apply_checked(targets, checked)
         self.refresh_checks()
+        self.last_change_was_single = single
         self.checksChanged.emit()
 
     def tick_only(self, universe: Iterable[Node], ticked: Iterable[Node]) -> None:
@@ -486,6 +516,7 @@ class PlanModel(QAbstractItemModel):
         self._apply_checked(universe, False)
         self._apply_checked(ticked, True)
         self.refresh_checks()
+        self.last_change_was_single = False
         self.checksChanged.emit()
 
     def refresh_checks(self) -> None:
@@ -642,7 +673,7 @@ class PlanModel(QAbstractItemModel):
         if node is None:
             return False
         state = getattr(value, "value", value)
-        self.set_node_checked(node, int(state) == Qt.CheckState.Checked.value)
+        self.set_node_checked(node, int(state) == Qt.CheckState.Checked.value, single=True)
         return True
 
 
@@ -756,6 +787,13 @@ class PlanTable(QWidget):
             "Untick every row that is shown, then tick the first rows in the order of the list."
         )
         self.tick_first_button.setAccessibleName("Tick only the first rows")
+        # Shown after a single tick left the Ticked / Not ticked view as it was.
+        self.out_of_date_label = QLabel(LIST_OUT_OF_DATE)
+        self.refresh_button = QPushButton(REFRESH_LIST)
+        self.refresh_button.setToolTip(REFRESH_LIST_TIP)
+        self.refresh_button.setFlat(True)
+        self.out_of_date_label.hide()
+        self.refresh_button.hide()
         self.show_label = QLabel("Show:")
         self.show_combo = QComboBox()
         for mode, label in SHOW_LABELS.items():
@@ -802,6 +840,8 @@ class PlanTable(QWidget):
         for widget in (self.tick_first_label, self.tick_first_spin, self.tick_first_button):
             picking.addWidget(widget)
         picking.addStretch(1)
+        picking.addWidget(self.out_of_date_label)
+        picking.addWidget(self.refresh_button)
         picking.addWidget(self.show_label)
         picking.addWidget(self.show_combo)
         layout.addLayout(picking)
@@ -810,6 +850,7 @@ class PlanTable(QWidget):
 
         self.filter_edit.textChanged.connect(self._filters_changed)
         self.show_combo.currentIndexChanged.connect(self._filters_changed)
+        self.refresh_button.clicked.connect(lambda _c=False: self._filters_changed())
         self.tick_first_button.clicked.connect(lambda _c=False: self.tick_only_first())
         self.find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
         self.find_shortcut.activated.connect(self.focus_filter)
@@ -934,7 +975,7 @@ class PlanTable(QWidget):
     def set_action_checked(self, index: int, checked: bool) -> None:
         node = self._model.node_for_action(index)
         if node is not None:
-            self._model.set_node_checked(node, checked)
+            self._model.set_node_checked(node, checked, single=True)
 
     def filter_active(self) -> bool:
         """True while the text or kind filter is set, so some rows may be hidden."""
@@ -1253,6 +1294,7 @@ class PlanTable(QWidget):
             node = self._current_node()
             current_action = node.action if node is not None else None
         self._shown_count = None
+        self._set_out_of_date(False)
         self.view.setUpdatesEnabled(False)
         try:
             self._model.load(plan, tool_id, sizes, mode)
@@ -1327,8 +1369,13 @@ class PlanTable(QWidget):
         mode = self.show_combo.currentData()
         return mode if isinstance(mode, str) else SHOW_ALL
 
+    def _set_out_of_date(self, stale: bool) -> None:
+        self.out_of_date_label.setVisible(stale)
+        self.refresh_button.setVisible(stale)
+
     def _filters_changed(self, *_: object) -> None:
         self._shown_count = None
+        self._set_out_of_date(False)
         kind = self._kind_filter()
         self._proxy.set_filters(self.filter_edit.text(), kind, self._tick_mode())
         if self._proxy.active and self._proxy.rowCount() <= self.MAX_AUTO_EXPAND_GROUPS:
@@ -1346,9 +1393,17 @@ class PlanTable(QWidget):
 
     def _on_checks_changed(self) -> None:
         if self._tick_mode() != SHOW_ALL:
-            # Rows moved in or out of the Ticked / Not ticked view.
-            self._proxy.set_filters(self.filter_edit.text(), self._kind_filter(), self._tick_mode())
-            self._shown_count = None
+            if self._model.last_change_was_single:
+                # One row ticked: leave the list as it is (re-filtering 100,000 rows is slow);
+                # the row stays until the filter changes or Refresh is pressed.
+                self._set_out_of_date(True)
+            else:
+                # Rows moved in or out of the Ticked / Not ticked view.
+                self._proxy.set_filters(
+                    self.filter_edit.text(), self._kind_filter(), self._tick_mode()
+                )
+                self._shown_count = None
+                self._set_out_of_date(False)
         self._update_status()
         self.selectionChanged.emit()
 

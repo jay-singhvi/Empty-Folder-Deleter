@@ -22,7 +22,7 @@ import shutil
 import stat as stat_module
 import sys
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -151,6 +151,7 @@ def walk(
     recursive: bool = True,
     respect_gitignore: bool = False,
     skip_reparse_points: bool = True,
+    on_error: Callable[[Path, OSError], None] | None = None,
 ) -> Iterator[FileInfo]:
     """Yield regular files under ``root`` that pass the filters.
 
@@ -164,7 +165,8 @@ def walk(
       followed, so nothing outside ``root`` is reached (AGENTS.md rule 4). Cloud placeholders
       are listed like any other file or folder.
 
-    ``root`` itself is never yielded. Folders that cannot be listed are logged and skipped.
+    ``root`` itself is never yielded. Folders that cannot be listed are logged and skipped;
+    ``on_error`` (when given) is also called with each such folder and the error.
     """
     del skip_reparse_points  # rule 4 is not optional
     includes = tuple(include_globs)
@@ -187,6 +189,8 @@ def walk(
                 entries = sorted(it, key=lambda e: e.name.casefold())
         except OSError as exc:
             log.warning("Skipping folder %s: %s", folder, exc)
+            if on_error is not None:
+                on_error(folder, exc)
             continue
 
         subfolders: list[tuple[Path, list[tuple[Path, pathspec.GitIgnoreSpec]]]] = []

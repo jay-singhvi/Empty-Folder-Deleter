@@ -548,6 +548,7 @@ def _save_plan(plan: Plan, target: str) -> None:
     note(f"Plan saved to {target}")
 
 
+DEFAULT_UPLOAD_TIMEOUT_S = 1800.0
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.IGNORECASE)
 _DURATION_UNITS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}
 
@@ -563,8 +564,21 @@ def parse_duration(text: str) -> float:
     return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
 
 
-def _pace_from_flags(batch_size: int | None, pause: str | None) -> Pace | None:
-    """The ``--batch-size`` and ``--pause`` flags as a :class:`Pace`; both or neither."""
+def _pace_from_flags(
+    batch_size: int | None,
+    pause: str | None,
+    wait_for_upload: bool = False,
+    upload_timeout: str | None = None,
+) -> Pace | None:
+    """The ``--batch-size`` and ``--pause`` flags as a :class:`Pace`; both or neither.
+
+    ``--wait-for-upload`` (with an optional ``--upload-timeout``, 30 minutes by default) also
+    needs a batch size.
+    """
+    if wait_for_upload and batch_size is None:
+        usage_error("--wait-for-upload needs --batch-size (and --pause).")
+    if upload_timeout is not None and not wait_for_upload:
+        usage_error("--upload-timeout needs --wait-for-upload.")
     if batch_size is None and pause is None:
         return None
     if batch_size is None or pause is None:
@@ -576,7 +590,15 @@ def _pace_from_flags(batch_size: int | None, pause: str | None) -> Pace | None:
         seconds = parse_duration(pause)
     except ValueError as exc:
         usage_error(f"--pause: {exc}")
-    return Pace(batch_size, seconds)
+    timeout = DEFAULT_UPLOAD_TIMEOUT_S
+    if upload_timeout is not None:
+        try:
+            timeout = parse_duration(upload_timeout)
+        except ValueError as exc:
+            usage_error(f"--upload-timeout: {exc}")
+        if timeout <= 0:
+            usage_error("--upload-timeout must be more than 0.")
+    return Pace(batch_size, seconds, wait_for_upload=wait_for_upload, upload_timeout_s=timeout)
 
 
 def _apply_exit_code(result: RunResult, selected: int) -> int:
@@ -594,7 +616,9 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         state = state_with_programs(get_state(kw["ctx"]), kw)
         yes: bool = kw["yes"]
         check_export_target(kw["export"], kw["export_format"], force=kw["force"])
-        pace = _pace_from_flags(kw["batch_size"], kw["pause"])
+        pace = _pace_from_flags(
+            kw["batch_size"], kw["pause"], kw["wait_for_upload"], kw["upload_timeout"]
+        )
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         if kw["plan"]:
             if overrides:
@@ -716,6 +740,34 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
                     "--pause",
                     metavar="DURATION",
                     help="How long to wait between batches: 90, 30s, 5m or 1h. Needs --batch-size.",
+                ),
+            ],
+        ),
+        _param(
+            "wait_for_upload",
+            Annotated[
+                bool,
+                typer.Option(
+                    "--wait-for-upload",
+                    help=(
+                        "After each batch, wait until OneDrive has uploaded its files, then "
+                        "pause. Needs --batch-size."
+                    ),
+                ),
+            ],
+            False,
+        ),
+        _param(
+            "upload_timeout",
+            Annotated[
+                str | None,
+                typer.Option(
+                    "--upload-timeout",
+                    metavar="DURATION",
+                    help=(
+                        "Give up waiting for one batch's upload after this long (default 30m). "
+                        "Needs --wait-for-upload."
+                    ),
                 ),
             ],
         ),

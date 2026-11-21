@@ -5,6 +5,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.7.0: the items left for later, and waiting for OneDrive (2026-11-21)
+
+Owner's request: "start on the items left for later". Design:
+`docs/superpowers/specs/2026-11-21-left-for-later-design.md` (wave 1; wave 2, saved recipes,
+duplicates inside the photo library and place names, comes later).
+
+- **Wait until OneDrive has uploaded each batch** (Apply window, shown when the job touches
+  OneDrive; CLI `--wait-for-upload [--upload-timeout 30m]`). After each batch the app checks
+  the files it wrote with the Windows Cloud Files API, without downloading anything, and goes
+  on when OneDrive reports them in sync or the time limit passes (the result then says so).
+  Pause, Skip the wait and Stop work during the wait.
+- **Photo library:**
+  - A folder chosen inside another chosen folder is read and counted once.
+  - A subfolder that cannot be listed keeps its photos until it can be read again, and the
+    update says which one.
+  - RAW photos (through ExifTool, in batches) and videos (through ffprobe) now get their place
+    and pixel size.
+  - The library loads in the background ("Loading your photos…"), and search stays quick at
+    200,000 items.
+- **Map:** scrolls across the 180° line, stays smooth with 50,000 points, and keeps at most
+  `map_tile_cache_mb` (default 200 MB) of downloaded map pictures, one folder per map source.
+- **Change date:** a video's new date is read back after writing; the replaced original goes
+  to the Recycle Bin under its real file name.
+- **Fix File Extensions:** sidecar files (`.xmp`, `.aae`, `.thm`) are renamed with their file,
+  and undone with it; MP1/MP2 audio is recognised again, from two consecutive frames only.
+- **Results list:** with "Show: Ticked / Not ticked" on, ticking one row no longer re-sorts the
+  list; a "The list is out of date." note with *Refresh* appears instead.
+- **README:** screenshots of the Home page, a tool page, the Timeline and the Map, made from
+  generated pictures; a "Gentle on OneDrive" section.
+- **Review fixes:**
+  - Fix File Extensions: ticking a file ticks its sidecars and a sidecar cannot be ticked without
+    its file; at apply a sidecar is skipped ("its file was not renamed") when its file did not
+    rename, and follows the name its file really got (a `_dupN` name chosen at apply). A
+    `<stem>` sidecar that another file shares is left alone, sidecars obey the Never touch
+    list, and a name is reserved only for a sidecar that is really planned.
+  - Waiting for OneDrive: after one full timeout in which nothing became in sync, the run stops
+    waiting (a note and a log line say so). Names OneDrive never uploads (`desktop.ini`,
+    `Thumbs.db`, `~$*`, `*.tmp`, `.DS_Store`, invalid names) count as "cannot tell". The sync
+    state is also read when Windows answers ERROR_MORE_DATA. The last batch of a run is not
+    waited for, because nothing follows it (the same as when the run is paused).
+  - Change date: if the original cannot be put back after a failed recycle, the new copy goes
+    back in place, so the path is never empty and no copy is deleted. The notes and
+    `docs/tools/set_date.md` say that restoring by hand from the Recycle Bin puts the file in
+    the hidden `.setdate-*.d` folder (History undo is the right way).
+  - Library: a failed background read keeps the previous items, ends "Loading" and is retried;
+    the Timeline order is made once when the library is read, not again per keystroke; the map
+    tile cache clean-up runs off the GUI thread (old folders removed once per session); a click
+    on the map tests the same margin copies as painting.
+  - Library sync: added and updated are counted after the row is stored; RAW files already
+    queued are read and kept before a cancel is honoured; a failed or timed-out ExifTool batch
+    is read file by file; a video's creation time and place are read from the format and from
+    every stream, not only the first video stream.
+- **Known, left for later:** rebuilding the Timeline grid at 200,000 items still takes about a
+  second.
+- **Home page:** each tool card shows its name above a description that wraps to the window
+  (no more sideways scrolling), and opening Home no longer leaves another page highlighted
+  in the sidebar.
+- Version 0.7.0.
+
 ### Version 0.6.0: one working folder, apply in batches, a real photo browser (2026-11-20)
 
 Owner's request: applying 2,113 resized OneDrive files (62 GB) at once could swamp OneDrive; no

@@ -105,6 +105,8 @@ def test_show_filter_ticked_and_not_ticked(qtbot: QtBot, tmp_path: Path) -> None
     # Unticking a row in the Ticked view makes it leave the view.
     table.show_combo.setCurrentIndex(table.show_combo.findData("ticked"))
     table.set_action_checked(1, False)
+    assert table.shown_action_indices() == [1, 3]  # a single tick does not re-filter the list
+    table.refresh_button.click()
     assert table.shown_action_indices() == [3]
     table.show_combo.setCurrentIndex(0)
     assert not table.filter_active()
@@ -285,3 +287,76 @@ def test_tick_only_first_edge_counts(qtbot: QtBot, tmp_path: Path, count: int) -
     table = _table(qtbot, plan)
     assert table.tick_only_first(count) == count
     assert len(_ticked(plan)) == count
+
+
+def _hint_visible(table: PlanTable) -> bool:
+    return table.out_of_date_label.isVisibleTo(table) and table.refresh_button.isVisibleTo(table)
+
+
+def test_a_single_tick_in_a_ticked_view_keeps_the_row_and_says_the_list_is_out_of_date(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _flat_plan(tmp_path, 6)
+    for i in (1, 3):
+        plan.actions[i].selected = True
+    table = _table(qtbot, plan)
+    table.show_combo.setCurrentIndex(table.show_combo.findData("ticked"))
+    assert not _hint_visible(table)
+    refilters: list[int] = []
+    real = table._proxy.set_filters  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(
+        table._proxy,  # pyright: ignore[reportPrivateUsage]
+        "set_filters",
+        lambda *a, **k: (refilters.append(1), real(*a, **k))[1],
+    )
+    # The user's click on the check box of row 1 (through the model, as the view does).
+    model = table.view.model()
+    index = model.index(0, 0)
+    assert table.shown_action_indices() == [1, 3]
+    model.setData(index, Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+    assert plan.actions[1].selected is False
+    assert refilters == []  # not re-filtered
+    assert table.shown_action_indices() == [1, 3]  # the row stays
+    assert _hint_visible(table)
+    assert table.status_text() == "6 found · 1 ticked"  # the counts are always current
+    table.refresh_button.click()
+    assert refilters == [1]
+    assert table.shown_action_indices() == [3]
+    assert not _hint_visible(table)
+
+
+def test_changing_the_filter_clears_the_out_of_date_hint(qtbot: QtBot, tmp_path: Path) -> None:
+    plan = _flat_plan(tmp_path, 4)
+    plan.actions[0].selected = True
+    table = _table(qtbot, plan)
+    table.show_combo.setCurrentIndex(table.show_combo.findData("ticked"))
+    table.set_action_checked(0, False)
+    assert _hint_visible(table)
+    table.show_combo.setCurrentIndex(table.show_combo.findData("unticked"))
+    assert not _hint_visible(table)
+    assert table.shown_action_indices() == [0, 1, 2, 3]
+
+
+def test_bulk_operations_still_re_filter_at_once(qtbot: QtBot, tmp_path: Path) -> None:
+    plan = _flat_plan(tmp_path, 6)
+    for i in (1, 3):
+        plan.actions[i].selected = True
+    table = _table(qtbot, plan)
+    table.show_combo.setCurrentIndex(table.show_combo.findData("ticked"))
+    table.set_action_checked(1, False)  # a single tick: stale
+    assert _hint_visible(table)
+    table.set_shown_checked(False)  # Untick all shown: re-filters, clears the hint
+    assert table.shown_action_indices() == []
+    assert not _hint_visible(table)
+    table.show_combo.setCurrentIndex(table.show_combo.findData("unticked"))
+    assert len(table.shown_action_indices()) == 6
+    assert table.tick_only_first(2) == 2
+    assert table.shown_action_indices() == [2, 3, 4, 5]
+    assert not _hint_visible(table)
+
+
+def test_no_hint_without_a_ticked_filter(qtbot: QtBot, tmp_path: Path) -> None:
+    table = _table(qtbot, _flat_plan(tmp_path, 3))
+    table.set_action_checked(0, True)
+    assert not _hint_visible(table)
+    assert table.shown_action_indices() == [0, 1, 2]

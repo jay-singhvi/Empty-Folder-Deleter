@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import shutil
 import struct
+import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,7 +30,14 @@ from various_tools.core.plan import Plan, RunResult
 from various_tools.core.settings import Settings
 from various_tools.tools.base import discover
 from various_tools.tools.set_date import TOOL, SetDateOptions
-from various_tools.tools.set_date.tool import new_date_for, parse_new_date
+from various_tools.tools.set_date import tool as set_date_tool
+from various_tools.tools.set_date.tool import (
+    DateChangeError,
+    check_video_date,
+    new_date_for,
+    parse_new_date,
+    read_video_dates,
+)
 
 EXIF_IFD = 0x8769
 
@@ -230,7 +238,7 @@ def test_apply_without_exiftool_sets_the_modified_time_and_undo_restores(
     assert result.count("done") == 1, [o.detail for o in result.outcomes]
     assert a.read_bytes() == original  # nothing inside the file changed
     assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
-    assert len(fake_trash) == 1 and fake_trash[0].parent == a.parent  # the aside copy
+    assert len(fake_trash) == 1 and fake_trash[0].name == a.name  # recycled by its real name
     assert list(a.parent.iterdir()) == [a]
     rows = journal.actions(result.run_id)
     assert [(r.kind, r.status) for r in rows] == [("convert", "done"), ("trash", "done")]
@@ -423,3 +431,183 @@ def test_skipped_notes_follow_the_reason_colon_path_shape(tmp_path: Path) -> Non
 
 def test_the_tool_has_no_working_folder_field() -> None:
     assert TOOL.workspace_field is None
+
+
+# ----- the Recycle Bin keeps the real file name ----------------------------------------------
+
+
+def test_the_original_is_recycled_under_its_real_name_from_a_hidden_folder(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original = a.read_bytes()
+    seen: list[tuple[Path, bool, bool]] = []
+    real = fake_trash.trash
+
+    def trash(path: str | os.PathLike[str]) -> None:
+        item = Path(path)
+        seen.append((item, a.exists(), item.parent.is_dir()))
+        real(path)
+
+    monkeypatch.setattr(plan_module, "send2trash", trash)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("done") == 1
+    (item, copy_in_place, folder_exists) = seen[0]
+    assert item.name == "a.jpg"  # the name a manual restore from the Recycle Bin gives
+    assert item.parent != a.parent and item.parent.parent == a.parent
+    assert item.parent.name.startswith(".setdate-")
+    assert copy_in_place and folder_exists
+    # what the Recycle Bin recorded as the original location carries the real file name too
+    index = next(fake_trash.folder.glob("$I*"))
+    assert "a.jpg" in index.read_bytes().decode("utf-16-le", errors="ignore")
+    assert list(a.parent.iterdir()) == [a]  # the temporary folder is gone
+    trash_row = next(r for r in journal.actions(result.run_id) if r.kind == "trash")
+    assert trash_row.src == str(a)  # journaled against the original path
+    assert trash_row.dst is not None and Path(trash_row.dst).name == "a.jpg"
+    report = undo_run(
+        journal, result.run_id, send_to_trash=fake_trash.trash, locate_bin=fake_trash.locate
+    )
+    assert report.reverted == 2, (report.skipped, report.failed)
+    assert a.read_bytes() == original
+    assert list(a.parent.iterdir()) == [a]
+
+
+def test_a_failed_recycle_puts_the_original_back_and_removes_the_hidden_folder(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original, mtime = a.read_bytes(), a.stat().st_mtime_ns
+
+    def broken(_path: str | os.PathLike[str]) -> None:
+        raise OSError("bin full")
+
+    monkeypatch.setattr(plan_module, "send2trash", broken)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("failed") == 1
+    assert a.read_bytes() == original and a.stat().st_mtime_ns == mtime
+    assert list(a.parent.iterdir()) == [a]
+
+
+def test_the_path_is_never_empty_while_the_swap_happens(
+    tmp_path: Path, journal: Journal, fake_trash: FakeBin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    states: list[bool] = []
+    real_rename = set_date_tool.rename_no_replace
+
+    def watching(src: Path, dst: Path) -> None:
+        real_rename(src, dst)
+        states.append(a.exists())
+
+    monkeypatch.setattr(set_date_tool, "rename_no_replace", watching)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("done") == 1
+    assert states and states[-1] is True  # after the copy took its place it stays there
+
+
+def test_a_failed_put_back_never_leaves_the_path_empty(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original = a.read_bytes()
+
+    def broken(_path: str | os.PathLike[str]) -> None:
+        raise OSError("bin full")
+
+    monkeypatch.setattr(plan_module, "send2trash", broken)
+    real_rename = set_date_tool.rename_no_replace
+
+    def flaky(src: Path, dst: Path) -> None:
+        if dst == a and src.parent.name.startswith(".setdate-") and src.suffix == ".jpg":
+            raise OSError("cannot put the original back")  # aside -> src
+        real_rename(src, dst)
+
+    monkeypatch.setattr(set_date_tool, "rename_no_replace", flaky)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("failed") == 1
+    assert a.is_file()  # the path is not empty: the new copy is back in place
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 12, 0)
+    kept = [p for p in a.parent.rglob("a.jpg") if p != a]
+    assert len(kept) == 1 and kept[0].read_bytes() == original  # the original is kept too
+    assert not list(a.parent.glob(".setdate-*.tmp"))
+
+
+# ----- a video's new date is read back -------------------------------------------------------
+
+
+def _fake_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess([], returncode, stdout, "")
+
+
+def test_video_dates_read_back_come_from_exiftool_in_local_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake(_exe: Path, args: list[str], _timeout: float) -> subprocess.CompletedProcess[str]:
+        seen.append(list(args))
+        return _fake_result("2021:03:04 10:12:00\n2021:03:04 10:12:00\n")
+
+    monkeypatch.setattr(exif, "run_exiftool", fake)
+    dates = read_video_dates(Path("x.exe"), tmp_path / "v.mp4", 5.0)
+    assert dates == [datetime(2021, 3, 4, 10, 12)] * 2
+    assert "QuickTimeUTC=1" in seen[0]
+
+
+def test_video_readback_mismatch_or_missing_dates_fail_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    new = datetime(2021, 3, 4, 10, 12)
+
+    def answer(text: str, code: int = 0) -> None:
+        monkeypatch.setattr(exif, "run_exiftool", lambda *_a: _fake_result(text, code))
+
+    answer("2021:03:04 10:12:00\n2021:03:04 10:12:00\n")
+    check_video_date(Path("x"), tmp_path / "v.mp4", new, 5.0)  # no error
+    answer("2021:03:04 10:12:00\n2021:03:04 10:12:03\n")
+    with pytest.raises(DateChangeError, match="read back"):
+        check_video_date(Path("x"), tmp_path / "v.mp4", new, 5.0)
+    answer("2019:07:04 10:12:00\n")
+    with pytest.raises(DateChangeError, match="read back"):
+        check_video_date(Path("x"), tmp_path / "v.mp4", new, 5.0)
+    answer("")
+    with pytest.raises(DateChangeError, match="read back"):
+        check_video_date(Path("x"), tmp_path / "v.mp4", new, 5.0)
+    answer("", 1)
+    with pytest.raises(DateChangeError, match="read back"):
+        check_video_date(Path("x"), tmp_path / "v.mp4", new, 5.0)
+
+
+def test_a_video_is_changed_and_its_date_read_back(
+    tmp_path: Path,
+    journal: Journal,
+    fake_trash: FakeBin,
+    exiftool_path: Path,
+    make_video: Callable[..., Path],
+) -> None:
+    clip = make_video("clip.mp4", creation_time="2019-07-04T10:12:00Z")
+    opts = SetDateOptions(roots=[clip.parent], mode="exact", new_date="2021-03-04 10:12")
+    _plan, result = run(clip.parent, journal, opts, exiftool=exiftool_path)
+    assert result.count("done") == 1, [o.detail for o in result.outcomes]
+    dates = read_video_dates(exiftool_path, clip, 30.0)
+    assert dates and all(d == datetime(2021, 3, 4, 10, 12) for d in dates)
+
+
+def test_a_video_whose_date_does_not_read_back_is_left_untouched(
+    tmp_path: Path,
+    journal: Journal,
+    fake_trash: FakeBin,
+    exiftool_path: Path,
+    make_video: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clip = make_video("clip.mp4", creation_time="2019-07-04T10:12:00Z")
+    before = clip.read_bytes()
+    monkeypatch.setattr(set_date_tool, "read_video_dates", lambda *_a: [datetime(1999, 1, 1)])
+    opts = SetDateOptions(roots=[clip.parent], mode="exact", new_date="2021-03-04 10:12")
+    _plan, result = run(clip.parent, journal, opts, exiftool=exiftool_path)
+    assert result.count("failed") == 1 and result.count("done") == 0
+    assert "read back" in (result.outcomes[0].detail or "")
+    assert clip.read_bytes() == before and fake_trash == []
+    assert sorted(p.name for p in clip.parent.glob("*.mp4")) == ["clip.mp4"]
+    assert not [p for p in clip.parent.iterdir() if p.name.startswith(".setdate")]

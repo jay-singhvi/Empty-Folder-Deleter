@@ -84,3 +84,69 @@ def test_a_bad_pause_or_batch_size_is_a_usage_error(cli: Cli) -> None:
         "rename", "apply", str(folder), *RENAME_FLAGS, "--yes", "--batch-size", "0", "--pause", "1"
     )
     assert zero.exit_code == 2 and "at least 1" in zero.output
+
+
+def _apply_args(folder: Path, *extra: str) -> tuple[str, ...]:
+    return ("rename", "apply", str(folder), *RENAME_FLAGS, "--yes", *extra)
+
+
+def test_wait_for_upload_needs_a_batch_size(cli: Cli) -> None:
+    folder = _photos(cli)
+    result = cli.run(*_apply_args(folder, "--wait-for-upload"))
+    assert result.exit_code == 2
+    assert "--wait-for-upload needs --batch-size" in result.output
+    assert not (folder / "pic-001.txt").exists()
+
+
+def test_upload_timeout_needs_wait_for_upload(cli: Cli) -> None:
+    folder = _photos(cli)
+    result = cli.run(
+        *_apply_args(folder, "--batch-size", "1", "--pause", "0", "--upload-timeout", "5m")
+    )
+    assert result.exit_code == 2
+    assert "--upload-timeout needs --wait-for-upload" in result.output
+
+
+def test_a_bad_upload_timeout_is_a_usage_error(cli: Cli) -> None:
+    folder = _photos(cli)
+    for bad in ("x", "0"):
+        result = cli.run(
+            *_apply_args(
+                folder,
+                *("--batch-size", "1", "--pause", "0", "--wait-for-upload"),
+                *("--upload-timeout", bad),
+            )
+        )
+        assert result.exit_code == 2, bad
+        assert "--upload-timeout" in result.output
+
+
+def test_wait_for_upload_reaches_the_run_and_a_timeout_is_reported(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core import onedrive
+
+    monkeypatch.setattr(plan_module, "_sleep", lambda _s: None)
+    monkeypatch.setattr(onedrive, "upload_pending", lambda _p: True)
+    folder = _photos(cli)
+    result = cli.run(
+        *_apply_args(
+            folder,
+            *("--batch-size", "2", "--pause", "0", "--wait-for-upload"),
+            *("--upload-timeout", "1s"),
+        )
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in folder.iterdir()) == ["pic-001.txt", "pic-002.txt", "pic-003.txt"]
+    assert "OneDrive had not finished uploading 2 of 2 files" in result.output.replace("\n", " ")
+
+
+def test_wait_for_upload_with_default_timeout_is_thirty_minutes(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.cli import toolcmds
+
+    pace = toolcmds._pace_from_flags(5, "1m", True, None)  # pyright: ignore[reportPrivateUsage]
+    assert pace is not None and pace.wait_for_upload and pace.upload_timeout_s == 1800
+    plain = toolcmds._pace_from_flags(5, "1m", False, None)  # pyright: ignore[reportPrivateUsage]
+    assert plain is not None and not plain.wait_for_upload

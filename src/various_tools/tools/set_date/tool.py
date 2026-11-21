@@ -11,15 +11,19 @@ Three ways to choose the new date:
 date, else the modified time) and writes nothing. Every file that would change is a planned
 ``convert`` action whose reason reads like ``2019-07-04 10:12 → 2021-03-04 10:12``.
 
-``apply()`` writes a copy with the new date next to the file. The original is renamed aside
-(a hidden name in the same folder), the copy is renamed into its place and gets the new
-modified time, and only then does the old content go to the Recycle Bin, as a journal row of
-the original path. The path is never empty, and History can undo the run. Apply writes the date
+``apply()`` writes a copy with the new date next to the file. The original is moved, with its own
+file name, into a new hidden temporary folder next to it, the copy is renamed into its place and
+gets the new modified time, and only then does the old file go to the Recycle Bin from that
+folder (so a manual restore from the Recycle Bin gives the real file name), as a journal row of
+the original path. The empty temporary folder is removed. The path is never empty, any failure
+puts the original back, and History can undo the run. Apply writes the date
 the preview planned (kept in the action); it never works it out again, so applying one plan
 twice cannot shift a date twice, and a file whose date changed since the preview is left alone.
 
 * With ExifTool, a photo gets ``DateTimeOriginal``, ``CreateDate`` and ``ModifyDate``; an MP4 or
   QuickTime video gets the QuickTime create, modify, media and track dates.
+* The date of a written video is read back with ExifTool (``-api QuickTimeUTC=1``) and the
+  action fails, leaving the original alone, when it is not the planned one.
 * Without ExifTool, or for a file type ExifTool cannot write, only the modified time changes
   (the plan says so). Nothing inside the file changes then.
 * A OneDrive cloud-only file is never read or changed (AGENTS.md rule 3).
@@ -34,6 +38,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -194,6 +199,10 @@ class DateChangeError(Exception):
     """A new copy could not be made or failed its check. The message goes to the journal."""
 
 
+VIDEO_READBACK_TOLERANCE_S = 1.0
+FILE_ATTRIBUTE_HIDDEN = 0x2
+
+
 class _KeptCopyError(DateChangeError):
     """The original was recycled but the copy could not take its name; the copy must stay."""
 
@@ -257,6 +266,58 @@ def _options_problem(opts: SetDateOptions) -> str | None:
     return None
 
 
+def read_video_dates(exiftool: Path, path: Path, timeout: float) -> list[datetime]:
+    """The QuickTime create and media-create dates of a video as local time, read with ExifTool.
+
+    ``-api QuickTimeUTC=1`` is the setting the dates were written with, so a date comes back as
+    the local time that was asked for. Empty when ExifTool fails or finds no date.
+    """
+    args = [
+        "-s3",
+        "-api",
+        "QuickTimeUTC=1",
+        "-d",
+        "%Y:%m:%d %H:%M:%S",
+        "-QuickTime:CreateDate",
+        "-QuickTime:MediaCreateDate",
+        str(path),
+    ]
+    try:
+        result = exif.run_exiftool(exiftool, args, timeout)
+    except subprocess.TimeoutExpired, OSError, ValueError:
+        log.warning("could not read the video dates of %s", path, exc_info=True)
+        return []
+    if result.returncode != 0:
+        return []
+    dates = (exif.parse_exif_datetime(line) for line in (result.stdout or "").splitlines())
+    return [date for date in dates if date is not None]
+
+
+def check_video_date(exiftool: Path, path: Path, new: datetime, timeout: float) -> None:
+    """Raise :class:`DateChangeError` unless every date read back from ``path`` is ``new``."""
+    dates = read_video_dates(exiftool, path, timeout)
+    if not dates or any(
+        abs((date - new).total_seconds()) > VIDEO_READBACK_TOLERANCE_S for date in dates
+    ):
+        shown = ", ".join(d.strftime(DATE_TEXT) for d in dates) or "no date"
+        raise DateChangeError(
+            f"the date read back from the copy of {path.name} was {shown}, not "
+            f"{new.strftime(DATE_TEXT)}; it was not kept"
+        )
+
+
+def _hide(path: Path) -> None:
+    """Mark ``path`` hidden on Windows (the leading dot is the hint elsewhere). Best effort."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)
+        except OSError, AttributeError:
+            log.debug("could not hide %s", path, exc_info=True)
+
+
 def _writes_tags(path: Path) -> bool:
     return path.suffix.lower() in WRITABLE_PHOTO_EXTS | WRITABLE_VIDEO_EXTS
 
@@ -317,7 +378,8 @@ class _Setter:
 
     def _replace_with_dated_copy(self, src: Path, new: datetime) -> Path:
         staging = src.parent / f".setdate-{uuid.uuid4().hex[:12]}.tmp"
-        aside = src.parent / f".setdate-{uuid.uuid4().hex[:12]}.orig"
+        holder = src.parent / f".setdate-{uuid.uuid4().hex[:12]}.d"
+        aside = holder / src.name  # the real file name, so a manual restore gives it back
         keep_staging = False
         try:
             exiftool = self.ctx.deps.exiftool()
@@ -327,10 +389,12 @@ class _Setter:
                 shutil.copy2(src, staging)
             stamp = new.timestamp()
             os.utime(staging, (stamp, stamp))
-            # The path is never empty: the original steps aside, the copy takes its place at
-            # once, then the old content goes to the Recycle Bin as a journal row of the
-            # ORIGINAL path (rule 5), so undo restores it there.
+            # The path is never empty: the original steps into the hidden folder, the copy
+            # takes its place at once, then the old file goes to the Recycle Bin from there as
+            # a journal row of the ORIGINAL path (rule 5), so undo restores it there.
             try:
+                holder.mkdir()
+                _hide(holder)
                 rename_no_replace(src, aside)
             except OSError as exc:
                 raise DateChangeError(f"could not move the original aside: {exc}") from exc
@@ -342,30 +406,58 @@ class _Setter:
                 except OSError as back:
                     keep_staging = True
                     raise _KeptCopyError(
-                        f"the original is at {aside} and the copy is at {staging}; rename the "
-                        f"original back to {src.name} ({back})"
+                        f"the original is at {aside} and the copy is at {staging}; move the "
+                        f"original back to {src} ({back})"
                     ) from exc
                 raise DateChangeError(f"could not put the copy in place: {exc}") from exc
             try:
                 trash_replaced(src, aside, "original replaced by the copy with the new date")
             except BaseException:
-                self._put_original_back(src, aside, staging)
+                keep_staging = self._put_original_back(src, aside, staging)
                 raise
         finally:
             if not keep_staging:
                 staging.unlink(missing_ok=True)
+            self._remove_holder(holder, aside)
         return src
 
     @staticmethod
-    def _put_original_back(src: Path, aside: Path, staging: Path) -> None:
-        """The Recycle Bin refused or failed: undo the swap so the original stays as it was."""
+    def _remove_holder(holder: Path, aside: Path) -> None:
+        """Remove the temporary folder once it is empty. A file still in it is never touched."""
+        if os.path.lexists(aside):
+            return  # the original is still there (a failure the journal reports); keep it safe
+        try:
+            holder.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning("could not remove the temporary folder %s", holder, exc_info=True)
+
+    @staticmethod
+    def _put_original_back(src: Path, aside: Path, staging: Path) -> bool:
+        """The Recycle Bin refused or failed: undo the swap so the original stays as it was.
+
+        Returns True when the copy must be kept at ``staging`` (it could not go back to ``src``).
+        The path is never left empty: if the original cannot return, the copy goes back to
+        ``src`` and the original stays where it is (the error is journaled).
+        """
         if not os.path.lexists(aside):
-            return  # it did go to the Recycle Bin; the journal row says so
+            return False  # it did go to the Recycle Bin; the journal row says so
         try:
             rename_no_replace(src, staging)
-            rename_no_replace(aside, src)
-        except OSError:  # leave both files where they are; the error is journaled
+        except OSError:
             log.warning("could not put %s back after a failed recycle", src, exc_info=True)
+            return False  # the copy is still at src
+        try:
+            rename_no_replace(aside, src)
+        except OSError:
+            log.warning("could not put %s back after a failed recycle", src, exc_info=True)
+            try:
+                rename_no_replace(staging, src)
+            except OSError:
+                log.warning("could not restore the copy at %s", src, exc_info=True)
+                return True  # keep the copy: the path must not lose both files
+        return False
 
     def _write_copy(self, exiftool: Path, src: Path, staging: Path, new: datetime) -> None:
         video = src.suffix.lower() in WRITABLE_VIDEO_EXTS
@@ -382,7 +474,9 @@ class _Setter:
             raise DateChangeError(f"ExifTool could not write the copy of {src.name}: {detail}")
         if staging.stat().st_size == 0:
             raise DateChangeError(f"the copy of {src.name} is empty")
-        if not video:
+        if video:
+            check_video_date(exiftool, staging, new, self.ctx.settings.exiftool_read_timeout_s)
+        else:
             written = exif.exiftool_capture_time(
                 exiftool, staging, self.ctx.settings.exiftool_read_timeout_s
             )
@@ -489,7 +583,9 @@ class SetDate:
         plan.notes.insert(
             0,
             f"Change date: {len(actions)} file(s) will change, {same} already have that date, "
-            f"{skipped} skipped. Originals go to the Recycle Bin and can be restored from History.",
+            f"{skipped} skipped. Originals go to the Recycle Bin and can be restored from History. "
+            "To undo, use History; restoring by hand from the Recycle Bin puts the file in a "
+            "hidden folder next to it.",
         )
         return plan
 

@@ -10,12 +10,13 @@ import logging
 from collections.abc import Sequence
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QPushButton,
     QScrollArea,
-    QToolButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,57 @@ def run_line(state: AppState, tool: str, started: str, status: str) -> str:
     return f"{name}  ·  {status}  ·  {started[:16].replace('T', ' ')}"
 
 
+class ToolCard(QFrame):
+    """A clickable card: the name in bold above a description that wraps to the page width.
+
+    Opens with a click, or with Enter or Space when it has the keyboard focus (Tab moves
+    between cards)."""
+
+    clicked = Signal()
+
+    def __init__(self, name: str, description: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("toolCard")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(description)
+        self.setAccessibleName(name)
+        self.setAccessibleDescription(description)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.setStyleSheet(
+            "QFrame#toolCard { border: 1px solid transparent; border-radius: 4px; }"
+            "QFrame#toolCard:hover, QFrame#toolCard:focus { border-color: palette(highlight); }"
+        )
+        self.title_label = QLabel(f"<b>{name}</b>")
+        self.description_label = QLabel(description)
+        self.description_label.setWordWrap(True)
+        for label in (self.title_label, self.description_label):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(2)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.description_label)
+
+    def click(self) -> None:
+        self.clicked.emit()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (Qt name)
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 (Qt name)
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class HomePage(QWidget):
     """Emits ``openPage(id)`` (a tool id or a media page id), ``chooseFolder`` and
     ``openHistory``."""
@@ -57,7 +109,7 @@ class HomePage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.state = state
-        self.tool_cards: dict[str, QToolButton] = {}
+        self.tool_cards: dict[str, ToolCard] = {}
         self.run_labels: list[QLabel] = []
 
         self.workspace_label = QLabel()
@@ -99,12 +151,7 @@ class HomePage(QWidget):
             for page_id, name, description in sorted(
                 by_category[category], key=lambda c: c[1].casefold()
             ):
-                button = QToolButton()
-                button.setText(f"{name}\n{description}")
-                button.setToolTip(description)
-                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-                button.setAutoRaise(True)
-                button.setStyleSheet("QToolButton { text-align: left; padding: 6px; }")
+                button = ToolCard(name, description)
                 button.clicked.connect(lambda _c=False, p=page_id: self.openPage.emit(p))
                 self.tool_cards[page_id] = button
                 layout.addWidget(button)
@@ -118,6 +165,8 @@ class HomePage(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # Everything wraps to the page width, so the page only ever scrolls down.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)
         outer = QVBoxLayout(self)

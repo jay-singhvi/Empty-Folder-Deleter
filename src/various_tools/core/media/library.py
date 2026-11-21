@@ -10,6 +10,11 @@ rows of folders that were not synced are kept.
 Rule 3: a OneDrive cloud-only file is never opened. It is listed with its modified date, no
 size in pixels and no GPS position. Once it is on the device, the next sync reads it.
 
+A folder chosen inside another chosen folder is read once, as part of the outer one
+(:func:`fold_roots`). A subfolder that cannot be listed keeps its rows until it can be.
+RAW photos are read in batches (one ExifTool process per chunk); videos get their place and
+size from one ffprobe call each.
+
 No Qt here and no ``print``: progress and cancel go through the :class:`RunContext`.
 """
 
@@ -26,7 +31,7 @@ from types import TracebackType
 from typing import Literal, Self
 
 from various_tools.core import onedrive
-from various_tools.core.context import RunContext
+from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import FileInfo, walk
 from various_tools.core.media import exif, ffmpeg
 from various_tools.core.media.imaging import IMAGE_EXTS, RAW_EXTS
@@ -145,6 +150,63 @@ def filter_items(items: Iterable[MediaItem], flt: MediaFilter) -> list[MediaItem
     return found
 
 
+class FilterIndex:
+    """A list of items with their search text worked out once, so a filter is quick at 200,000.
+
+    :func:`filter_items` recomputes the lower-case path of every item on every call, which is
+    too slow for a search box. This keeps those strings. :meth:`select` returns positions in
+    ``items``; ``among`` (positions a previous, wider filter returned) narrows the work when the
+    new filter only asks for less (:meth:`narrows`).
+    """
+
+    def __init__(self, items: Sequence[MediaItem]) -> None:
+        self.items = items
+        self._fold = [str(i.path).casefold() for i in items]
+        self._norm = [os.path.normcase(str(i.path)) for i in items]
+        self._month = [i.taken.year * 12 + i.taken.month if i.taken else -1 for i in items]
+        self._video = [i.kind == "video" for i in items]
+
+    @staticmethod
+    def narrows(old: MediaFilter, new: MediaFilter) -> bool:
+        """True when everything ``new`` shows is also shown by ``old``."""
+        return (
+            old.kind == new.kind
+            and old.start == new.start
+            and old.end == new.end
+            and old.folder == new.folder
+            and set(old.text.casefold().split()) <= set(new.text.casefold().split())
+        ) or old.is_empty
+
+    def select(self, flt: MediaFilter, among: Sequence[int] | None = None) -> list[int]:
+        """Positions of the items that pass ``flt``, in order (same rules as filter_items)."""
+        found: list[int] = list(range(len(self.items))) if among is None else list(among)
+        if flt.is_empty:
+            return found
+        if flt.kind == "photo":
+            video = self._video
+            found = [i for i in found if not video[i]]
+        elif flt.kind == "video":
+            video = self._video
+            found = [i for i in found if video[i]]
+        start, end = flt.start, flt.end
+        if start is not None and end is not None and start > end:
+            start, end = end, start
+        if start is not None or end is not None:
+            month = self._month
+            low = start[0] * 12 + start[1] if start is not None else 0
+            high = end[0] * 12 + end[1] if end is not None else 1 << 60
+            found = [i for i in found if month[i] >= 0 and low <= month[i] <= high]
+        if flt.folder is not None:
+            folder = os.path.normcase(str(flt.folder))
+            prefix = folder if folder.endswith(os.sep) else folder + os.sep
+            norm = self._norm
+            found = [i for i in found if norm[i].startswith(prefix)]
+        fold = self._fold
+        for word in flt.text.casefold().split():
+            found = [i for i in found if word in fold[i]]
+        return found
+
+
 def sort_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     """By date taken (items without one last), then by path."""
     return sorted(
@@ -157,6 +219,25 @@ def _key(path: Path | str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
 
 
+def fold_roots(roots: Sequence[Path]) -> list[Path]:
+    """The outermost folders of ``roots``, in their order: a folder inside another is dropped.
+
+    Two spellings of the same folder count once. Used so that nested choices are read and
+    counted a single time.
+    """
+    keyed = [(root, _prefix(root)) for root in roots]
+    kept: list[Path] = []
+    seen: set[str] = set()
+    for root, prefix in keyed:
+        if prefix in seen:
+            continue
+        if any(other != prefix and prefix.startswith(other) for _r, other in keyed):
+            continue
+        seen.add(prefix)
+        kept.append(root)
+    return kept
+
+
 def _prefix(root: Path) -> str:
     key = _key(root)
     return key if key.endswith(os.sep) else key + os.sep
@@ -166,6 +247,13 @@ _COLUMNS = "key, path, kind, size, mtime, taken, date_source, lat, lon, width, h
 
 
 _PLACEHOLDERS = ", ".join("?" * len(_COLUMNS.split(",")))
+
+
+def _count(report: SyncReport, *, is_new: bool) -> None:
+    if is_new:
+        report.added += 1
+    else:
+        report.updated += 1
 
 
 class MediaLibrary:
@@ -264,8 +352,8 @@ class MediaLibrary:
         rows are kept. On cancel, what was read so far is kept and nothing is removed.
         """
         report = SyncReport()
-        listed: list[tuple[Path, list[FileInfo]]] = []
-        for root in roots:
+        listed: list[tuple[Path, list[FileInfo], list[str]]] = []
+        for root in fold_roots(roots):
             ctx.check_cancelled()
             if not os.path.isdir(root):
                 report.errors.append(
@@ -274,19 +362,30 @@ class MediaLibrary:
                 continue
             ctx.report(0, 0, f"Listing {root}")
             files: list[FileInfo] = []
-            for info in walk(root, exts=MEDIA_EXTS):
+            unlisted: list[str] = []
+
+            def note_unlisted(folder: Path, exc: OSError, sink: list[str] = unlisted) -> None:
+                sink.append(_prefix(folder))
+                report.errors.append(
+                    f"{folder}: could not be listed ({exc}), so its photos were kept as they were"
+                )
+
+            for info in walk(root, exts=MEDIA_EXTS, on_error=note_unlisted):
                 files.append(info)
                 if len(files) % 500 == 0:
                     ctx.check_cancelled()
-            listed.append((root, files))
+            listed.append((root, files, unlisted))
 
-        total = sum(len(files) for _root, files in listed)
+        total = sum(len(files) for _root, files, _u in listed)
         done = 0
         ffprobe_note = False
+        exiftool = ctx.deps.path("exiftool")
+        raw_queue: list[tuple[str, FileInfo, bool]] = []  # RAW files waiting for ExifTool
         try:
-            for root, files in listed:
+            for root, files, unlisted in listed:
                 known = self._known_under(root)
                 seen: set[str] = set()
+                raw_queue = []
                 for info in files:
                     ctx.check_cancelled()
                     key = _key(info.path)
@@ -302,29 +401,68 @@ class MediaLibrary:
                         self._conn.execute("UPDATE items SET cloud_only = 1 WHERE key = ?", (key,))
                         report.unchanged += 1
                     else:
-                        item, note = _read_file(info, cloud, ctx, need_note=not ffprobe_note)
-                        if note is not None:
-                            if note.startswith("ffprobe"):
-                                ffprobe_note = True
-                            report.errors.append(note)
-                        self._store(key, item)
-                        if old is None:
-                            report.added += 1
+                        if not cloud and exiftool is not None and _is_raw(info.path):
+                            raw_queue.append((key, info, old is None))
+                            if len(raw_queue) >= exif.EXIFTOOL_BATCH_SIZE:
+                                self._read_raw_batch(raw_queue, exiftool, ctx, report)
+                                raw_queue = []
                         else:
-                            report.updated += 1
+                            item, note = _read_file(info, cloud, ctx, need_note=not ffprobe_note)
+                            if note is not None:
+                                if note.startswith("ffprobe"):
+                                    ffprobe_note = True
+                                report.errors.append(note)
+                            self._store(key, item)
+                            _count(report, is_new=old is None)  # only once the row is stored
                     if cloud:
                         report.cloud_only += 1
                     done += 1
                     ctx.report(done, total, info.path.name)
                     if done % _COMMIT_EVERY == 0:
                         self._conn.commit()
-                gone = [k for k in known if k not in seen]
+                if raw_queue and exiftool is not None:
+                    self._read_raw_batch(raw_queue, exiftool, ctx, report)
+                    raw_queue = []
+                # Rows of a folder that could not be listed are kept (it is only unreachable).
+                gone = [
+                    k for k in known if k not in seen and not any(k.startswith(u) for u in unlisted)
+                ]
                 self._conn.executemany("DELETE FROM items WHERE key = ?", [(k,) for k in gone])
                 report.removed += len(gone)
                 self._conn.commit()
+        except Cancelled:
+            # Files already queued for ExifTool were chosen to be read: finish them, keep the
+            # rows, then let the cancel go on.
+            if raw_queue and exiftool is not None:
+                self._read_raw_batch(raw_queue, exiftool, ctx, report, cancellable=False)
+            raise
         finally:
             self._conn.commit()
         return report
+
+    def _read_raw_batch(
+        self,
+        queue: list[tuple[str, FileInfo, bool]],
+        exiftool: Path,
+        ctx: RunContext,
+        report: SyncReport,
+        *,
+        cancellable: bool = True,
+    ) -> None:
+        """Read the queued RAW files with one ExifTool process and store their rows."""
+        if cancellable:
+            ctx.check_cancelled()
+        settings = ctx.settings
+        infos = exif.exiftool_raw_info(
+            exiftool,
+            [info.path for _k, info, _n in queue],
+            settings.exiftool_read_timeout_s * max(1, len(queue) // 5),
+            single_timeout=settings.exiftool_read_timeout_s,
+        )
+        for key, info, is_new in queue:
+            base = _base_item(info, cloud=False)
+            self._store(key, _apply_raw(base, infos.get(info.path), settings.min_plausible_year))
+            _count(report, is_new=is_new)
 
     def _store(self, key: str, item: MediaItem) -> None:
         self._conn.execute(
@@ -360,17 +498,42 @@ def read_media_item(path: Path, ctx: RunContext) -> MediaItem | None:
         return None
     cloud = not onedrive.is_on_device(onedrive.get_sync_status(path))
     info = FileInfo(path, stat.st_size, stat.st_mtime, 0)
+    exiftool = ctx.deps.path("exiftool")
+    if not cloud and exiftool is not None and _is_raw(path):
+        raw = exif.exiftool_raw_info(exiftool, [path], ctx.settings.exiftool_read_timeout_s)
+        year = ctx.settings.min_plausible_year
+        return _apply_raw(_base_item(info, cloud=False), raw.get(path), year)
     return _read_file(info, cloud, ctx, need_note=False)[0]
+
+
+def _is_raw(path: Path) -> bool:
+    return path.suffix.lower() in RAW_EXTS
+
+
+def _base_item(info: FileInfo, cloud: bool) -> MediaItem:
+    """The item with only what a directory listing gives: the modified date and nothing else."""
+    return MediaItem(
+        info.path, media_kind(info.path) or "photo", info.size, info.mtime,
+        _modified(info.mtime), FROM_MODIFIED, None, None, None, None, cloud,
+    )  # fmt: skip
+
+
+def _apply_raw(base: MediaItem, raw: exif.RawInfo | None, min_year: int) -> MediaItem:
+    """``base`` with what ExifTool read from a RAW file (None: it could not read it)."""
+    if raw is None:
+        return base
+    lat, lon = raw.gps if raw.gps is not None else (None, None)
+    item = replace(base, lat=lat, lon=lon, width=raw.width, height=raw.height)
+    if exif.is_plausible_date(raw.capture_time, min_year=min_year):
+        return replace(item, taken=raw.capture_time, date_source=FROM_CAMERA)
+    return item
 
 
 def _read_file(
     info: FileInfo, cloud: bool, ctx: RunContext, *, need_note: bool
 ) -> tuple[MediaItem, str | None]:
     """The item for one file and an optional note for ``errors``. Never raises for a file."""
-    base = MediaItem(
-        info.path, media_kind(info.path) or "photo", info.size, info.mtime,
-        _modified(info.mtime), FROM_MODIFIED, None, None, None, None, cloud,
-    )  # fmt: skip
+    base = _base_item(info, cloud)
     if cloud:  # rule 3: never opened
         return replace(base, date_source=FROM_MODIFIED_CLOUD), None
     try:
@@ -389,12 +552,6 @@ def _read_photo(base: MediaItem, ctx: RunContext) -> MediaItem:
     settings = ctx.settings
     data = exif.read_exif(base.path)
     taken = data.capture_time
-    if taken is None and base.path.suffix.lower() in RAW_EXTS:
-        exiftool = ctx.deps.path("exiftool")
-        if exiftool is not None:
-            taken = exif.exiftool_capture_time(
-                exiftool, base.path, settings.exiftool_read_timeout_s
-            )
     lat, lon = data.gps if data.gps is not None else (None, None)
     item = replace(base, lat=lat, lon=lon, width=data.width, height=data.height)
     if exif.is_plausible_date(taken, min_year=settings.min_plausible_year):
@@ -412,10 +569,12 @@ def _read_video(
             "when they were filmed."
         )
         return base, note if need_note else None
-    taken = ffmpeg.creation_time(ffprobe, base.path, timeout=ctx.settings.ffprobe_timeout_s)
-    if exif.is_plausible_date(taken, min_year=ctx.settings.min_plausible_year):
-        return replace(base, taken=taken, date_source=FROM_VIDEO), None
-    return base, None
+    probed = ffmpeg.probe_video_info(ffprobe, base.path, timeout=ctx.settings.ffprobe_timeout_s)
+    lat, lon = probed.gps if probed.gps is not None else (None, None)
+    item = replace(base, lat=lat, lon=lon, width=probed.width, height=probed.height)
+    if exif.is_plausible_date(probed.creation_time, min_year=ctx.settings.min_plausible_year):
+        return replace(item, taken=probed.creation_time, date_source=FROM_VIDEO), None
+    return item, None
 
 
 def _modified(mtime: float) -> datetime | None:

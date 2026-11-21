@@ -25,6 +25,10 @@ Dates must fall between 1980 and 2100.
    next to the file, the original goes to the Recycle Bin (its own journal row), the copy takes
    the original's name and gets the new modified time. History can undo the run.
 
+   The original is recycled from a hidden `.setdate-*.d` folder next to the file, under its own
+   file name. To undo, use History. Restoring by hand from the Recycle Bin puts the file in that
+   hidden folder next to it, not back in the photo folder.
+
 ## What is written
 
 * With ExifTool: photos get `DateTimeOriginal`, `CreateDate` and `ModifyDate` (checked by reading

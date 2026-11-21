@@ -65,3 +65,14 @@ def test_timeline_show_on_map_opens_the_map_centred_on_the_item(
     assert window.map_page is not None
     assert window.stack.currentWidget() is window.map_page
     assert focused == [photo]
+
+
+def test_home_clears_the_sidebar_highlight(window: MainWindow) -> None:
+    from various_tools.gui.main_window import HISTORY_ID, HOME_ID
+
+    window.show_page(HISTORY_ID)
+    assert window.sidebar.currentItem() is not None
+    window.show_page(HOME_ID)
+    assert window.stack.currentWidget() is window.home_page
+    assert window.sidebar.currentItem() is None
+    assert window.sidebar.selectedItems() == []

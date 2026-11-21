@@ -106,6 +106,8 @@ def print_result(console: Console, result: RunResult) -> None:
         f"Run [bold]{result.run_id}[/bold] {result.status}: "
         f"{done} done, {failed} failed, {skipped} skipped."
     )
+    for line in result.notes:
+        console.print(f"[yellow]note:[/yellow] {line}", soft_wrap=True)
     problems = [o for o in result.outcomes if o.status == "failed"]
     if problems:
         console.print(outcomes_table(problems[:MAX_LISTED], "Failed"))

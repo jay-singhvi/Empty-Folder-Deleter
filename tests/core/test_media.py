@@ -423,3 +423,55 @@ def test_read_exif_degrades_on_unexpected_pillow_errors(
 
     monkeypatch.setattr(exif, "_exif_from_image", broken)
     assert exif.read_exif(path) == exif.ExifInfo()
+
+
+def test_probe_video_info_reads_every_stream_for_the_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as json_module
+    import subprocess as sp
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    seen: list[list[str]] = []
+    payload = {
+        "format": {"tags": {}},
+        "streams": [
+            {"codec_type": "audio", "tags": {"creation_time": "2020-06-01T10:00:00.000000Z"}},
+            {"codec_type": "video", "width": 640, "height": 480, "tags": {}},
+        ],
+    }
+
+    def fake(args: list[str], timeout: float = 60) -> sp.CompletedProcess[str]:
+        seen.append(args)
+        return sp.CompletedProcess(args, 0, json_module.dumps(payload), "")
+
+    monkeypatch.setattr(ffmpeg, "run_tool", fake)
+    info = ffmpeg.probe_video_info(Path("ffprobe"), clip)
+    assert "-select_streams" not in seen[0]  # not only v:0
+    assert info.creation_time is not None and info.creation_time.year in (2020,)
+    assert (info.width, info.height) == (640, 480)  # the video stream, not stream 0
+
+
+def test_a_failed_exiftool_chunk_is_read_file_by_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as json_module
+    import subprocess as sp
+
+    paths = [tmp_path / f"{n}.cr3" for n in range(4)]
+    bad = paths[2]
+
+    def fake(_tool: Path, args: list[str], _timeout: float) -> sp.CompletedProcess[str]:
+        files = [a for a in args if a.endswith(".cr3")]
+        if len(files) > 1 or files == [str(bad)]:
+            raise sp.TimeoutExpired(args, 1)  # the chunk, and the one bad file, time out
+        record = {
+            "SourceFile": files[0].replace("\\", "/"),
+            "DateTimeOriginal": "2021:01:02 03:04:05",
+        }
+        return sp.CompletedProcess(args, 0, json_module.dumps([record]), "")
+
+    monkeypatch.setattr(exif, "run_exiftool", fake)
+    found = exif.exiftool_raw_info(Path("exiftool"), paths, 5, batch_size=4)
+    assert set(found) == {p for p in paths if p != bad}  # one bad file does not blank the rest

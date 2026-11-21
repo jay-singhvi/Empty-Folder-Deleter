@@ -59,6 +59,9 @@ duplicates inside the photo library and place names, comes later).
     every stream, not only the first video stream.
 - **Known, left for later:** rebuilding the Timeline grid at 200,000 items still takes about a
   second.
+- **Home page:** each tool card shows its name above a description that wraps to the window
+  (no more sideways scrolling), and opening Home no longer leaves another page highlighted
+  in the sidebar.
 - Version 0.7.0.
 
 ### Version 0.6.0: one working folder, apply in batches, a real photo browser (2026-11-20)

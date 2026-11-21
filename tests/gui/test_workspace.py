@@ -480,3 +480,25 @@ def test_a_one_folder_tool_says_it_uses_the_first_working_folder(
     page = window.tool_page("project_export")
     text = page.workspace_label.text()
     assert str(first) in text and "first" in text and str(second) not in text
+
+
+def test_home_cards_wrap_and_never_scroll_sideways(qtbot: QtBot, window: MainWindow) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QScrollArea
+
+    from various_tools.gui.home_page import ToolCard
+
+    home = window.home_page
+    card = home.tool_cards["empty_folders"]
+    assert isinstance(card, ToolCard)
+    assert card.description_label.wordWrap()
+    assert card.title_label.text() == f"<b>{window.state.tools['empty_folders'].name}</b>"
+    scroll = home.findChild(QScrollArea)
+    assert scroll is not None
+    assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    opened: list[str] = []
+    home.openPage.connect(opened.append)
+    card.setFocus()
+    qtbot.keyClick(card, Qt.Key.Key_Return)
+    qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
+    assert opened == ["empty_folders", "empty_folders"]

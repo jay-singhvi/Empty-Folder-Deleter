@@ -34,9 +34,31 @@ duplicates inside the photo library and place names, comes later).
   list; a "The list is out of date." note with *Refresh* appears instead.
 - **README:** screenshots of the Home page, a tool page, the Timeline and the Map, made from
   generated pictures; a "Gentle on OneDrive" section.
-- **Known, left for later:** a sidecar is renamed as its own step, so if the photo's rename
-  fails, a `name.ext.xmp` can still be renamed (undo reverts it); rebuilding the Timeline grid
-  at 200,000 items still takes about a second.
+- **Review fixes:**
+  - Fix File Extensions: ticking a file ticks its sidecars and a sidecar cannot be ticked without
+    its file; at apply a sidecar is skipped ("its file was not renamed") when its file did not
+    rename, and follows the name its file really got (a `_dupN` name chosen at apply). A
+    `<stem>` sidecar that another file shares is left alone, sidecars obey the Never touch
+    list, and a name is reserved only for a sidecar that is really planned.
+  - Waiting for OneDrive: after one full timeout in which nothing became in sync, the run stops
+    waiting (a note and a log line say so). Names OneDrive never uploads (`desktop.ini`,
+    `Thumbs.db`, `~$*`, `*.tmp`, `.DS_Store`, invalid names) count as "cannot tell". The sync
+    state is also read when Windows answers ERROR_MORE_DATA. The last batch of a run is not
+    waited for, because nothing follows it (the same as when the run is paused).
+  - Change date: if the original cannot be put back after a failed recycle, the new copy goes
+    back in place, so the path is never empty and no copy is deleted. The notes and
+    `docs/tools/set_date.md` say that restoring by hand from the Recycle Bin puts the file in
+    the hidden `.setdate-*.d` folder (History undo is the right way).
+  - Library: a failed background read keeps the previous items, ends "Loading" and is retried;
+    the Timeline order is made once when the library is read, not again per keystroke; the map
+    tile cache clean-up runs off the GUI thread (old folders removed once per session); a click
+    on the map tests the same margin copies as painting.
+  - Library sync: added and updated are counted after the row is stored; RAW files already
+    queued are read and kept before a cancel is honoured; a failed or timed-out ExifTool batch
+    is read file by file; a video's creation time and place are read from the format and from
+    every stream, not only the first video stream.
+- **Known, left for later:** rebuilding the Timeline grid at 200,000 items still takes about a
+  second.
 - Version 0.7.0.
 
 ### Version 0.6.0: one working folder, apply in batches, a real photo browser (2026-11-20)

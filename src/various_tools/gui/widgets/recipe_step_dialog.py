@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from various_tools.core.recipe import (
     RecipeStep,
+    not_remembered_fields,
     step_from_options,
     uses_own_folders,
     workspace_field,
@@ -107,7 +108,10 @@ class RecipeStepDialog(QDialog):
         self.description.setText(tool.description)
         name = workspace_field(tool)
         own = step is not None and uses_own_folders(step, tool)
-        values: dict[str, Any] = dict(step.options) if step is not None else {}
+        blocked = not_remembered_fields(tool)
+        values: dict[str, Any] = (
+            {k: v for k, v in step.options.items() if k not in blocked} if step is not None else {}
+        )
         form = SchemaForm(tool.Options, values)
         self._form = form
         self._scroll.setWidget(form)

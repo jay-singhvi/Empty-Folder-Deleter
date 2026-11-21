@@ -28,6 +28,7 @@ from various_tools.core.recipe import (
     undo_recipe_run,
     workspace_field,
 )
+from various_tools.core.schema import describe
 from various_tools.core.settings import Settings
 from various_tools.tools.base import Tool, discover
 
@@ -235,3 +236,30 @@ def test_undo_recipe_run_goes_last_to_first_and_reports_each(
     with Journal(path) as journal:
         second = undo_recipe_run(journal, ids[:1])
     assert not isinstance(second[0][1], str)
+
+
+def test_step_from_options_drops_locked_and_replaces_originals(tools: dict[str, Tool]) -> None:
+    tool = tools["media_resize"]
+    values = {"output": "overwrite", "allow_overwrite": True, "remove_raw_originals": True}
+    step = step_from_options(tool, {**values, "keep_metadata": False}, own_folders=False)
+    assert step.options == {"keep_metadata": False}
+    dup = tools["duplicates"]
+    thresholds = {s.name: 99 for s in describe(dup.Options) if s.locked}
+    assert thresholds
+    assert step_from_options(dup, thresholds, own_folders=False).options == {}
+
+
+def test_a_hand_edited_step_with_unsafe_values_needs_attention(tools: dict[str, Tool]) -> None:
+    step = RecipeStep("media_resize", {"output": "overwrite", "allow_overwrite": True})
+    problem = check_step(step, tools)
+    assert problem is not None and "output" in problem
+    assert check_step(RecipeStep("media_resize", {"output": "new_folder"}), tools) is None
+    assert check_step(RecipeStep("media_resize", {"keep_metadata": False}), tools) is None
+
+
+def test_the_share_starter_has_no_step_that_touches_the_originals(
+    tools: dict[str, Tool],
+) -> None:
+    starter = next(r for r in starter_recipes() if r.name == "Prepare photos to share")
+    assert [s.tool for s in starter.steps] == ["media_resize"]
+    assert starter.steps[0].options == {"keep_metadata": False}

@@ -210,11 +210,46 @@ def step_options(step: RecipeStep, tool: Tool, folders: Sequence[Path]) -> ToolO
     return tool.Options.model_validate(step_values(step, tool, folders))
 
 
+def _json_default(value: object) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
+def not_remembered_fields(tool: Tool) -> frozenset[str]:
+    """Options a recipe never keeps (the same ones a tool page never remembers): 🔒 locked
+    options and options marked ``replaces_originals``, and the options that only apply when one of
+    those is set (such as "Allow replacing the originals"). They always start from their default."""
+    specs = describe(tool.Options)
+    blocked = {s.name for s in specs if s.locked or s.replaces_originals}
+    blocked |= {
+        s.name for s in specs if s.depends_on and s.depends_on.split("=")[0].strip() in blocked
+    }
+    return frozenset(blocked)
+
+
+def unsafe_option_names(step: RecipeStep, tool: Tool) -> list[str]:
+    """The step's saved options that a recipe must not carry (see :func:`not_remembered_fields`),
+    or a permanent-delete value. Only a hand-edited ``recipes.json`` can hold them."""
+    blocked = not_remembered_fields(tool)
+    defaults = {s.name: _json_default(s.default) for s in describe(tool.Options)}
+    return sorted(
+        key
+        for key, value in step.options.items()
+        if value == PERMANENT or (key in blocked and value != defaults.get(key))
+    )
+
+
 def check_step(step: RecipeStep, tools: Mapping[str, Tool]) -> str | None:
     """None when the step can run, else why it "needs attention" (in plain words)."""
     tool = tools.get(step.tool)
     if tool is None:
         return f"The tool {step.tool!r} is not available any more."
+    unsafe = unsafe_option_names(step, tool)
+    if unsafe:
+        return (
+            f"The saved options set {', '.join(unsafe)}, which a recipe never keeps "
+            "(they are 🔒 locked, replace the originals or delete for good). Use Change step… "
+            "and save it again to put them back to their defaults."
+        )
     try:
         step_options(step, tool, [Path(".")])
     except ValidationError as exc:
@@ -233,21 +268,21 @@ def step_from_options(tool: Tool, values: Mapping[str, Any], *, own_folders: boo
     """A step from a tool page's current option values (as JSON values).
 
     Only values that differ from the option's default are kept, so a later release can change a
-    default. The workspace option is dropped unless the page uses other folders, and a
-    permanent-delete value is dropped too (the step falls back to the default, see
-    :data:`PERMANENT`).
+    default. The workspace option is dropped unless the page uses other folders. Options a tool
+    page does not remember are dropped too (🔒 locked ones and ones that replace the originals,
+    see :func:`not_remembered_fields`), and so is a permanent-delete value: the step falls back
+    to the default, so these are always chosen again on purpose.
     """
     name = workspace_field(tool)
-    defaults = {
-        s.name: json.loads(json.dumps(s.default, default=str)) for s in describe(tool.Options)
-    }
+    blocked = not_remembered_fields(tool)
+    defaults = {s.name: _json_default(s.default) for s in describe(tool.Options)}
     kept: dict[str, Any] = {}
     for key, value in values.items():
         if key == name:
             if own_folders and value:
                 kept[key] = value
             continue
-        if value == PERMANENT or (key in defaults and value == defaults[key]):
+        if key in blocked or value == PERMANENT or (key in defaults and value == defaults[key]):
             continue
         kept[key] = value
     return RecipeStep(tool.id, kept)
@@ -460,8 +495,9 @@ def starter_recipes() -> list[Recipe]:
         Recipe(
             "Prepare photos to share",
             [
-                RecipeStep("media_resize"),
-                RecipeStep("metadata_strip", {"output": "new_folder", "in_place": False}),
+                # Copies go to a new folder and carry no metadata (GPS included). One step: a
+                # recipe cannot point a second step at the first step's output folder.
+                RecipeStep("media_resize", {"keep_metadata": False}),
             ],
         ),
         Recipe("Fix photo names", [RecipeStep("wrong_extension"), RecipeStep("rename")]),

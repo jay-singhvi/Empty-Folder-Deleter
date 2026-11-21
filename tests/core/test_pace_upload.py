@@ -117,7 +117,8 @@ def test_timeout_continues_and_notes_it(
     ctx = _ctx(tmp_path, journal, _pace(upload_timeout_s=10.0))
     result = apply_plan(_plan(tmp_path, 3), ctx)
     assert result.status == "done" and result.count("done") == 3
-    assert len(result.notes) == 1 and "2 of 2" in result.notes[0] and "batch 1" in result.notes[0]
+    assert "2 of 2" in result.notes[0] and "batch 1" in result.notes[0]
+    assert "did not upload anything for 10 seconds" in result.notes[1]
     assert sum(sleeps) == pytest.approx(10.0)
 
 
@@ -202,3 +203,40 @@ def test_the_heartbeat_keeps_running_while_waiting(
     monkeypatch.setattr(journal, "touch_run", touches.append)
     apply_plan(_plan(tmp_path, 3), _ctx(tmp_path, journal, _pace(upload_timeout_s=300.0)))
     assert len(touches) >= 3
+
+
+def test_after_one_full_timeout_with_no_progress_later_batches_are_not_waited_for(
+    tmp_path: Path, journal: Journal, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def stuck(path: Path) -> bool | None:
+        calls.append(path.name)
+        return True  # OneDrive never uploads anything (paused, or not running)
+
+    monkeypatch.setattr(onedrive, "upload_pending", stuck)
+    ctx = _ctx(tmp_path, journal, _pace(upload_timeout_s=10.0))
+    result = apply_plan(_plan(tmp_path, 6), ctx)
+    assert result.status == "done" and result.count("done") == 6
+    assert sum(sleeps) == pytest.approx(10.0)  # only the first batch waited the full timeout
+    assert set(calls) == {"f0.txt", "f1.txt"}  # the second batch was never polled
+    assert any("did not upload anything" in n and "continuing" in n for n in result.notes)
+
+
+def test_progress_during_a_wait_keeps_later_waits_going(
+    tmp_path: Path, journal: Journal, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f1_checks = 0
+
+    def pending(path: Path) -> bool | None:
+        nonlocal f1_checks
+        if path.name == "f1.txt":
+            f1_checks += 1
+            return f1_checks <= 1  # uploads during the first wait
+        return path.name in {"f2.txt", "f3.txt"}  # the second batch never uploads
+
+    monkeypatch.setattr(onedrive, "upload_pending", pending)
+    result = apply_plan(_plan(tmp_path, 6), _ctx(tmp_path, journal, _pace(upload_timeout_s=10.0)))
+    gave_up = [n for n in result.notes if "did not upload anything" in n]
+    assert len(gave_up) == 1  # only after the second batch's full timeout without progress
+    assert sum(sleeps) == pytest.approx(10.0 + 5.0)  # batch 1 waited one poll, batch 2 its full timeout

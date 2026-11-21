@@ -585,6 +585,14 @@ def _wait_between_batches(
     ctx.check_cancelled()
 
 
+@dataclass
+class _UploadState:
+    """Whether the run still waits for OneDrive. After one full timeout in which nothing became
+    in sync, OneDrive is probably paused or not running, so the run stops waiting."""
+
+    gave_up: bool = False
+
+
 def _wait_for_upload(
     ctx: RunContext,
     pace: Pace,
@@ -594,13 +602,16 @@ def _wait_for_upload(
     total: int,
     beat: _Heartbeat,
     result: RunResult,
+    state: _UploadState,
 ) -> bool:
     """Wait until OneDrive has uploaded every path (or the timeout passes). Returns True when
     the person asked to skip the wait. Paused time does not count towards the timeout. A file
-    that cannot be checked (``None``) counts as uploaded."""
+    that cannot be checked (``None``) counts as uploaded. A full timeout with no file becoming
+    in sync sets ``state.gave_up``."""
     elapsed = 0.0
     since_poll = UPLOAD_POLL_S  # check at once
     pending = list(paths)
+    baseline: int | None = None
     ctx.skip_wait_event.clear()
     while True:
         ctx.check_cancelled()
@@ -616,6 +627,8 @@ def _wait_for_upload(
             pending = [p for p in pending if onedrive.upload_pending(p) is True]
             if not pending:
                 return False
+            if baseline is None:
+                baseline = len(pending)  # what was really waiting at the first look
         if elapsed >= pace.upload_timeout_s:
             note = (
                 f"OneDrive had not finished uploading {len(pending)} of {len(paths)} files "
@@ -623,6 +636,13 @@ def _wait_for_upload(
             )
             ctx.log.warning(note)
             result.notes.append(note)
+            if len(pending) == baseline:
+                state.gave_up = True
+                span = pace.upload_timeout_s
+                how_long = f"{span / 60:.0f} minutes" if span >= 60 else f"{span:.0f} seconds"
+                stop = f"OneDrive did not upload anything for {how_long}; continuing without waiting"
+                ctx.log.warning(stop)
+                result.notes.append(stop)
             return False
         ctx.report(
             done,
@@ -671,6 +691,7 @@ def apply_plan(
     executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
     finished: dict[str, ActionOutcome] = {}  # by source path text, for ``before_action``
     seen = 0  # how many outcomes are already in ``finished``
+    upload_state = _UploadState()
     try:
         for seq, action in enumerate(actions, start=1):
             ctx.check_cancelled()
@@ -684,9 +705,9 @@ def apply_plan(
                 waited_at = executed
                 batch_no = executed // pace.batch_size
                 skipped = False
-                if pace.wait_for_upload and batch_outputs:
+                if pace.wait_for_upload and batch_outputs and not upload_state.gave_up:
                     skipped = _wait_for_upload(
-                        ctx, pace, batch_outputs, batch_no, seq - 1, total, beat, result
+                        ctx, pace, batch_outputs, batch_no, seq - 1, total, beat, result, upload_state
                     )
                 batch_outputs = []
                 if not skipped:

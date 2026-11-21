@@ -163,3 +163,30 @@ def test_upload_pending_on_a_real_onedrive_file() -> None:  # pragma: no cover
     target = Path(os.environ.get("VT_TEST_ONEDRIVE_FILE", ""))
     assert target.is_file(), "VT_TEST_ONEDRIVE_FILE must name an existing file in OneDrive"
     assert onedrive.upload_pending(target) in (True, False)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["desktop.ini", "Thumbs.db", "~$report.docx", "scratch.TMP", ".DS_Store", "a:b.txt", "x.", "y "],
+)
+def test_upload_pending_cannot_tell_for_files_onedrive_never_syncs(
+    in_onedrive: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    def boom(_p: Path) -> int:
+        raise AssertionError("must not query a file OneDrive never syncs")
+
+    monkeypatch.setattr(onedrive, "_query_in_sync_state", boom)
+    assert onedrive.upload_pending(in_onedrive / name) is None
+
+
+def test_more_data_error_still_reads_the_sync_state() -> None:
+    import ctypes
+
+    buffer = ctypes.create_string_buffer(onedrive._INFO_BUFFER_BYTES)
+    info = onedrive._PlaceholderBasicInfo.from_buffer(buffer)
+    info.InSyncState = onedrive.CF_IN_SYNC_STATE_IN_SYNC
+    more_data = onedrive.HRESULT_MORE_DATA - (1 << 32)  # as a signed HRESULT
+    assert onedrive._state_from_result(more_data, buffer) == onedrive.CF_IN_SYNC_STATE_IN_SYNC
+    assert onedrive._state_from_result(0x80004005 - (1 << 32), buffer) is None
+    not_cloud = onedrive.HRESULT_NOT_A_CLOUD_FILE - (1 << 32)
+    assert onedrive._state_from_result(not_cloud, buffer) == onedrive.NOT_A_PLACEHOLDER

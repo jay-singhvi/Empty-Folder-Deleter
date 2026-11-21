@@ -212,6 +212,7 @@ FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 CF_PLACEHOLDER_INFO_BASIC = 0
 CF_IN_SYNC_STATE_IN_SYNC = 1
 HRESULT_NOT_A_CLOUD_FILE = 0x80070178  # HRESULT_FROM_WIN32(ERROR_NOT_A_CLOUD_FILE)
+HRESULT_MORE_DATA = 0x800700EA  # HRESULT_FROM_WIN32(ERROR_MORE_DATA): the file identity is long
 _INVALID_HANDLE = ctypes.c_void_p(-1).value
 
 NOT_A_PLACEHOLDER = "not-a-placeholder"
@@ -285,14 +286,42 @@ def _query_in_sync_state(path: Path) -> int | str | None:
         hresult = int(
             get_info(handle, CF_PLACEHOLDER_INFO_BASIC, buffer, _INFO_BUFFER_BYTES, returned)
         )
-        if (hresult & 0xFFFFFFFF) == HRESULT_NOT_A_CLOUD_FILE:
-            return NOT_A_PLACEHOLDER
-        if hresult < 0:
-            return None
-        info = _PlaceholderBasicInfo.from_buffer(buffer)
-        return int(info.InSyncState)
+        return _state_from_result(hresult, buffer)
     finally:
         close_handle(handle)
+
+
+def _state_from_result(hresult: int, buffer: ctypes.Array[ctypes.c_char]) -> int | str | None:
+    """Read ``InSyncState`` out of the buffer ``CfGetPlaceholderInfo`` filled.
+
+    ``ERROR_MORE_DATA`` only means a long file identity did not fit; the fixed part, with
+    ``InSyncState``, is already filled in, so it is read like a success.
+    """
+    code = hresult & 0xFFFFFFFF
+    if code == HRESULT_NOT_A_CLOUD_FILE:
+        return NOT_A_PLACEHOLDER
+    if hresult < 0 and code != HRESULT_MORE_DATA:
+        return None
+    return int(_PlaceholderBasicInfo.from_buffer(buffer).InSyncState)
+
+
+_NEVER_SYNCED_NAMES = frozenset({"desktop.ini", "thumbs.db", ".ds_store", ".lock"})
+_INVALID_NAME_CHARS = frozenset('"*:<>?/\\|')
+
+
+def never_synced(name: str) -> bool:
+    """True for a file name OneDrive does not upload: its own blocked names and types
+    (``desktop.ini``, ``Thumbs.db``, ``~$*`` Office lock files, ``*.tmp``, ``.DS_Store``), and
+    names it cannot store (invalid characters, a trailing dot or space, a leading space)."""
+    lowered = name.casefold()
+    return (
+        lowered in _NEVER_SYNCED_NAMES
+        or lowered.startswith("~$")
+        or lowered.endswith(".tmp")
+        or name.endswith((".", " "))
+        or name.startswith(" ")
+        or any(c in _INVALID_NAME_CHARS for c in name)
+    )
 
 
 def upload_pending(path: Path) -> bool | None:
@@ -300,10 +329,10 @@ def upload_pending(path: Path) -> bool | None:
 
     Read with the Cloud Files API on a handle opened for attributes only, so it never downloads
     anything. A file that is not a placeholder yet, inside a OneDrive folder, counts as waiting
-    to be uploaded. ``None`` when it cannot tell: not a OneDrive folder, not Windows, or the
-    Cloud Files API is missing or refuses.
+    to be uploaded. ``None`` when it cannot tell: not a OneDrive folder, a name OneDrive never
+    syncs (see :func:`never_synced`), not Windows, or the Cloud Files API is missing or refuses.
     """
-    if not is_inside_onedrive(path):
+    if not is_inside_onedrive(path) or never_synced(path.name):
         return None
     state = _query_in_sync_state(path)
     if state is None:

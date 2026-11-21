@@ -37,6 +37,7 @@ class LibraryModel(QObject):
         super().__init__()
         self.state = state
         self._items: list[MediaItem] = []
+        self._by_path: dict[str, MediaItem] | None = None
         self._shown: list[MediaItem] = []
         self._filter = MediaFilter()
         self._stamp: tuple[object, ...] | None = None
@@ -71,6 +72,7 @@ class LibraryModel(QObject):
                 log.warning("Could not read the media library %s: %s", path, exc)
         self._stamp = self._stamp_now()
         self._items = items
+        self._by_path = None
         self._shown = filter_items(items, self._filter)
         self.itemsChanged.emit()
         self.changed.emit()
@@ -114,11 +116,13 @@ class LibraryModel(QObject):
         return [i for i in self._shown if i.lat is not None and i.lon is not None]
 
     def item_for(self, path: Path) -> MediaItem | None:
-        key = os.path.normcase(os.path.normpath(str(path)))
-        for item in self._items:
-            if os.path.normcase(os.path.normpath(str(item.path))) == key:
-                return item
-        return None
+        index = self._by_path
+        if index is None:  # built on first use, dropped when the items are read again
+            index = {}
+            for item in self._items:
+                index.setdefault(os.path.normcase(os.path.normpath(str(item.path))), item)
+            self._by_path = index
+        return index.get(os.path.normcase(os.path.normpath(str(path))))
 
 
 def library_model(state: AppState) -> LibraryModel:

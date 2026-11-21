@@ -352,3 +352,45 @@ def test_fifty_thousand_items_build_and_scroll_quickly(grid: MediaGrid, tmp_path
     grid.set_selection([25_000])
     assert grid.visible_rows()
     assert time.perf_counter() - started < 2
+
+
+def test_a_big_selection_menu_does_not_stat_every_file(
+    grid: MediaGrid, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    pics = [photo(tmp_path / f"{i}.jpg") for i in range(30)]
+    grid.set_items([item(p) for p in pics])
+    grid.select_all()
+    calls: list[object] = []
+    real = os.path.lexists
+    monkeypatch.setattr(os.path, "lexists", lambda p: (calls.append(p), real(p))[1])
+    grid.menu_for_rows(grid.selected_rows())
+    assert len(calls) <= 1
+
+
+def test_row_of_path_uses_an_index_that_follows_the_items(grid: MediaGrid, tmp_path: Path) -> None:
+    a, b = photo(tmp_path / "a.jpg"), photo(tmp_path / "b.jpg")
+    grid.set_items([item(a), item(b)])
+    assert grid.row_of_path(b) == 1 and grid.row_of_path(tmp_path / "x.jpg") == -1
+    grid.set_items([item(b)])
+    assert grid.row_of_path(b) == 0 and grid.row_of_path(a) == -1
+
+
+def test_a_resize_that_keeps_the_column_count_does_not_lay_out_again(
+    qtbot: QtBot, grid: MediaGrid, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grid.show()
+    qtbot.waitExposed(grid)
+    grid.set_items([item(photo(tmp_path / f"{i}.jpg")) for i in range(20)])
+    calls: list[int] = []
+    real = grid._relayout  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(grid, "_relayout", lambda: (calls.append(1), real())[1])
+    cols = grid._cols  # pyright: ignore[reportPrivateUsage]
+    grid.resize(grid.width(), grid.height() + 120)  # taller only
+    qtbot.wait(50)
+    assert calls == [] and grid._cols == cols  # pyright: ignore[reportPrivateUsage]
+    qtbot.wait(50)
+    grid.resize(300, grid.height())  # fewer columns
+    qtbot.wait(50)
+    assert calls and grid._cols < cols  # pyright: ignore[reportPrivateUsage]

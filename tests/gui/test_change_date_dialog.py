@@ -131,3 +131,23 @@ def test_a_failed_library_refresh_still_spends_the_plan(
     assert "could not be refreshed" in dialog.status_label.text()
     assert dialog.plan is None and not dialog.can_apply()
     assert dialog.apply() is None  # the same plan can never be applied twice
+
+
+def test_library_model_item_for_follows_a_reload(
+    tmp_path: Path, make_state: Callable[..., AppState]
+) -> None:
+    from various_tools.gui.library_model import library_model
+
+    root = tmp_path / "pics"
+    a = jpeg(root / "a.jpg", "2019:01:31 08:30:00")
+    state = make_state(library_folders=[str(root)])
+    fill_library(state, [root])
+    model = library_model(state)
+    model.reload()
+    found = model.item_for(a)
+    assert found is not None and found.path == a
+    assert model.item_for(root / "missing.jpg") is None
+    b = jpeg(root / "b.jpg", "2020:01:01 08:30:00")
+    fill_library(state, [root])
+    model.reload()  # the index is rebuilt with the new items
+    assert model.item_for(b) is not None

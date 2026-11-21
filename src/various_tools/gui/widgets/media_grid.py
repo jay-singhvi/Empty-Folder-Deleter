@@ -165,6 +165,7 @@ class MediaGrid(QAbstractScrollArea):
         self.captions = captions
         self._thumb = max(MIN_THUMB, min(MAX_THUMB, thumb_size))
         self._items: list[MediaItem] = []
+        self._row_index: dict[str, int] | None = None
         self._bands: list[_Band] = []
         self._tops: list[int] = []
         self._row_starts: list[int] = []
@@ -209,6 +210,7 @@ class MediaGrid(QAbstractScrollArea):
         """Show ``items`` (in the given order), replacing what was shown."""
         self._generation += 1
         self._items = list(items)
+        self._row_index = None
         self._selected.clear()
         self._current = -1
         self._anchor = -1
@@ -224,11 +226,13 @@ class MediaGrid(QAbstractScrollArea):
         return list(self._items)
 
     def row_of_path(self, path: Path) -> int:
-        key = _path_key(path)
-        for row, item in enumerate(self._items):
-            if _path_key(item.path) == key:
-                return row
-        return -1
+        index = self._row_index
+        if index is None:  # built on first use, dropped when the items change
+            index = {}
+            for row, item in enumerate(self._items):
+                index.setdefault(_path_key(item.path), row)
+            self._row_index = index
+        return index.get(_path_key(path), -1)
 
     def caption(self, row: int) -> str:
         return caption_for(self._items[row])
@@ -267,9 +271,18 @@ class MediaGrid(QAbstractScrollArea):
     def _tile_h(self) -> int:
         return self._thumb + (_CAPTION_H if self.captions else 0)
 
-    def _relayout(self) -> None:
+    def _columns_for_width(self) -> int:
         width = max(1, self.viewport().width())
-        self._cols = max(1, (width - 2 * _PAD + _GAP) // (self._thumb + _GAP))
+        return max(1, (width - 2 * _PAD + _GAP) // (self._thumb + _GAP))
+
+    def _update_scrollbar(self) -> None:
+        bar = self.verticalScrollBar()
+        bar.setSingleStep(max(16, self._thumb // 2))
+        bar.setPageStep(self.viewport().height())
+        bar.setRange(0, max(0, self._content_h - self.viewport().height()))
+
+    def _relayout(self) -> None:
+        self._cols = self._columns_for_width()
         bands: list[_Band] = []
         row_starts: list[int] = []
         row_bands: list[int] = []
@@ -329,13 +342,15 @@ class MediaGrid(QAbstractScrollArea):
         self._row_bands = row_bands
         self._months = months
         self._content_h = y + _PAD
-        bar = self.verticalScrollBar()
-        bar.setSingleStep(max(16, self._thumb // 2))
-        bar.setPageStep(self.viewport().height())
-        bar.setRange(0, max(0, self._content_h - self.viewport().height()))
+        self._update_scrollbar()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 (Qt name)
         super().resizeEvent(event)
+        if self._bands and self._columns_for_width() == self._cols:
+            # The same number of columns: the layout is unchanged, only the scroll range moves.
+            self._update_scrollbar()
+            self._schedule()
+            return
         first = self._first_visible_row()
         self._relayout()
         if first >= 0:
@@ -794,7 +809,8 @@ class MediaGrid(QAbstractScrollArea):
         entries = [self._items[r] for r in rows]
         paths = [e.path for e in entries]
         single = len(entries) == 1
-        exists = all(os.path.lexists(p) for p in paths)
+        # One stat for one item; for a long selection the actions deal with a missing file.
+        exists = os.path.lexists(paths[0]) if single else True
         menu = QMenu(self.viewport())
         open_entry = menu.addAction("Open")
         open_entry.setEnabled(exists)

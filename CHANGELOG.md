@@ -5,6 +5,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.8.0: saved recipes, duplicates in the photo library, place names (2026-11-21)
+
+Owner's request: "start wave 2". Design: `docs/superpowers/specs/2026-11-21-wave-2-design.md`.
+
+- **Saved recipes** (new *Recipes* page in App, and the View menu): a recipe is a named list of
+  tools with their settings, run in order on the working folder. Every step looks first, shows
+  its list and asks through the usual Apply window (batches and the OneDrive wait included);
+  *Skip this step* and *Stop* are there. A tool page's *More* menu has *Save as recipe step…*.
+  History labels each step ("Recipe: NAME, step 2 of 3") and *Undo this recipe run* undoes its
+  steps from last to first. A recipe never stores *Delete forever*. Three starter recipes are
+  offered. Stored in `recipes.json` next to the settings; a damaged file is kept aside as
+  `recipes.json.bad-<time>`. CLI: `various-tools recipe list | show NAME | run NAME FOLDERS
+  [--apply]`.
+- **Duplicates in the photo library:** the Timeline's *Find duplicates…* opens the Duplicate
+  Finder on the library folders (its thresholds, compare view and Apply unchanged). After its
+  scan the Timeline can show *Only photos with a duplicate*, marks them with a badge, and the
+  preview lists the other copies. Nothing is moved from the Timeline.
+- **Place names, offline:** photos and videos with a GPS place show the nearest town ("Paris,
+  Île-de-France, France") in the preview, the grid's tooltip, and on the map, and the filter bar
+  gets *Place* (country, then region). Built in from GeoNames (cities over 15,000 people, CC BY
+  4.0, 418 KB); nothing goes online. More than 50 km from any such town shows no name.
+- **Faster Timeline:** the grouped layout is prepared in the background; at 200,000 items the
+  window pauses about a quarter of a second instead of about a second.
+- Version 0.8.0.
+
 ### Version 0.7.0: the items left for later, and waiting for OneDrive (2026-11-21)
 
 Owner's request: "start on the items left for later". Design:

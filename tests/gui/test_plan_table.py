@@ -502,3 +502,59 @@ def test_switching_the_full_controls_off_clears_the_kind_filter(
     # A filter nobody can see must not hide rows that Apply would still act on.
     assert top_rows(table) == 2
     assert not table.filter_active()
+
+
+def _big_empty_folders_plan(root: Path, count: int) -> Plan:
+    """``count`` nested folders (each with a child and a junk file) as an empty-folders plan."""
+    from various_tools.tools.empty_folders.tool import JUNK_REASON
+
+    actions: list[PlannedAction] = []
+    for i in range(count // 2):
+        top = root / f"g{i}"
+        child = top / "c"
+        actions.append(PlannedAction(ActionKind.TRASH, top, None, "empty folder"))
+        actions.append(PlannedAction(ActionKind.TRASH, child, None, "empty folder"))
+        actions.append(
+            PlannedAction(ActionKind.TRASH, child / "Thumbs.db", None, f"{JUNK_REASON}: Thumbs.db")
+        )
+    return Plan(tool="empty_folders", roots=[root], actions=actions)
+
+
+def test_empty_folders_batch_form_equals_the_per_row_form(tmp_path: Path) -> None:
+    from various_tools.tools.empty_folders import set_folder_selected, set_folders_selected
+
+    one = _big_empty_folders_plan(tmp_path, 60)
+    two = _big_empty_folders_plan(tmp_path, 60)
+    picks = [i for i in range(0, len(one.actions), 4)]
+    for value in (True, False, True):
+        for i in picks:
+            src = one.actions[i].src
+            assert src is not None
+            set_folder_selected(one, src, value)
+        set_folders_selected(
+            two, [a.src for i, a in enumerate(two.actions) if i in picks and a.src], value
+        )
+        assert [a.selected for a in one.actions] == [a.selected for a in two.actions]
+    # Unticking a child unticks its parent and the junk file inside, in both forms.
+    child = tmp_path / "g1" / "c"
+    set_folder_selected(one, child, False)
+    set_folders_selected(two, [child], False)
+    assert [a.selected for a in one.actions] == [a.selected for a in two.actions]
+    assert not any(a.selected for a in two.actions if a.src and "g1" in a.src.parts)
+
+
+def test_bulk_ticking_thousands_of_empty_folders_is_quick(qtbot: QtBot, tmp_path: Path) -> None:
+    import time
+
+    plan = _big_empty_folders_plan(tmp_path, 5000)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "empty_folders")
+    start = time.monotonic()
+    table.set_shown_checked(False)
+    assert not any(a.selected for a in plan.actions)
+    table.set_shown_checked(True)
+    assert all(a.selected for a in plan.actions)
+    table.tick_only_first(10)
+    assert sum(1 for a in plan.actions if a.selected) >= 10
+    assert time.monotonic() - start < 20  # per-row passes took minutes; one pass takes a second

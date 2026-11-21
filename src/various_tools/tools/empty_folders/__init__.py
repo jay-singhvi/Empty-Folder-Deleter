@@ -5,6 +5,13 @@ from various_tools.tools.empty_folders.tool import (
     EmptyFolders,
     EmptyFoldersOptions,
     set_folder_selected,
+    set_folders_selected,
 )
 
-__all__ = ["TOOL", "EmptyFolders", "EmptyFoldersOptions", "set_folder_selected"]
+__all__ = [
+    "TOOL",
+    "EmptyFolders",
+    "EmptyFoldersOptions",
+    "set_folder_selected",
+    "set_folders_selected",
+]

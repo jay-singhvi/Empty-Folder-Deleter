@@ -86,8 +86,23 @@ def _empty_folders_hook(plan: Plan, action: PlannedAction, checked: bool) -> Non
     set_folder_selected(plan, action.src, checked)
 
 
+def _empty_folders_batch(plan: Plan, actions: list[PlannedAction], checked: bool) -> None:
+    """The same as ``_empty_folders_hook`` for each action, in one pass over the plan."""
+    from various_tools.tools.empty_folders import set_folders_selected
+
+    folders = [a.src for a in actions if a.src is not None]
+    for action in actions:
+        if action.src is None:
+            action.selected = checked
+    set_folders_selected(plan, folders, checked)
+
+
 # The only per-tool code in the table. A tool id maps to what a check-box click should do.
 SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
+# The batch form of a hook: many actions, one value, one pass. Bulk operations use it, so that
+# ticking thousands of rows does not cost one pass over the plan per row.
+BatchSelectionHook = Callable[[Plan, list[PlannedAction], bool], None]
+BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {"empty_folders": _empty_folders_batch}
 
 
 # Column titles, in plain words (exports and the CLI keep their own names).
@@ -441,11 +456,13 @@ class PlanModel(QAbstractItemModel):
         plan = self._plan
         if plan is None:
             return
+        actions = [t.action for t in targets if t.action is not None]
+        batch = BATCH_SELECTION_HOOKS.get(self._tool_id)
         hook = SELECTION_HOOKS.get(self._tool_id)
-        for target in targets:
-            action = target.action
-            if action is None:
-                continue
+        if batch is not None and len(actions) > 1:
+            batch(plan, actions, checked)
+            return
+        for action in actions:
             if hook is not None:
                 hook(plan, action, checked)
             else:

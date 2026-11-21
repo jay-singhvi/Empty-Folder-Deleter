@@ -52,7 +52,7 @@ def test_recipes_path_is_beside_the_settings_file(tmp_path: Path) -> None:
 
 def test_save_and_load_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "recipes.json"
-    recipes = [Recipe("One", [RecipeStep("empty_files", {"recursive": True}, "first")])]
+    recipes = [Recipe("One", [RecipeStep("empty_files", {"min_age_days": 3}, "first")])]
     save_recipes(path, recipes)
     assert json.loads(path.read_text(encoding="utf-8"))["format"] == 1
     loaded = load_recipes(path)
@@ -83,7 +83,7 @@ def test_a_bad_file_is_renamed_aside_and_reported(tmp_path: Path, text: str) -> 
 def test_step_validation(tools: dict[str, Tool]) -> None:
     assert check_step(RecipeStep("empty_files"), tools) is None
     assert "not available" in str(check_step(RecipeStep("no_such_tool"), tools))
-    bad = check_step(RecipeStep("empty_files", {"recursive": "maybe"}), tools)
+    bad = check_step(RecipeStep("empty_files", {"min_age_days": "maybe"}), tools)
     assert bad is not None
     unknown = check_step(RecipeStep("empty_files", {"gone_option": 1}), tools)
     assert unknown is not None
@@ -115,9 +115,9 @@ def test_workspace_folder_is_filled_at_run_time(tools: dict[str, Tool], tmp_path
 
 def test_step_from_options_drops_the_workspace_and_permanent(tools: dict[str, Tool]) -> None:
     tool = tools["empty_files"]
-    values = {"roots": ["x"], "recursive": True, "delete_mode": "permanent"}
+    values = {"roots": ["x"], "min_age_days": 3, "delete_mode": "permanent"}
     step = step_from_options(tool, values, own_folders=False)
-    assert "roots" not in step.options and step.options["recursive"] is True
+    assert "roots" not in step.options and step.options["min_age_days"] == 3
     assert step.options.get("delete_mode") != "permanent"
     assert step_from_options(tool, values, own_folders=True).options["roots"] == ["x"]
 

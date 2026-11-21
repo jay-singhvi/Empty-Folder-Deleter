@@ -230,20 +230,24 @@ def check_recipe(recipe: Recipe, tools: Mapping[str, Tool]) -> list[str | None]:
 
 
 def step_from_options(tool: Tool, values: Mapping[str, Any], *, own_folders: bool) -> RecipeStep:
-    """A step from a tool page's current option values.
+    """A step from a tool page's current option values (as JSON values).
 
-    The workspace option is dropped unless the page uses other folders, and a permanent-delete
-    value is replaced by the option's default (see :data:`PERMANENT`).
+    Only values that differ from the option's default are kept, so a later release can change a
+    default. The workspace option is dropped unless the page uses other folders, and a
+    permanent-delete value is dropped too (the step falls back to the default, see
+    :data:`PERMANENT`).
     """
     name = workspace_field(tool)
-    defaults = {s.name: s.default for s in describe(tool.Options)}
+    defaults = {
+        s.name: json.loads(json.dumps(s.default, default=str)) for s in describe(tool.Options)
+    }
     kept: dict[str, Any] = {}
     for key, value in values.items():
-        if key == name and not own_folders:
+        if key == name:
+            if own_folders and value:
+                kept[key] = value
             continue
-        if value == PERMANENT:
-            if key in defaults:
-                kept[key] = json.loads(json.dumps(defaults[key], default=str))
+        if value == PERMANENT or (key in defaults and value == defaults[key]):
             continue
         kept[key] = value
     return RecipeStep(tool.id, kept)

@@ -83,6 +83,9 @@ def summary_text(photos: int, videos: int, report: SyncReport | None = None) -> 
 
 class TimelinePage(QWidget):
     showOnMap = Signal(object)  # noqa: N815 (Qt name) a Path: "Show on map" was chosen
+    # "Find duplicates…": a tool id and the folders to look in. The window opens that tool with
+    # these folders instead of the ones it remembers.
+    openTool = Signal(str, list)  # noqa: N815 (Qt name)
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -112,6 +115,12 @@ class TimelinePage(QWidget):
         self.cancel_button.clicked.connect(lambda _c=False: self.cancel())
         self.folders_button = QPushButton("Library folders…")
         self.folders_button.clicked.connect(lambda _c=False: self.choose_folders())
+        self.duplicates_button = QPushButton("Find duplicates…")
+        self.duplicates_button.setToolTip(
+            "Open the Duplicate Finder on your library folders. Afterwards, the filter "
+            "'Only photos with a duplicate' and a badge on each photo show what it found."
+        )
+        self.duplicates_button.clicked.connect(lambda _c=False: self.find_duplicates())
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_label = QLabel("")
@@ -129,7 +138,10 @@ class TimelinePage(QWidget):
         self.grid.visibleMonthChanged.connect(self._follow_month)
         self.grid.showOnMapRequested.connect(self.showOnMap)
         self.grid.changeDateRequested.connect(self.change_dates)
+        self.grid.is_duplicate = self.model.has_duplicate
         self.preview = PreviewPane()
+        self.preview.copies_of = self.model.copies_of
+        self.preview.showRequested.connect(self.show_copy)
         self.preview.setVisible(False)
 
         self.years_button = QToolButton()
@@ -156,6 +168,7 @@ class TimelinePage(QWidget):
         buttons.addWidget(self.update_button)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.folders_button)
+        buttons.addWidget(self.duplicates_button)
         buttons.addWidget(self.progress_bar, 1)
         tools = QHBoxLayout()
         tools.addWidget(self.years_button)
@@ -187,6 +200,31 @@ class TimelinePage(QWidget):
         self.model.loadingChanged.connect(self._loading_changed)
         self._rebuild()
         self.status_label.setText(self._summary())
+
+    # ----- duplicates --------------------------------------------------------------------------
+
+    def find_duplicates(self) -> bool:
+        """Ask the window to open the Duplicate Finder on the library folders.
+
+        Nothing is found or moved here: that tool previews, and applies only on its own page.
+        Returns False (and says why) when no folder is chosen.
+        """
+        folders = [str(r) for r in self.roots()]
+        if not folders:
+            self._set_status("Add a folder with photos or videos first (Library folders…).", True)
+            return False
+        self.openTool.emit("duplicates", folders)
+        return True
+
+    def show_copy(self, path: object) -> bool:
+        """Select another copy of the current photo in the grid ("Show" in the preview)."""
+        row = self.grid.row_of_path(Path(str(path)))
+        if row < 0:
+            self._set_status("That copy is hidden by the filter. Press Clear to see it.")
+            return False
+        self.grid.set_current(row)
+        self.grid.scroll_to_row(row)
+        return True
 
     # ----- folders -----------------------------------------------------------------------------
 
@@ -223,22 +261,20 @@ class TimelinePage(QWidget):
 
     def _rebuild(self) -> None:
         shown = self.model.timeline_shown
+        groups = self.model.timeline_groups
         self._shown = shown
-        self.grid.set_items(shown)
-        self._build_tree()
+        self.grid.set_items(shown, groups)
+        self._build_tree(groups.month_counts)
         self._selection_changed()
 
-    def _build_tree(self) -> None:
+    def _build_tree(self, counts: dict[tuple[int, int], int]) -> None:
         self.months.blockSignals(True)
         self.months.clear()
         years: dict[int, dict[int, int]] = {}
-        undated = 0
-        for item in self._shown:
-            if item.taken is None:
-                undated += 1
-                continue
-            months = years.setdefault(item.taken.year, {})
-            months[item.taken.month] = months.get(item.taken.month, 0) + 1
+        undated = counts.get((0, 0), 0)
+        for (year, month), count in counts.items():
+            if year != 0:
+                years.setdefault(year, {})[month] = count
         for year in sorted(years, reverse=True):
             months = years[year]
             node = QTreeWidgetItem([f"{year} ({sum(months.values()):,})"])
@@ -452,6 +488,7 @@ class TimelinePage(QWidget):
         self.cancel_button.setEnabled(running)
         self.progress_bar.setVisible(running)
         self.folders_button.setEnabled(not running)
+        self.duplicates_button.setEnabled(not running)
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status_label.setText(text)

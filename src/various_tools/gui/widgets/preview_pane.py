@@ -9,6 +9,7 @@ never read (AGENTS.md rule 3). The ``load_picture`` hooks are attributes so test
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
@@ -140,7 +141,11 @@ def details_text(item: MediaItem) -> str:
     if item.width and item.height:
         lines.append(f"Pixels: {item.width} × {item.height}")
     if item.lat is not None and item.lon is not None:
-        lines.append(f"Place: {item.lat:.4f}, {item.lon:.4f}")
+        where = f"{item.lat:.4f}, {item.lon:.4f}"
+        if item.place is not None:
+            lines.append(f"Place: {item.place.text} ({where})")
+        else:
+            lines.append(f"Place: {where}")
     else:
         lines.append("Place: none in the file")
     lines.append(f"Folder: {item.path.parent}")
@@ -148,6 +153,8 @@ def details_text(item: MediaItem) -> str:
 
 
 class PreviewPane(QWidget):
+    showRequested = Signal(object)  # noqa: N815 (Qt name) a Path: "Show" on another copy
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.picture = _PictureLabel()
@@ -155,6 +162,14 @@ class PreviewPane(QWidget):
         self.details.setWordWrap(True)
         self.details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.details.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # Other copies of the photo (from the last Duplicate Finder result), each with a Show link.
+        self.copies = QLabel("")
+        self.copies.setWordWrap(True)
+        self.copies.setTextFormat(Qt.TextFormat.RichText)
+        self.copies.setVisible(False)
+        self.copies.linkActivated.connect(self._copy_link)
+        self.copies_of: Callable[[MediaItem], Sequence[MediaItem]] | None = None
+        self._copy_paths: list[Path] = []
         self.loader = PictureLoader(self)
         self.loader.loaded.connect(self._loaded)
         self._shown: Path | None = None
@@ -168,11 +183,13 @@ class PreviewPane(QWidget):
         layout.setContentsMargins(6, 0, 0, 0)
         layout.addWidget(self.picture, 3)
         layout.addWidget(self.details, 2)
+        layout.addWidget(self.copies)
         self.setMinimumWidth(220)
 
     def show_items(self, items: Sequence[MediaItem]) -> None:
         """Show the one selected item, or a count when several are selected."""
         self._pending = None
+        self._show_copies(items[0] if len(items) == 1 else None)
         if not items:
             self._shown = None
             self.picture.set_picture(None, "")
@@ -183,6 +200,26 @@ class PreviewPane(QWidget):
             self.details.setText(f"{len(items):,} selected")
         else:
             self._show_one(items[0])
+
+    def _show_copies(self, item: MediaItem | None) -> None:
+        """List the other copies of ``item`` with a Show link each (nothing is changed here)."""
+        others = list(self.copies_of(item)) if item is not None and self.copies_of else []
+        self._copy_paths = [o.path for o in others]
+        if not others:
+            self.copies.setVisible(False)
+            self.copies.setText("")
+            return
+        rows = [
+            f'{escape(o.path.name)} ({escape(str(o.path.parent))}) <a href="show:{n}">Show</a>'
+            for n, o in enumerate(others)
+        ]
+        self.copies.setText("<b>Other copies</b><br>" + "<br>".join(rows))
+        self.copies.setVisible(True)
+
+    def _copy_link(self, link: str) -> None:
+        number = link.partition(":")[2]
+        if number.isdigit() and int(number) < len(self._copy_paths):
+            self.showRequested.emit(self._copy_paths[int(number)])
 
     def _show_one(self, item: MediaItem) -> None:
         self._shown = item.path

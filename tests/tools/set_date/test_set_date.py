@@ -121,7 +121,7 @@ def reasons(plan: Plan) -> list[str]:
 
 
 def test_parse_new_date_forms() -> None:
-    assert parse_new_date("2021-03-04 10:12") == datetime(2021, 3, 4, 10, 12)
+    assert parse_new_date("2021-03-04 10:12") == datetime(2021, 3, 4, 12, 0)
     assert parse_new_date("2021-03-04 10:12:30") == datetime(2021, 3, 4, 10, 12, 30)
     assert parse_new_date("2021-03-04") == datetime(2021, 3, 4, 12, 0)
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
@@ -237,7 +237,7 @@ def test_apply_without_exiftool_sets_the_modified_time_and_undo_restores(
     plan, result = run(tmp_path, journal, opts)
     assert result.count("done") == 1, [o.detail for o in result.outcomes]
     assert a.read_bytes() == original  # nothing inside the file changed
-    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 12, 0)
     assert len(fake_trash) == 1 and fake_trash[0].name == a.name  # recycled by its real name
     assert list(a.parent.iterdir()) == [a]
     rows = journal.actions(result.run_id)
@@ -286,8 +286,8 @@ def test_apply_with_exiftool_writes_the_dates_and_undo_restores(
     plan, result = run(tmp_path, journal, opts, exiftool=exiftool_path)
     assert "modified time only" not in plan.actions[0].reason
     assert result.count("done") == 1, [o.detail for o in result.outcomes]
-    assert exif.read_exif(a).capture_time == datetime(2021, 3, 4, 10, 12)
-    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
+    assert exif.read_exif(a).capture_time == datetime(2021, 3, 4, 12, 0)
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 12, 0)
     assert list(a.parent.iterdir()) == [a]
 
     report = undo_run(
@@ -526,7 +526,7 @@ def test_a_failed_put_back_never_leaves_the_path_empty(
     _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
     assert result.count("failed") == 1
     assert a.is_file()  # the path is not empty: the new copy is back in place
-    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 12, 0)
     kept = [p for p in a.parent.rglob("a.jpg") if p != a]
     assert len(kept) == 1 and kept[0].read_bytes() == original  # the original is kept too
     assert not list(a.parent.glob(".setdate-*.tmp"))

@@ -311,7 +311,7 @@ def main() -> int:
 
 
 def fill_library(state: Any) -> None:
-    """Read the generated library into the catalog (inside the demo folder) before the pages open."""
+    """Read the generated library into the catalog (in the demo folder) before the pages open."""
     from various_tools.core.context import make_context
     from various_tools.core.media.library import MediaLibrary, library_path
 

@@ -679,7 +679,13 @@ def apply_plan(
     journal: Journal = ctx.journal
     handler_map: Mapping[ActionKind, Handler] = handlers or {}
 
-    run_id = journal.start_run(plan.tool, plan.options_json)
+    journal_options = plan.options_json
+    if ctx.recipe_tag is not None:
+        journal_options = json.dumps(
+            {**as_dict(json.loads(plan.options_json)), "_recipe": dict(ctx.recipe_tag)},
+            sort_keys=True,
+        )
+    run_id = journal.start_run(plan.tool, journal_options)
     ctx.applying_run_id = run_id
     beat = _Heartbeat(journal, run_id)
     result = RunResult(run_id=run_id, status="done")

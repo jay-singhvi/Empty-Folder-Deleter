@@ -45,6 +45,12 @@ from PySide6.QtWidgets import (
 )
 
 from various_tools.core.journal import ActionRecord, Journal, RunRecord, UndoReport, undo_run
+from various_tools.core.recipe import (
+    RecipeMark,
+    parse_recipe_mark,
+    recipe_run_members,
+    undo_recipe_run,
+)
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
     STALE_AFTER,
@@ -53,6 +59,7 @@ from various_tools.gui.undo_rules import (
     read_undo_info,
     stale_after,
 )
+from various_tools.gui.wording import UNDO_RECIPE_RUN
 from various_tools.gui.workers import Worker, applying_run_ids
 
 log = logging.getLogger(__name__)
@@ -128,6 +135,40 @@ def undo_summary(report: UndoReport) -> str:
             lines.extend(f"  - {item}" for item in items[:MAX_LISTED])
             if len(items) > MAX_LISTED:
                 lines.append(f"  ... and {len(items) - MAX_LISTED} more")
+    return "\n".join(lines)
+
+
+def recipe_undo_summary(
+    name: str, results: list[tuple[int, UndoReport | str]], tool_names: dict[int, str]
+) -> str:
+    """Plain-English result of undoing a recipe run: one block per step, last step first."""
+    lines = [f"The recipe run {name!r}:"]
+    for run_id, result in results:
+        what = f"Run {run_id} ({tool_names.get(run_id, 'unknown tool')})"
+        if isinstance(result, str):
+            lines += ["", f"{what}: left alone, {result}"]
+        else:
+            lines += ["", undo_summary(result)]
+    return "\n".join(lines)
+
+
+def recipe_undo_question(mark: RecipeMark, members: list[tuple[RunRecord, str]]) -> str:
+    """The one question asked before undoing every step of a recipe run."""
+    lines = [
+        f"Undo the recipe run {mark.name!r}?",
+        "",
+        f"Its {len(members)} step(s) are undone from the last to the first:",
+    ]
+    for run, tool_name in members:
+        step = parse_recipe_mark(run.options_json)
+        number = f"step {step.step}" if step is not None else "step"
+        lines.append(f"  - {number}: {tool_name} (run {run.id})")
+    lines += [
+        "",
+        "Each step follows the same rules as Undo run: moves and renames are put back, Recycle "
+        "Bin items are restored while they are still there, and unchanged written files are "
+        "recycled. Anything that cannot be put back is listed afterwards.",
+    ]
     return "\n".join(lines)
 
 
@@ -253,6 +294,12 @@ class HistoryPage(QWidget):
         self.refresh_button = QPushButton("Refresh")
         self.undo_button = QPushButton("Undo run")
         self.export_button = QPushButton("Export...")
+        self.undo_recipe_button = QPushButton(UNDO_RECIPE_RUN)
+        self.undo_recipe_button.setToolTip(
+            "Undo every step of the recipe run the selected run belongs to, from the last step "
+            "to the first. Asks once."
+        )
+        self.undo_recipe_button.setVisible(False)
         self.more_button = QPushButton("Show more")
         self.refresh_button.setToolTip("Read the history again.")
         self.undo_button.setToolTip(
@@ -268,6 +315,7 @@ class HistoryPage(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.refresh_button)
         buttons.addStretch(1)
+        buttons.addWidget(self.undo_recipe_button)
         buttons.addWidget(self.undo_button)
         buttons.addWidget(self.export_button)
 
@@ -296,6 +344,7 @@ class HistoryPage(QWidget):
         self.refresh_button.clicked.connect(lambda _checked=False: self.reload())
         self.undo_button.clicked.connect(lambda _checked=False: self.undo_selected())
         self.export_button.clicked.connect(lambda _checked=False: self.export_selected())
+        self.undo_recipe_button.clicked.connect(lambda _checked=False: self.undo_recipe_run())
         self.more_button.clicked.connect(lambda _checked=False: self.load_more())
         self.runs_view.itemSelectionChanged.connect(self._selection_changed)
         self.reload()
@@ -314,6 +363,12 @@ class HistoryPage(QWidget):
     def _tool_name(self, tool_id: str) -> str:
         tool = self._state.tools.get(tool_id)
         return tool.name if tool is not None else tool_id
+
+    def _run_tool_label(self, run: RunRecord) -> str:
+        """The tool's name, with the recipe and step when the run came from a recipe."""
+        mark = parse_recipe_mark(run.options_json)
+        name = self._tool_name(run.tool)
+        return f"{name} ({mark.label})" if mark is not None else name
 
     def _run_id_at(self, row: int) -> object:
         item = self.runs_view.item(row, 0)
@@ -373,7 +428,7 @@ class HistoryPage(QWidget):
         for row, run in enumerate(runs):
             values = (
                 str(run.id),
-                self._tool_name(run.tool),
+                self._run_tool_label(run),
                 run.started,
                 run.finished or "",
                 run.status,
@@ -532,6 +587,11 @@ class HistoryPage(QWidget):
             and not self._closing
         )
         self.undo_button.setEnabled(undoable)
+        mark = parse_recipe_mark(run.options_json) if run is not None else None
+        self.undo_recipe_button.setVisible(mark is not None)
+        self.undo_recipe_button.setEnabled(
+            mark is not None and not self._busy and not self._closing
+        )
         self.export_button.setEnabled(run is not None and not self._busy and not self._closing)
         self.refresh_button.setEnabled(not self._busy and not self._closing)
         self.more_button.setEnabled(self._page_worker is None and not self._closing)
@@ -595,6 +655,68 @@ class HistoryPage(QWidget):
         if not self._closing:
             self.inform("Undo failed", f"The run could not be undone: {exc}")
         self.reload()
+
+    def undo_recipe_run(self) -> Worker | None:
+        """Undo every step of the selected run's recipe run, last step first, after one question.
+
+        A step that is still being applied refuses the whole undo; a step that cannot be undone
+        (already undone, or nothing it did can be put back) is reported and the others go on.
+        """
+        run = self._selected_run()
+        mark = parse_recipe_mark(run.options_json) if run is not None else None
+        if run is None or mark is None or self._busy or self._closing:
+            return None
+        members = recipe_run_members(self._runs, mark.run_id)
+        if not members:
+            return None
+        busy_ids = applying_run_ids()
+        applying = [m.id for m in members if m.id in busy_ids]
+        if applying:
+            self.inform(UNDO_RECIPE_RUN, in_progress_message(applying[0]))
+            return None
+        named = [(m, self._tool_name(m.tool)) for m in members]
+        if not self.confirm(UNDO_RECIPE_RUN, recipe_undo_question(mark, named)):
+            return None
+
+        ids = [m.id for m in members]
+        names = {m.id: self._tool_name(m.tool) for m in members}
+        name = mark.name
+        settings = self._state.settings
+        path = settings.journal_path()
+        protection = settings.protected_paths()
+        limit = stale_after(settings.transcode_timeout_s)
+
+        def reason(run_id: int) -> str | None:
+            # Checked on this thread, just before each step: never undo a run still applying.
+            if run_id in applying_run_ids():
+                return "it is still being applied."
+            info = read_undo_info(path, run_id, limit=limit)
+            if info.in_progress:
+                return "it is still being applied."
+            if not info.undoable:
+                return "nothing in it can be undone (already undone, or no undoable actions)."
+            return None
+
+        def job(_worker: Worker) -> tuple[str, list[tuple[int, UndoReport | str]], dict[int, str]]:
+            with Journal(path) as journal:
+                results = undo_recipe_run(journal, ids, protection=protection, can_undo=reason)
+            return name, results, names
+
+        self._busy = True
+        self._update_buttons()
+        return _start(job, self._recipe_undo_done, self._undo_failed, writes=True)
+
+    def _recipe_undo_done(self, value: object) -> None:
+        if not shiboken6.isValid(self) or not isinstance(value, tuple):
+            return
+        name, results, names = value  # type: ignore[misc]
+        self._busy = False
+        if not self._closing:
+            self.inform(UNDO_RECIPE_RUN, recipe_undo_summary(name, results, names))
+        self.reload()
+        for run_id, result in results:
+            if not isinstance(result, str):
+                self.runUndone.emit(run_id)
 
     # ----- export ----------------------------------------------------------------------------
 

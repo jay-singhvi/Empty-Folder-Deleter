@@ -34,7 +34,9 @@ from various_tools.core import onedrive
 from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import FileInfo, walk
 from various_tools.core.media import exif, ffmpeg
+from various_tools.core.media import places
 from various_tools.core.media.imaging import IMAGE_EXTS, RAW_EXTS
+from various_tools.core.media.places import PlaceName
 from various_tools.core.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ VIDEO_EXTS: frozenset[str] = frozenset(
 MEDIA_EXTS: frozenset[str] = PHOTO_EXTS | VIDEO_EXTS
 
 LIBRARY_FILE = "media_library.sqlite"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _COMMIT_EVERY = 200
 
 # Plain words for where a date came from (shown in the GUI).
@@ -70,6 +72,7 @@ class MediaItem:
     width: int | None
     height: int | None
     cloud_only: bool
+    place: PlaceName | None = None  # nearest city within 50 km of lat/lon, from the offline list
 
 
 @dataclass
@@ -104,7 +107,9 @@ class MediaFilter:
     ``text`` matches the file name or the folder (every word must appear, any case); ``kind`` is
     ``"photo"``, ``"video"`` or ``"both"``; ``start`` and ``end`` are ``(year, month)`` and
     include both months (an item without a date never passes a date range); ``folder`` keeps
-    the items inside that folder.
+    the items inside that folder; ``place_country`` (and then ``place_region``) keeps the items
+    whose place is there; ``duplicates_only`` keeps the items that have a duplicate in the last
+    Duplicate Finder result (only :class:`FilterIndex` knows those).
     """
 
     text: str = ""
@@ -112,16 +117,28 @@ class MediaFilter:
     start: tuple[int, int] | None = None
     end: tuple[int, int] | None = None
     folder: Path | None = None
+    place_country: str | None = None
+    place_region: str | None = None
+    duplicates_only: bool = False
 
     @property
     def is_empty(self) -> bool:
         return self == MediaFilter()
 
 
+def _in_place(item: MediaItem, flt: MediaFilter) -> bool:
+    place = item.place
+    if place is None or place.country != flt.place_country:
+        return False
+    return flt.place_region is None or place.region == flt.place_region
+
+
 def filter_items(items: Iterable[MediaItem], flt: MediaFilter) -> list[MediaItem]:
     """The items that pass ``flt``, in their order."""
     if flt.is_empty:
         return list(items)
+    if flt.duplicates_only:  # only FilterIndex knows the duplicates
+        raise ValueError("duplicates_only needs a FilterIndex")
     words = flt.text.casefold().split()
     start, end = flt.start, flt.end
     if start is not None and end is not None and start > end:
@@ -141,6 +158,8 @@ def filter_items(items: Iterable[MediaItem], flt: MediaFilter) -> list[MediaItem
             if (start is not None and month < start) or (end is not None and month > end):
                 continue
         if prefix is not None and not os.path.normcase(str(item.path)).startswith(prefix):
+            continue
+        if flt.place_country is not None and not _in_place(item, flt):
             continue
         if words:
             haystack = str(item.path).casefold()
@@ -165,6 +184,8 @@ class FilterIndex:
         self._norm = [os.path.normcase(str(i.path)) for i in items]
         self._month = [i.taken.year * 12 + i.taken.month if i.taken else -1 for i in items]
         self._video = [i.kind == "video" for i in items]
+        self._place = [i.place for i in items]
+        self.duplicates: frozenset[int] = frozenset()  # positions that have a duplicate
 
     @staticmethod
     def narrows(old: MediaFilter, new: MediaFilter) -> bool:
@@ -174,6 +195,9 @@ class FilterIndex:
             and old.start == new.start
             and old.end == new.end
             and old.folder == new.folder
+            and old.place_country == new.place_country
+            and old.place_region == new.place_region
+            and old.duplicates_only == new.duplicates_only
             and set(old.text.casefold().split()) <= set(new.text.casefold().split())
         ) or old.is_empty
 
@@ -201,6 +225,18 @@ class FilterIndex:
             prefix = folder if folder.endswith(os.sep) else folder + os.sep
             norm = self._norm
             found = [i for i in found if norm[i].startswith(prefix)]
+        if flt.place_country is not None:
+            country, region, place = flt.place_country, flt.place_region, self._place
+            found = [
+                i
+                for i in found
+                if (p := place[i]) is not None
+                and p.country == country
+                and (region is None or p.region == region)
+            ]
+        if flt.duplicates_only:
+            dups = self.duplicates
+            found = [i for i in found if i in dups]
         fold = self._fold
         for word in flt.text.casefold().split():
             found = [i for i in found if word in fold[i]]
@@ -243,10 +279,13 @@ def _prefix(root: Path) -> str:
     return key if key.endswith(os.sep) else key + os.sep
 
 
-_COLUMNS = "key, path, kind, size, mtime, taken, date_source, lat, lon, width, height, cloud_only"
+_COLUMNS = (
+    "key, path, kind, size, mtime, taken, date_source, lat, lon, width, height, cloud_only, "
+    "place_city, place_region, place_country"
+)
 
 
-_PLACEHOLDERS = ", ".join("?" * len(_COLUMNS.split(",")))
+_PLACEHOLDERS = ", ".join("?" * (len(_COLUMNS.split(",")) + 1))  # + place_done
 
 
 def _count(report: SyncReport, *, is_new: bool) -> None:
@@ -268,15 +307,25 @@ class MediaLibrary:
 
     def _open_schema(self) -> None:
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
-        if version != SCHEMA_VERSION:
-            # An older layout cannot be trusted; it is only a cache, so it is rebuilt.
+        if version not in (SCHEMA_VERSION, 1):
+            # An unknown layout cannot be trusted; it is only a cache, so it is rebuilt.
             self._conn.execute("DROP TABLE IF EXISTS items")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS items ("
             "key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, "
             "size INTEGER NOT NULL, mtime REAL NOT NULL, taken TEXT, date_source TEXT NOT NULL, "
-            "lat REAL, lon REAL, width INTEGER, height INTEGER, cloud_only INTEGER NOT NULL)"
+            "lat REAL, lon REAL, width INTEGER, height INTEGER, cloud_only INTEGER NOT NULL, "
+            "place_city TEXT, place_region TEXT, place_country TEXT, "
+            "place_done INTEGER NOT NULL DEFAULT 0)"
         )
+        if version == 1:  # 0.7 layout: add the place columns; the rows are kept
+            for column in (
+                "place_city TEXT",
+                "place_region TEXT",
+                "place_country TEXT",
+                "place_done INTEGER NOT NULL DEFAULT 0",
+            ):
+                self._conn.execute(f"ALTER TABLE items ADD COLUMN {column}")
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
 
@@ -352,6 +401,7 @@ class MediaLibrary:
         rows are kept. On cancel, what was read so far is kept and nothing is removed.
         """
         report = SyncReport()
+        self.fill_places()
         listed: list[tuple[Path, list[FileInfo], list[str]]] = []
         for root in fold_roots(roots):
             ctx.check_cancelled()
@@ -465,8 +515,9 @@ class MediaLibrary:
             _count(report, is_new=is_new)
 
     def _store(self, key: str, item: MediaItem) -> None:
+        place = _place_of(item.lat, item.lon)
         self._conn.execute(
-            f"INSERT OR REPLACE INTO items ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
+            f"INSERT OR REPLACE INTO items ({_COLUMNS}, place_done) VALUES ({_PLACEHOLDERS})",
             (
                 key,
                 str(item.path),
@@ -480,8 +531,43 @@ class MediaLibrary:
                 item.width,
                 item.height,
                 int(item.cloud_only),
+                place.city if place else None,
+                place.region if place else None,
+                place.country if place else None,
+                1,
             ),
         )
+
+    def fill_places(self) -> int:
+        """Name the place of rows that have a position but were stored before place names
+        existed. Works from the stored latitude and longitude only: no file is opened (rule 3).
+        Returns how many rows were filled."""
+        rows = self._conn.execute(
+            "SELECT key, lat, lon FROM items WHERE place_done = 0 AND lat IS NOT NULL "
+            "AND lon IS NOT NULL"
+        ).fetchall()
+        for key, lat, lon in rows:
+            place = _place_of(float(lat), float(lon))
+            self._conn.execute(
+                "UPDATE items SET place_city = ?, place_region = ?, place_country = ?, "
+                "place_done = 1 WHERE key = ?",
+                (place.city if place else None, place.region if place else None,
+                 place.country if place else None, key),
+            )  # fmt: skip
+        # Rows without a position have no place to name.
+        self._conn.execute("UPDATE items SET place_done = 1 WHERE place_done = 0")
+        self._conn.commit()
+        return len(rows)
+
+
+def _place_of(lat: float | None, lon: float | None) -> PlaceName | None:
+    if lat is None or lon is None:
+        return None
+    try:
+        return places.lookup(lat, lon)
+    except Exception as exc:  # noqa: BLE001 - a missing list must not stop the update
+        log.warning("Could not look up a place name: %s", exc)
+        return None
 
 
 def read_media_item(path: Path, ctx: RunContext) -> MediaItem | None:
@@ -585,7 +671,8 @@ def _modified(mtime: float) -> datetime | None:
 
 
 def _item_from_row(row: tuple[object, ...]) -> MediaItem:
-    (_key_, path, kind, size, mtime, taken, source, lat, lon, width, height, cloud) = row
+    (_key_, path, kind, size, mtime, taken, source, lat, lon, width, height, cloud) = row[:12]
+    city, region, country = row[12:15]
     return MediaItem(
         path=Path(str(path)),
         kind=str(kind),
@@ -598,4 +685,5 @@ def _item_from_row(row: tuple[object, ...]) -> MediaItem:
         width=int(width) if width is not None else None,  # pyright: ignore[reportArgumentType]
         height=int(height) if height is not None else None,  # pyright: ignore[reportArgumentType]
         cloud_only=bool(cloud),
+        place=PlaceName(str(city), str(region or ""), str(country or "")) if city else None,
     )

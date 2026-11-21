@@ -351,3 +351,77 @@ def test_the_widget_prunes_the_cache_when_the_source_is_set(qtbot: QtBot, tmp_pa
 
     left = sorted(p.name for p in folder.rglob("*.png"))
     assert left == ["b.png", "c.png"]
+
+
+# ----- wrapping across the 180 degree line and 50,000 points (part 1, item 6) --------------------
+
+
+def _sized(qtbot: QtBot, w: int = 600, h: int = 400) -> WorldMap:
+    widget = WorldMap()
+    qtbot.addWidget(widget)
+    widget.resize(w, h)
+    widget.show()
+    return widget
+
+
+def test_dragging_across_the_180_line_wraps_instead_of_stopping(qtbot: QtBot) -> None:
+    widget = _sized(qtbot)
+    widget.set_view(10.0, 175.0, 4)
+    assert widget.center_lonlat()[0] == pytest.approx(175.0)
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=QPoint(500, 200))
+    qtbot.mouseMove(widget, QPoint(100, 200))  # drag the map left: the view moves east
+    lon = widget.center_lonlat()[0]
+    # 400 px at zoom 4 is 400 / 4096 of the world = 35.2 degrees east of 175 = -149.8
+    assert lon == pytest.approx(175.0 + 400 / 4096 * 360 - 360, abs=0.01)
+    assert -180 <= lon < 180
+
+
+def test_points_either_side_of_the_180_line_are_both_shown_near_it(qtbot: QtBot) -> None:
+    widget = _sized(qtbot)
+    widget.set_points([(0.0, 179.9, "east"), (0.0, -179.9, "west")])
+    widget.set_view(0.0, 179.95, 6)
+    centre = widget.rect().center()
+    for lon, name in ((179.9, "east"), (-179.9, "west")):
+        p = widget.lonlat_to_screen(lon, 0.0)
+        assert abs(p.x() - centre.x()) < 30
+        assert widget.members_near(0.0, lon) == [name]
+
+
+def test_zooming_keeps_the_point_under_the_pointer_across_the_seam(qtbot: QtBot) -> None:
+    from PySide6.QtCore import QPointF
+
+    widget = _sized(qtbot)
+    widget.set_view(0.0, -179.0, 3)
+    anchor = QPointF(100, 100)
+    before = widget.screen_to_lonlat(anchor)
+    widget.zoom_in(anchor)
+    after = widget.screen_to_lonlat(anchor)
+    assert after[0] == pytest.approx(before[0], abs=0.01)
+    assert after[1] == pytest.approx(before[1], abs=0.01)
+
+
+def test_fifty_thousand_points_cluster_and_paint_fast_enough(qtbot: QtBot) -> None:
+    import time
+
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    lats = rng.uniform(-70, 70, 50_000)
+    lons = rng.uniform(-180, 180, 50_000)
+    points = [(float(a), float(b), i) for i, (a, b) in enumerate(zip(lats, lons, strict=True))]
+    widget = _sized(qtbot, 1000, 700)
+
+    t0 = time.perf_counter()
+    widget.set_points(points)
+    for zoom in (1, 4, 8, 12):
+        widget.set_view(0.0, 179.0, zoom)  # the view straddles the 180 line
+        widget.grab()
+        widget.members_near(0.0, 179.5)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 20.0, f"50,000 points took {elapsed:.1f} s over four zoom levels"
+    t1 = time.perf_counter()
+    for _ in range(5):  # panning at a high zoom with many circles
+        widget.set_view(0.0, 179.0 + _ * 0.2, 4)
+        widget.grab()
+    assert (time.perf_counter() - t1) / 5 < 1.0

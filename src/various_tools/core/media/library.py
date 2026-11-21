@@ -318,13 +318,25 @@ class MediaLibrary:
             "place_done INTEGER NOT NULL DEFAULT 0)"
         )
         if version == 1:  # 0.7 layout: add the place columns; the rows are kept
-            for column in (
-                "place_city TEXT",
-                "place_region TEXT",
-                "place_country TEXT",
-                "place_done INTEGER NOT NULL DEFAULT 0",
-            ):
-                self._conn.execute(f"ALTER TABLE items ADD COLUMN {column}")
+            # Only the missing columns, and the version in the same transaction, so a migration
+            # that stopped half way can be run again.
+            have = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(items)")}
+            self._conn.execute("BEGIN")
+            try:
+                for column in (
+                    "place_city TEXT",
+                    "place_region TEXT",
+                    "place_country TEXT",
+                    "place_done INTEGER NOT NULL DEFAULT 0",
+                ):
+                    if column.split()[0] not in have:
+                        self._conn.execute(f"ALTER TABLE items ADD COLUMN {column}")
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            return
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
 

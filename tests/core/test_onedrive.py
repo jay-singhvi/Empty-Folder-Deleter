@@ -119,7 +119,10 @@ def in_onedrive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     [(0, True), (1, False), (onedrive.NOT_A_PLACEHOLDER, True), (None, None)],
 )
 def test_upload_pending_reads_the_in_sync_state(
-    in_onedrive: Path, monkeypatch: pytest.MonkeyPatch, state: int | str | None, expected: bool | None
+    in_onedrive: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: int | str | None,
+    expected: bool | None,
 ) -> None:
     monkeypatch.setattr(onedrive, "_query_in_sync_state", lambda _p: state)
     assert onedrive.upload_pending(in_onedrive / "a.txt") is expected

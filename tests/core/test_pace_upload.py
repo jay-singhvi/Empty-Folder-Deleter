@@ -195,7 +195,9 @@ def test_the_heartbeat_keeps_running_while_waiting(
     monkeypatch.setattr(onedrive, "upload_pending", lambda _p: True)
     clock = {"t": 0.0}
     monkeypatch.setattr(plan_module, "_monotonic", lambda: clock["t"])
-    monkeypatch.setattr(plan_module, "_sleep", lambda s: clock.__setitem__("t", clock["t"] + 20 * s))
+    monkeypatch.setattr(
+        plan_module, "_sleep", lambda s: clock.__setitem__("t", clock["t"] + 20 * s)
+    )
     touches: list[int] = []
     monkeypatch.setattr(journal, "touch_run", touches.append)
     apply_plan(_plan(tmp_path, 3), _ctx(tmp_path, journal, _pace(upload_timeout_s=300.0)))

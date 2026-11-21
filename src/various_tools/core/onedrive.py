@@ -266,7 +266,7 @@ def _query_in_sync_state(path: Path) -> int | str | None:
             ctypes.POINTER(ctypes.c_uint32),
         ]
         get_info.restype = ctypes.c_int32
-    except (OSError, AttributeError):
+    except OSError, AttributeError:
         return None
     handle = create_file(
         long_path(path),

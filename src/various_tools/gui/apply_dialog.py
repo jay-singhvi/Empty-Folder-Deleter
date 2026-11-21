@@ -6,12 +6,14 @@ Working in batches keeps a sync client such as OneDrive from being flooded. The 
 
 from __future__ import annotations
 
+import contextlib
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -40,6 +42,8 @@ PACE_KEY = "__apply_pace__"
 UNITS: tuple[tuple[str, int], ...] = (("seconds", 1), ("minutes", 60), ("hours", 3600))
 SUGGEST_BYTES = 1024**3
 SUGGEST_FILES = 500
+UPLOAD_CHECK_TEXT = "Wait until OneDrive has uploaded each batch (at most"
+UPLOAD_MINUTES_DEFAULT = 30
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,7 @@ class ApplyDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(ask.title)
         self._count = ask.count
+        self._touches_onedrive = ask.touches_onedrive
         saved = dict(last or {})
 
         summary = QLabel(ask.summary)
@@ -137,6 +142,15 @@ class ApplyDialog(QDialog):
         self.reason_label.setWordWrap(True)
         self.reason_label.setVisible(bool(ask.suggestion))
         self.estimate_label = QLabel()
+        self.upload_check = QCheckBox(UPLOAD_CHECK_TEXT)
+        self.upload_spin = QSpinBox()
+        self.upload_spin.setRange(1, 100_000)
+        upload_row = QHBoxLayout()
+        upload_row.addWidget(self.upload_check)
+        upload_row.addWidget(self.upload_spin)
+        upload_row.addWidget(QLabel("minutes)"))
+        upload_row.addStretch(1)
+        self.upload_widgets = (self.upload_check, self.upload_spin)
 
         batch_row = QHBoxLayout()
         for widget in (
@@ -161,11 +175,16 @@ class ApplyDialog(QDialog):
         layout.addWidget(self.all_radio)
         layout.addLayout(batch_row)
         layout.addLayout(preset_row)
+        layout.addLayout(upload_row)
         layout.addWidget(self.reason_label)
         layout.addWidget(self.estimate_label)
         layout.addWidget(self.buttons)
 
         self._fill(saved, bool(ask.suggestion))
+        self._fill_upload(saved)
+        self.upload_check.setVisible(ask.touches_onedrive)
+        self.upload_spin.setVisible(ask.touches_onedrive)
+        upload_row.itemAt(2).widget().setVisible(ask.touches_onedrive)  # pyright: ignore[reportOptionalMemberAccess]
         self.all_radio.toggled.connect(self._changed)
         self.batch_spin.valueChanged.connect(self._edited)
         self.wait_spin.valueChanged.connect(self._edited)
@@ -194,6 +213,15 @@ class ApplyDialog(QDialog):
         batches = saved.get("mode") == "batches"
         self.batch_radio.setChecked(suggested or batches)
         self.all_radio.setChecked(not (suggested or batches))
+
+    def _fill_upload(self, saved: Mapping[str, Any]) -> None:
+        """On by default when the plan touches OneDrive; the minutes come from the saved choice."""
+        wanted = saved.get("wait_for_upload")
+        self.upload_check.setChecked(wanted if isinstance(wanted, bool) else True)
+        minutes = UPLOAD_MINUTES_DEFAULT
+        with contextlib.suppress(TypeError, ValueError):
+            minutes = max(1, int(saved.get("upload_minutes", minutes)))
+        self.upload_spin.setValue(minutes)
 
     def _wait_seconds(self) -> float:
         return float(self.wait_spin.value() * int(self.unit_combo.currentData()))
@@ -230,6 +258,8 @@ class ApplyDialog(QDialog):
         batches = self.batch_radio.isChecked()
         for widget in (self.batch_spin, self.wait_spin, self.unit_combo, self.preset_combo):
             widget.setEnabled(batches)
+        for widget in self.upload_widgets:
+            widget.setEnabled(batches)
         wait = estimate_wait(self._count, self.pace())
         self.estimate_label.setText(
             f"Extra waiting time: about {format_wait(wait)}." if wait else "No extra waiting."
@@ -239,7 +269,13 @@ class ApplyDialog(QDialog):
         """The chosen pace, or None for all at once (or batches with nothing to wait)."""
         if not self.batch_radio.isChecked():
             return None
-        return Pace(self.batch_spin.value(), self._wait_seconds())
+        upload = self._touches_onedrive and self.upload_check.isChecked()
+        return Pace(
+            self.batch_spin.value(),
+            self._wait_seconds(),
+            wait_for_upload=upload,
+            upload_timeout_s=float(self.upload_spin.value() * 60),
+        )
 
     def values(self) -> dict[str, Any]:
         """The choice, as stored for next time."""
@@ -248,4 +284,6 @@ class ApplyDialog(QDialog):
             "batch_size": self.batch_spin.value(),
             "wait": self.wait_spin.value(),
             "unit": str(self.unit_combo.currentText()),
+            "wait_for_upload": self.upload_check.isChecked(),
+            "upload_minutes": self.upload_spin.value(),
         }

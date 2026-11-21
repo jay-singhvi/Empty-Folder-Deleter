@@ -1063,6 +1063,8 @@ class ToolPage(QWidget):
         self.undo_info = undo_info_from_result(value)
         self._applied = True
         text = result_summary(value)
+        if value.notes:
+            text += "\n\n" + "\n".join(value.notes)
         failures = [o for o in value.outcomes if o.status == "failed"][:10]
         if failures:
             text += "\n\nFailed:\n" + "\n".join(f"  {o.src}: {o.detail}" for o in failures)

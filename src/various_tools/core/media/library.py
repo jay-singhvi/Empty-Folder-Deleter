@@ -150,6 +150,63 @@ def filter_items(items: Iterable[MediaItem], flt: MediaFilter) -> list[MediaItem
     return found
 
 
+class FilterIndex:
+    """A list of items with their search text worked out once, so a filter is quick at 200,000.
+
+    :func:`filter_items` recomputes the lower-case path of every item on every call, which is
+    too slow for a search box. This keeps those strings. :meth:`select` returns positions in
+    ``items``; ``among`` (positions a previous, wider filter returned) narrows the work when the
+    new filter only asks for less (:meth:`narrows`).
+    """
+
+    def __init__(self, items: Sequence[MediaItem]) -> None:
+        self.items = items
+        self._fold = [str(i.path).casefold() for i in items]
+        self._norm = [os.path.normcase(str(i.path)) for i in items]
+        self._month = [i.taken.year * 12 + i.taken.month if i.taken else -1 for i in items]
+        self._video = [i.kind == "video" for i in items]
+
+    @staticmethod
+    def narrows(old: MediaFilter, new: MediaFilter) -> bool:
+        """True when everything ``new`` shows is also shown by ``old``."""
+        return (
+            old.kind == new.kind
+            and old.start == new.start
+            and old.end == new.end
+            and old.folder == new.folder
+            and set(old.text.casefold().split()) <= set(new.text.casefold().split())
+        ) or old.is_empty
+
+    def select(self, flt: MediaFilter, among: Sequence[int] | None = None) -> list[int]:
+        """Positions of the items that pass ``flt``, in order (same rules as filter_items)."""
+        found: list[int] = list(range(len(self.items))) if among is None else list(among)
+        if flt.is_empty:
+            return found
+        if flt.kind == "photo":
+            video = self._video
+            found = [i for i in found if not video[i]]
+        elif flt.kind == "video":
+            video = self._video
+            found = [i for i in found if video[i]]
+        start, end = flt.start, flt.end
+        if start is not None and end is not None and start > end:
+            start, end = end, start
+        if start is not None or end is not None:
+            month = self._month
+            low = start[0] * 12 + start[1] if start is not None else 0
+            high = end[0] * 12 + end[1] if end is not None else 1 << 60
+            found = [i for i in found if month[i] >= 0 and low <= month[i] <= high]
+        if flt.folder is not None:
+            folder = os.path.normcase(str(flt.folder))
+            prefix = folder if folder.endswith(os.sep) else folder + os.sep
+            norm = self._norm
+            found = [i for i in found if norm[i].startswith(prefix)]
+        fold = self._fold
+        for word in flt.text.casefold().split():
+            found = [i for i in found if word in fold[i]]
+        return found
+
+
 def sort_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     """By date taken (items without one last), then by path."""
     return sorted(

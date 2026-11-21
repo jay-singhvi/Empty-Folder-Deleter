@@ -34,7 +34,7 @@ from various_tools import __version__
 from various_tools.core.media.library import MediaFilter, MediaItem
 from various_tools.core.settings import Settings
 from various_tools.gui.change_date_dialog import ChangeDateDialog
-from various_tools.gui.library_model import LibraryModel, library_model
+from various_tools.gui.library_model import LOADING_TEXT, LibraryModel, library_model
 from various_tools.gui.state import AppState
 from various_tools.gui.widgets.filter_bar import FilterBar
 from various_tools.gui.widgets.media_grid import MediaGrid
@@ -152,6 +152,7 @@ class MapPage(QWidget):
 
         self.map.clusterClicked.connect(self._cluster_clicked)
         self.model.changed.connect(self._rebuild)
+        self.model.loadingChanged.connect(self._loading_changed)
         self._pending_focus: Path | None = None
         state.on_settings_changed(self._settings_changed)
         self._apply_tiles(state.settings)
@@ -171,7 +172,13 @@ class MapPage(QWidget):
         self.place_label.setText(NO_PLACE_TEXT)
         self.status_label.setText(self._summary(self.model.roots()))
 
+    def _loading_changed(self, loading: bool) -> None:
+        if loading:
+            self.status_label.setText(LOADING_TEXT)
+
     def _summary(self, roots: Sequence[Path]) -> str:
+        if self.model.loading:
+            return LOADING_TEXT
         if not roots:
             return "Choose your photo folders on the Timeline page first (Library folders…)."
         shown = self.model.shown

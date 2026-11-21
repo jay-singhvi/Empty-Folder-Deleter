@@ -505,6 +505,33 @@ def test_the_path_is_never_empty_while_the_swap_happens(
     assert states and states[-1] is True  # after the copy took its place it stays there
 
 
+def test_a_failed_put_back_never_leaves_the_path_empty(
+    tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = jpeg(tmp_path / "pics" / "a.jpg")
+    original = a.read_bytes()
+
+    def broken(_path: str | os.PathLike[str]) -> None:
+        raise OSError("bin full")
+
+    monkeypatch.setattr(plan_module, "send2trash", broken)
+    real_rename = set_date_tool.rename_no_replace
+
+    def flaky(src: Path, dst: Path) -> None:
+        if dst == a and src.parent.name.startswith(".setdate-") and src.suffix == ".jpg":
+            raise OSError("cannot put the original back")  # aside -> src
+        real_rename(src, dst)
+
+    monkeypatch.setattr(set_date_tool, "rename_no_replace", flaky)
+    _plan, result = run(tmp_path, journal, SetDateOptions(roots=[a.parent], new_date="2021-03-04"))
+    assert result.count("failed") == 1
+    assert a.is_file()  # the path is not empty: the new copy is back in place
+    assert datetime.fromtimestamp(a.stat().st_mtime) == datetime(2021, 3, 4, 10, 12)
+    kept = [p for p in a.parent.rglob("a.jpg") if p != a]
+    assert len(kept) == 1 and kept[0].read_bytes() == original  # the original is kept too
+    assert not list(a.parent.glob(".setdate-*.tmp"))
+
+
 # ----- a video's new date is read back -------------------------------------------------------
 
 

@@ -413,7 +413,7 @@ class _Setter:
             try:
                 trash_replaced(src, aside, "original replaced by the copy with the new date")
             except BaseException:
-                self._put_original_back(src, aside, staging)
+                keep_staging = self._put_original_back(src, aside, staging)
                 raise
         finally:
             if not keep_staging:
@@ -434,15 +434,30 @@ class _Setter:
             log.warning("could not remove the temporary folder %s", holder, exc_info=True)
 
     @staticmethod
-    def _put_original_back(src: Path, aside: Path, staging: Path) -> None:
-        """The Recycle Bin refused or failed: undo the swap so the original stays as it was."""
+    def _put_original_back(src: Path, aside: Path, staging: Path) -> bool:
+        """The Recycle Bin refused or failed: undo the swap so the original stays as it was.
+
+        Returns True when the copy must be kept at ``staging`` (it could not go back to ``src``).
+        The path is never left empty: if the original cannot return, the copy goes back to
+        ``src`` and the original stays where it is (the error is journaled).
+        """
         if not os.path.lexists(aside):
-            return  # it did go to the Recycle Bin; the journal row says so
+            return False  # it did go to the Recycle Bin; the journal row says so
         try:
             rename_no_replace(src, staging)
-            rename_no_replace(aside, src)
-        except OSError:  # leave both files where they are; the error is journaled
+        except OSError:
             log.warning("could not put %s back after a failed recycle", src, exc_info=True)
+            return False  # the copy is still at src
+        try:
+            rename_no_replace(aside, src)
+        except OSError:
+            log.warning("could not put %s back after a failed recycle", src, exc_info=True)
+            try:
+                rename_no_replace(staging, src)
+            except OSError:
+                log.warning("could not restore the copy at %s", src, exc_info=True)
+                return True  # keep the copy: the path must not lose both files
+        return False
 
     def _write_copy(self, exiftool: Path, src: Path, staging: Path, new: datetime) -> None:
         video = src.suffix.lower() in WRITABLE_VIDEO_EXTS
@@ -568,7 +583,9 @@ class SetDate:
         plan.notes.insert(
             0,
             f"Change date: {len(actions)} file(s) will change, {same} already have that date, "
-            f"{skipped} skipped. Originals go to the Recycle Bin and can be restored from History.",
+            f"{skipped} skipped. Originals go to the Recycle Bin and can be restored from History. "
+            "To undo, use History; restoring by hand from the Recycle Bin puts the file in a "
+            "hidden folder next to it.",
         )
         return plan
 

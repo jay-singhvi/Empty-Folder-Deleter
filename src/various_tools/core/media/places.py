@@ -54,28 +54,23 @@ class PlaceIndex:
         countries: list[str],
         source: str = "",
     ) -> None:
-        self.lat = lat.astype(np.float64) / _SCALE
-        self.lon = lon.astype(np.float64) / _SCALE
-        self.lat_rad = np.radians(self.lat)
-        self.lon_rad = np.radians(self.lon)
+        lat_deg = lat.astype(np.float64) / _SCALE
+        lon_deg = lon.astype(np.float64) / _SCALE
+        cell = (np.floor(lat_deg).astype(np.int64) + 90) * 360 + (
+            np.floor(lon_deg).astype(np.int64) + 180
+        )
+        order = np.argsort(cell, kind="stable")  # the packaged file is sorted already
+        self.lat_rad = np.radians(lat_deg[order])
+        self.lon_rad = np.radians(lon_deg[order])
         self.cos_lat = np.cos(self.lat_rad)
-        self.region = region
-        self.country = country
-        self.population = population
-        self.cities = cities
+        self.region = region[order]
+        self.country = country[order]
+        self.population = population[order]
+        self.cities: list[str] = [cities[i] for i in order.tolist()]
         self.regions = regions
         self.countries = countries
         self.source = source
-        cell = (np.floor(self.lat).astype(np.int64) + 90) * 360 + (
-            np.floor(self.lon).astype(np.int64) + 180
-        )
-        order = np.argsort(cell, kind="stable")
-        if not np.array_equal(order, np.arange(len(order))):  # files are sorted; stay safe
-            for name in ("lat", "lon", "lat_rad", "lon_rad", "cos_lat", "region", "country", "population"):
-                setattr(self, name, getattr(self, name)[order])
-            self.cities = [cities[i] for i in order]
-            cell = cell[order]
-        self._starts = np.searchsorted(cell, np.arange(_CELLS + 1))
+        self._starts = np.searchsorted(cell[order], np.arange(_CELLS + 1))
 
     def __len__(self) -> int:
         return len(self.cities)

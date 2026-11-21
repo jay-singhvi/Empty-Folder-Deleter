@@ -74,7 +74,7 @@ def test_changed_files_are_ignored(tmp_path: Path) -> None:
     # Only the stale one drops out of a bigger group.
     d = make(tmp_path / "d.jpg", b"d")
     dups.update_from_plan(plan_for(a, [d, b]))
-    b.write_bytes(b"changed again!")
+    b.write_bytes(b"changed again, longer")
     items = {path_key(p): item_of(p) for p in (a, b, d)}
     index = dups.index_for(items.get)
     assert [m.path.name for m in index.groups[0]] == ["a.jpg", "d.jpg"]

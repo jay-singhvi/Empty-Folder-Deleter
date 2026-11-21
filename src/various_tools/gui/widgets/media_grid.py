@@ -165,50 +165,6 @@ def groups_from_days(days: Any) -> Groups:
     return groups
 
 
-@dataclass
-class Groups:
-    """The month and day headers of a list in timeline order, worked out without the grid.
-
-    ``runs`` are ``(month, day, start, end)``: items ``start`` to ``end`` of the list share that
-    month (``(0, 0)`` when undated) and day (``None`` when undated). It is made in a background
-    worker (:func:`groups_from_days`) so the window thread only lays out headers and rows, which
-    stays quick at 200,000 items.
-    """
-
-    runs: list[tuple[tuple[int, int], date | None, int, int]] = field(
-        default_factory=list[tuple[tuple[int, int], date | None, int, int]]
-    )
-    month_counts: dict[tuple[int, int], int] = field(default_factory=dict[tuple[int, int], int])
-    day_counts: dict[date, int] = field(default_factory=dict[date, int])
-
-
-def days_of(items: Sequence[MediaItem]) -> Any:
-    """Each item's day as an ordinal (0 when undated), as a numpy array."""
-    return np.fromiter(
-        (i.taken.toordinal() if i.taken is not None else 0 for i in items),
-        dtype=np.int64,
-        count=len(items),
-    )
-
-
-def groups_from_days(days: Any) -> Groups:
-    """Runs of equal days, in order, from an array of day ordinals (0 for undated)."""
-    n = len(days)
-    groups = Groups()
-    if n == 0:
-        return groups
-    cuts = (np.flatnonzero(np.diff(days) != 0) + 1).tolist()
-    for start, end in zip([0, *cuts], [*cuts, n], strict=True):
-        ordinal = int(days[start])
-        day = date.fromordinal(ordinal) if ordinal > 0 else None
-        month = (day.year, day.month) if day is not None else (0, 0)
-        groups.runs.append((month, day, start, end))
-        groups.month_counts[month] = groups.month_counts.get(month, 0) + (end - start)
-        if day is not None:
-            groups.day_counts[day] = groups.day_counts.get(day, 0) + (end - start)
-    return groups
-
-
 class _Band:
     """One horizontal strip of the layout: a header or one row of tiles."""
 

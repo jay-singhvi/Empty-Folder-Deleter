@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from tests.core.test_media_library import make_jpeg
 
 from various_tools.core.context import RunContext
 from various_tools.core.deps import ExternalTools
@@ -18,8 +19,6 @@ from various_tools.core.media.library import (
 )
 from various_tools.core.media.places import PlaceName
 from various_tools.core.settings import Settings
-from tests.core.test_media_library import make_jpeg
-
 
 
 @pytest.fixture

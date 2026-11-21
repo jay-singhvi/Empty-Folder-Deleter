@@ -74,7 +74,9 @@ def main() -> int:
         country = countries.get(cc, cc)
         region = regions.get(f"{cc}.{admin1}", "")
         cell = (int(np.floor(lat)) + 90) * 360 + (int(np.floor(lon)) + 180)
-        rows.append((cell, name, region, country, round(lat * SCALE), round(lon * SCALE), population))
+        rows.append(
+            (cell, name, region, country, round(lat * SCALE), round(lon * SCALE), population)
+        )
     rows.sort()
 
     region_names = sorted({r[2] for r in rows})

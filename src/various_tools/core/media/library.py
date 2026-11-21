@@ -33,8 +33,7 @@ from typing import Literal, Self
 from various_tools.core import onedrive
 from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import FileInfo, walk
-from various_tools.core.media import exif, ffmpeg
-from various_tools.core.media import places
+from various_tools.core.media import exif, ffmpeg, places
 from various_tools.core.media.imaging import IMAGE_EXTS, RAW_EXTS
 from various_tools.core.media.places import PlaceName
 from various_tools.core.settings import Settings

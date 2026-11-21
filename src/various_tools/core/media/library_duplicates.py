@@ -94,7 +94,7 @@ class LibraryDuplicates:
         self.saved, self.groups = "", []
         try:
             data = as_dict(json.loads(self.path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return
         if data.get("format") != FORMAT:
             return
@@ -105,7 +105,7 @@ class LibraryDuplicates:
                 d = as_dict(entry)
                 try:
                     members.append(Member(str(d["path"]), int(d["size"]), float(d["mtime"])))
-                except (KeyError, TypeError, ValueError):
+                except KeyError, TypeError, ValueError:
                     continue
             if len(members) >= 2:
                 self.groups.append(members)

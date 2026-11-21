@@ -210,8 +210,7 @@ class PreviewPane(QWidget):
             self.copies.setText("")
             return
         rows = [
-            f"{escape(o.path.name)} ({escape(str(o.path.parent))}) "
-            f'<a href="show:{n}">Show</a>'
+            f'{escape(o.path.name)} ({escape(str(o.path.parent))}) <a href="show:{n}">Show</a>'
             for n, o in enumerate(others)
         ]
         self.copies.setText("<b>Other copies</b><br>" + "<br>".join(rows))

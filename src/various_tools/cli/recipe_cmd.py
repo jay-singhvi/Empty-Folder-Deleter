@@ -5,6 +5,11 @@ the first step only, because later steps depend on what the earlier ones change.
 every step is scanned, shown, confirmed (``--yes`` skips the question) and applied in turn as its
 own journaled run, so ``history`` and ``undo`` work per step. The folders to work on are given on
 the command line, because the command line has no working folder.
+
+Exit codes are those of the other commands: 0 when every step was applied (or, without
+``--apply``, after the dry run; or when the first step has nothing to apply), 1 when the recipe
+stopped early (a declined question, a later step with nothing selected, a step that did not
+finish cleanly), 2 for a usage error, 130 when cancelled.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
@@ -50,6 +56,7 @@ from various_tools.core.recipe import (
     step_options,
     step_title,
     uses_own_folders,
+    workspace_field,
 )
 from various_tools.core.schema import describe
 from various_tools.tools.base import Tool, discover
@@ -116,6 +123,22 @@ def show_recipe(ctx: typer.Context, name: Annotated[str, typer.Argument()]) -> N
             console.print(f"     options: {escape(shown)}")
         if problem:
             console.print(f"     [bold yellow]needs attention:[/bold yellow] {escape(problem)}")
+
+
+def _say_folders(console: Console, step: RecipeStep, tool: Tool, opts: object) -> None:
+    """Which folders the step looks in, and whether they are the step's own."""
+    name = workspace_field(tool)
+    if name is None:
+        return
+    value = getattr(opts, name, None)
+    folders = [str(p) for p in (value if isinstance(value, list) else [value]) if p]
+    shown = escape(", ".join(folders)) or "(none)"
+    if uses_own_folders(step, tool):
+        console.print(
+            f"  Looking in its own folders (saved in the step) instead of the given PATHS: {shown}"
+        )
+    else:
+        console.print(f"  Looking in: {shown}")
 
 
 def _own_folders(step: RecipeStep, tools: dict[str, Tool]) -> bool:
@@ -198,6 +221,7 @@ def run_recipe_command(
         opts = step_options(step, tool, folders)
         confirm_locked(locked_changes(specs, option_values(opts, specs)), allow=allow_locked)
         console.print(f"[bold]Step {number} of {total}: {escape(step_title(step, tools))}[/bold]")
+        _say_folders(console, step, tool, opts)
         plan = run_job(
             state,
             lambda c, step=step, tool=tool: scan_step(
@@ -223,9 +247,17 @@ def run_recipe_command(
                 "Nothing to apply: no action is selected. The recipe stops here."
                 + (" Add --select-all to apply every action." if plan.actions else "")
             )
+            if number > 1:  # the recipe did not finish: a script must be able to tell
+                raise typer.Exit(EXIT_FAILED)
             return
         print_plan(console, plan, show_table=not yes)
         permanent = permanent_delete_requested(plan)
+        if permanent and state.settings().delete_mode != "permanent":
+            console.print(
+                "[bold yellow]warning:[/bold yellow] this plan deletes permanently, but "
+                "'delete_mode' in the settings is 'trash', so those actions will be skipped. "
+                "Change it with: various-tools config set delete_mode permanent"
+            )
         downloads = download_actions(plan)
         if downloads:
             console.print(

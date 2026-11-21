@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+
 from various_tools.core.journal import Journal
 from various_tools.core.recipe import (
     Recipe,
@@ -123,3 +125,41 @@ def test_pacing_flags_are_checked_as_on_apply(cli: Cli) -> None:
     root = _tree(cli)
     result = cli.run("recipe", "run", "Tidy", str(root), "--apply", "--batch-size", "2")
     assert result.exit_code == 2 and "--batch-size and --pause go together" in result.output
+
+
+def test_a_later_step_with_nothing_selected_exits_non_zero(cli: Cli) -> None:
+    _save(cli, _tidy())
+    root = cli.work / "only_file"
+    root.mkdir()
+    (root / "empty.txt").write_text("")  # step 1 deletes it; step 2 then finds nothing
+    result = cli.run("recipe", "run", "Tidy", str(root), "--apply", "--yes")
+    assert result.exit_code == 1, result.output
+    assert "Step 2" in result.output and "no action is selected" in result.output
+    assert not (root / "empty.txt").exists()  # step 1 stays applied
+
+
+def test_each_step_says_which_folders_it_uses(cli: Cli) -> None:
+    own = cli.work / "own"
+    own.mkdir()
+    _save(
+        cli,
+        Recipe("Mixed", [RecipeStep("empty_files"), RecipeStep("empty_folders", {"roots": [str(own)]})]),
+    )
+    root = _tree(cli)
+    result = cli.run("recipe", "run", "Mixed", str(root), "--apply", "--yes")
+    out = " ".join(result.output.split())
+    assert "Looking in:" in out and str(root) in out
+    assert "its own folders" in out and "instead of the given PATHS" in out and str(own) in out
+
+
+def test_a_permanent_plan_warns_when_delete_mode_is_trash(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.cli import recipe_cmd
+
+    monkeypatch.setattr(recipe_cmd, "permanent_delete_requested", lambda _plan: True)
+    _save(cli, Recipe("One", [RecipeStep("empty_files")]))
+    root = _tree(cli)
+    result = cli.run("recipe", "run", "One", str(root), "--apply", "--yes", input="y\n")
+    assert "deletes permanently" in " ".join(result.output.split())
+    assert "delete_mode" in result.output

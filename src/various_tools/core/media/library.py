@@ -412,7 +412,7 @@ class MediaLibrary:
         rows are kept. On cancel, what was read so far is kept and nothing is removed.
         """
         report = SyncReport()
-        self.fill_places()
+        self.fill_places(ctx)
         listed: list[tuple[Path, list[FileInfo], list[str]]] = []
         for root in fold_roots(roots):
             ctx.check_cancelled()
@@ -549,25 +549,46 @@ class MediaLibrary:
             ),
         )
 
-    def fill_places(self) -> int:
+    def fill_places(self, ctx: RunContext | None = None) -> int:
         """Name the place of rows that have a position but were stored before place names
         existed. Works from the stored latitude and longitude only: no file is opened (rule 3).
-        Returns how many rows were filled."""
+        Returns how many rows were filled.
+
+        With ``ctx`` it reports progress and can be cancelled (the rows named so far are kept).
+        When the places list cannot be loaded this logs once and changes nothing, so the rows
+        are named on a later sync that can load it.
+        """
         rows = self._conn.execute(
             "SELECT key, lat, lon FROM items WHERE place_done = 0 AND lat IS NOT NULL "
             "AND lon IS NOT NULL"
         ).fetchall()
-        for key, lat, lon in rows:
-            place = _place_of(float(lat), float(lon))
+        if rows:
+            try:
+                places.get_index()  # load once; a missing list ends the work here
+            except Exception as exc:  # noqa: BLE001 - a missing list must not stop the update
+                log.warning("Place names are not available (%s); photos are not named", exc)
+                return 0
+        done = 0
+        try:
+            for done, (key, lat, lon) in enumerate(rows, start=1):
+                if ctx is not None:
+                    if done % 200 == 1:
+                        ctx.check_cancelled()
+                        ctx.report(done - 1, len(rows), "Naming places")
+                place = _place_of(float(lat), float(lon))
+                self._conn.execute(
+                    "UPDATE items SET place_city = ?, place_region = ?, place_country = ?, "
+                    "place_done = 1 WHERE key = ?",
+                    (place.city if place else None, place.region if place else None,
+                     place.country if place else None, key),
+                )  # fmt: skip
+            # Rows without a position have no place to name.
             self._conn.execute(
-                "UPDATE items SET place_city = ?, place_region = ?, place_country = ?, "
-                "place_done = 1 WHERE key = ?",
-                (place.city if place else None, place.region if place else None,
-                 place.country if place else None, key),
-            )  # fmt: skip
-        # Rows without a position have no place to name.
-        self._conn.execute("UPDATE items SET place_done = 1 WHERE place_done = 0")
-        self._conn.commit()
+                "UPDATE items SET place_done = 1 "
+                "WHERE place_done = 0 AND (lat IS NULL OR lon IS NULL)"
+            )
+        finally:
+            self._conn.commit()  # on a cancel too: what was named stays named
         return len(rows)
 
 

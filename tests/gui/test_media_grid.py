@@ -394,3 +394,13 @@ def test_a_resize_that_keeps_the_column_count_does_not_lay_out_again(
     grid.resize(300, grid.height())  # fewer columns
     qtbot.wait(50)
     assert calls and grid._cols < cols  # pyright: ignore[reportPrivateUsage]
+
+
+def test_empty_groups_with_items_are_worked_out_again(grid: MediaGrid, tmp_path: Path) -> None:
+    from various_tools.gui.widgets.media_grid import groups_from_days
+    import numpy as np
+
+    items = [item(tmp_path / "a.jpg"), item(tmp_path / "b.jpg")]
+    grid.set_items(items, groups_from_days(np.empty(0, dtype=np.int64)))  # stale: no runs
+    assert grid.header_texts() != []
+    assert len(grid.items()) == 2

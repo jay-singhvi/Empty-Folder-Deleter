@@ -358,7 +358,11 @@ class MediaGrid(QAbstractScrollArea):
 
         if self.grouped:
             groups = self._groups
-            if groups is None or (groups.runs and groups.runs[-1][3] != total):
+            if (
+                groups is None
+                or (groups.runs and groups.runs[-1][3] != total)
+                or (not groups.runs and total)
+            ):
                 groups = groups_from_days(days_of(self._items))
             last_month: tuple[int, int] | None = None
             for month, day, start, end in groups.runs:

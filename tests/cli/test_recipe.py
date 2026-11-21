@@ -143,7 +143,9 @@ def test_each_step_says_which_folders_it_uses(cli: Cli) -> None:
     own.mkdir()
     _save(
         cli,
-        Recipe("Mixed", [RecipeStep("empty_files"), RecipeStep("empty_folders", {"roots": [str(own)]})]),
+        Recipe(
+            "Mixed", [RecipeStep("empty_files"), RecipeStep("empty_folders", {"roots": [str(own)]})]
+        ),
     )
     root = _tree(cli)
     result = cli.run("recipe", "run", "Mixed", str(root), "--apply", "--yes")

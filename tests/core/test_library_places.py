@@ -102,3 +102,57 @@ def test_duplicates_only_filter_uses_the_index(tmp_path: Path, ctx: RunContext) 
     assert not FilterIndex.narrows(MediaFilter(duplicates_only=True), MediaFilter())
     with pytest.raises(ValueError):
         filter_items(items, MediaFilter(duplicates_only=True))
+
+
+def test_missing_places_data_is_logged_once_and_rows_are_named_later(
+    tmp_path: Path,
+    ctx: RunContext,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from various_tools.core.media import places
+
+    root = tmp_path / "pics"
+    for n in range(3):
+        make_jpeg(root / f"sf{n}.jpg", gps=((37.0, 46.0, 30.0), (122.0, 25.0, 12.0)))
+    db = tmp_path / "cache" / "lib.sqlite"
+    with MediaLibrary(db) as lib:
+        lib.sync([root], ctx)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE items SET place_done = 0, place_city = NULL")
+    conn.commit()
+    conn.close()
+
+    def broken() -> object:
+        raise OSError("no places.npz")
+
+    monkeypatch.setattr(places, "_index", None)
+    monkeypatch.setattr(places, "load_index", broken)
+    with MediaLibrary(db) as lib, caplog.at_level("WARNING"):
+        assert lib.fill_places() == 0
+    assert len([r for r in caplog.records if "Place names are not available" in r.message]) == 1
+    monkeypatch.undo()
+    with MediaLibrary(db) as lib:
+        assert lib.fill_places() == 3  # not marked done: named once the list loads
+        assert {i.place.city for i in lib.items() if i.place} == {"San Francisco"}
+
+
+def test_fill_places_can_be_cancelled(tmp_path: Path, ctx: RunContext) -> None:
+    from various_tools.core.context import Cancelled
+
+    root = tmp_path / "pics"
+    make_jpeg(root / "sf.jpg", gps=((37.0, 46.0, 30.0), (122.0, 25.0, 12.0)))
+    db = tmp_path / "cache" / "lib.sqlite"
+    with MediaLibrary(db) as lib:
+        lib.sync([root], ctx)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE items SET place_done = 0, place_city = NULL")
+    conn.commit()
+    conn.close()
+    ctx.cancel()
+    with MediaLibrary(db) as lib:
+        with pytest.raises(Cancelled):
+            lib.fill_places(ctx)
+        with pytest.raises(Cancelled):
+            lib.sync([root], ctx)
+        assert lib.fill_places() == 1

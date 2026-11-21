@@ -771,6 +771,7 @@ class ToolPage(QWidget):
         if options is None:
             return None
         self._remember_options(options)
+        self._scan_workspace = list(self.state.workspace())
         tool = self.tool
 
         def job(ctx: Any) -> tuple[Plan, list[int | None]]:
@@ -793,7 +794,10 @@ class ToolPage(QWidget):
         self._applied = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
         self._show_notes(plan.notes)
-        self.workspace_banner.setVisible(False)
+        # A scan that started under another working folder shows that folder's list: say so.
+        self.workspace_banner.setVisible(
+            self.uses_workspace and self.state.workspace() != self._scan_workspace
+        )
         self._show_missing(missing_programs(plan.notes))
         self._show_cloud_only(plan)
         self._show_size_map(plan)
@@ -999,6 +1003,7 @@ class ToolPage(QWidget):
 
     _pause_event: threading.Event | None = None
     _skip_wait_event: threading.Event | None = None
+    _scan_workspace: list[Path] = []  # the working folder when the running scan started
     _apply_worker: Worker | None = None
     _pace: Pace | None = None
     _paused = False

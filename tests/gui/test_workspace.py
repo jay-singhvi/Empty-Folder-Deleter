@@ -427,3 +427,18 @@ def test_home_page_lists_the_last_runs_and_links_to_history(
     assert all(name in t and "done" in t for t in texts), texts
     window.home_page.history_button.click()
     assert window.stack.currentWidget() is window.history_page
+
+
+def test_a_scan_running_when_the_working_folder_changes_gets_the_banner(
+    qtbot: QtBot, window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    first = _tree(tmp_path, "first")
+    second = _tree(tmp_path, "second")
+    gui_state.set_workspace([first])
+    page = window.tool_page("empty_folders")
+    worker = page.scan()
+    assert worker is not None
+    gui_state.set_workspace([second])  # while the scan of the first folder is running
+    qtbot.waitUntil(lambda: page.plan is not None, timeout=30000)
+    assert not page.workspace_banner.isHidden()
+    qtbot.waitUntil(lambda: page.worker is None, timeout=30000)

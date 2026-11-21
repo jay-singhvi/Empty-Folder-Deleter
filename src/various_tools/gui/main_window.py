@@ -39,9 +39,12 @@ from PySide6.QtWidgets import (
 )
 
 from various_tools import __version__
+from various_tools.core.media.places import PLACES_ATTRIBUTION
+from various_tools.core.plan import Plan
 from various_tools.gui import shell
 from various_tools.gui.history_page import HistoryPage
 from various_tools.gui.home_page import HomePage
+from various_tools.gui.library_model import library_model
 from various_tools.gui.map_page import MapPage
 from various_tools.gui.recipes_page import RecipesPage
 from various_tools.gui.settings_page import SettingsPage
@@ -353,7 +356,8 @@ class MainWindow(QMainWindow):
         self.inform(
             f"About {APP_TITLE}",
             f"{APP_TITLE} {__version__}\n\nOne app for tidying folders and photos. Every tool "
-            "previews first and changes nothing until you Apply.",
+            "previews first and changes nothing until you Apply.\n\n"
+            f"{PLACES_ATTRIBUTION}",
         )
 
     # ----- sidebar ----------------------------------------------------------------------------
@@ -458,6 +462,7 @@ class MainWindow(QMainWindow):
             page.runApplied.connect(lambda _run: self.history_page.reload())
             page.runUndone.connect(self._run_undone)
             page.busyChanged.connect(self._busy_changed)
+            page.scanFinished.connect(self._scan_finished)
             self.stack.addWidget(page)
             self.tool_pages[tool_id] = page
         return page
@@ -491,6 +496,7 @@ class MainWindow(QMainWindow):
             if self.timeline_page is None:
                 self.timeline_page = TimelinePage(self.state)
                 self.timeline_page.showOnMap.connect(self.show_on_map)
+                self.timeline_page.openTool.connect(self.open_tool_with_folders)
                 self.stack.addWidget(self.timeline_page)
             page = self.timeline_page
         elif page_id == MAP_ID:
@@ -519,6 +525,19 @@ class MainWindow(QMainWindow):
         page = self.show_page(MAP_ID)
         if isinstance(page, MapPage):
             page.focus_item(Path(str(path)))
+
+    def open_tool_with_folders(self, tool_id: str, folders: list[object]) -> ToolPage | None:
+        """Open a tool on these folders (the Timeline's "Find duplicates…" on the library)."""
+        page = self.open_tool(tool_id)
+        if page is not None:
+            page.set_folders([str(folder) for folder in folders])
+        return page
+
+    def _scan_finished(self, plan: object) -> None:
+        """A Duplicate Finder scan is remembered by the photo library, so the Timeline can show
+        those groups; the library ignores files it does not hold."""
+        if isinstance(plan, Plan) and plan.tool == "duplicates":
+            library_model(self.state).update_duplicates(plan)
 
     def open_tool(self, tool_id: str, folder: str | None = None) -> ToolPage | None:
         """Show a tool's page and optionally put ``folder`` in its first folder field."""

@@ -321,6 +321,8 @@ class ToolPage(QWidget):
     runUndone = Signal(int)
     busyChanged = Signal(bool)
     clipboardCopied = Signal(str)
+    # The plan a scan just produced (shown in the list, not applied).
+    scanFinished = Signal(object)
 
     def __init__(
         self,
@@ -794,6 +796,16 @@ class ToolPage(QWidget):
             self._override_session_only = True  # this launch only: not remembered
         return self.form.set_first_folder(path)
 
+    def set_folders(self, paths: list[str]) -> bool:
+        """Put several folders into the first folder field, like :meth:`set_folder` (a field
+        that holds one folder gets the first). Returns False if there is nothing to set."""
+        if not paths or not self.set_folder(paths[0]):
+            return False
+        name = self.form.folder_fields()[0]
+        if len(paths) > 1 and self.form.field_spec(name).kind == "list":
+            self.form.set_field_value(name, list(paths))
+        return True
+
     def _build_options(self) -> ToolOptions | None:
         try:
             return cast(ToolOptions, self.form.build())
@@ -880,6 +892,7 @@ class ToolPage(QWidget):
         plan, sizes = value  # type: ignore[misc]
         assert isinstance(plan, Plan)
         self.plan = plan
+        self.scanFinished.emit(plan)
         self.result = None
         self._applied = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]

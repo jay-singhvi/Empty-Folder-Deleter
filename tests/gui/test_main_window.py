@@ -76,3 +76,46 @@ def test_home_clears_the_sidebar_highlight(window: MainWindow) -> None:
     assert window.stack.currentWidget() is window.home_page
     assert window.sidebar.currentItem() is None
     assert window.sidebar.selectedItems() == []
+
+
+def test_find_duplicates_opens_the_duplicate_finder_on_the_library_folders(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from various_tools.gui.main_window import TIMELINE_ID
+    from various_tools.gui.timeline_page import TimelinePage
+
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    timeline = window.show_page(TIMELINE_ID)
+    assert isinstance(timeline, TimelinePage)
+    timeline.openTool.emit("duplicates", [one, two])
+    page = window.tool_pages["duplicates"]
+    assert window.stack.currentWidget() is page
+    assert page.other_folders_check.isChecked()
+    options = page.form.build()
+    assert [Path(p) for p in options.roots] == [one, two]  # type: ignore[attr-defined]
+
+
+def test_a_duplicates_scan_is_handed_to_the_photo_library(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.core.plan import Plan
+    from various_tools.gui.library_model import LibraryModel
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        LibraryModel, "update_duplicates", lambda _self, plan: seen.append(plan.tool) or 0
+    )
+    window.tool_page("duplicates").scanFinished.emit(Plan(tool="duplicates", roots=[]))
+    window.tool_page("empty_files").scanFinished.emit(Plan(tool="empty_files", roots=[]))
+    assert seen == ["duplicates"]
+
+
+def test_about_credits_the_place_names(window: MainWindow) -> None:
+    from various_tools.core.media.places import PLACES_ATTRIBUTION
+
+    shown: list[str] = []
+    window.inform = lambda _title, text: shown.append(text)
+    window.show_about()
+    assert PLACES_ATTRIBUTION in shown[0]

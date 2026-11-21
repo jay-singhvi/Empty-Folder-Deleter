@@ -5,6 +5,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.7.0: the items left for later, and waiting for OneDrive (2026-11-21)
+
+Owner's request: "start on the items left for later". Design:
+`docs/superpowers/specs/2026-11-21-left-for-later-design.md` (wave 1; wave 2, saved recipes,
+duplicates inside the photo library and place names, comes later).
+
+- **Wait until OneDrive has uploaded each batch** (Apply window, shown when the job touches
+  OneDrive; CLI `--wait-for-upload [--upload-timeout 30m]`). After each batch the app checks
+  the files it wrote with the Windows Cloud Files API, without downloading anything, and goes
+  on when OneDrive reports them in sync or the time limit passes (the result then says so).
+  Pause, Skip the wait and Stop work during the wait.
+- **Photo library:**
+  - A folder chosen inside another chosen folder is read and counted once.
+  - A subfolder that cannot be listed keeps its photos until it can be read again, and the
+    update says which one.
+  - RAW photos (through ExifTool, in batches) and videos (through ffprobe) now get their place
+    and pixel size.
+  - The library loads in the background ("Loading your photos…"), and search stays quick at
+    200,000 items.
+- **Map:** scrolls across the 180° line, stays smooth with 50,000 points, and keeps at most
+  `map_tile_cache_mb` (default 200 MB) of downloaded map pictures, one folder per map source.
+- **Change date:** a video's new date is read back after writing; the replaced original goes
+  to the Recycle Bin under its real file name.
+- **Fix File Extensions:** sidecar files (`.xmp`, `.aae`, `.thm`) are renamed with their file,
+  and undone with it; MP1/MP2 audio is recognised again, from two consecutive frames only.
+- **Results list:** with "Show: Ticked / Not ticked" on, ticking one row no longer re-sorts the
+  list; a "The list is out of date." note with *Refresh* appears instead.
+- **README:** screenshots of the Home page, a tool page, the Timeline and the Map, made from
+  generated pictures; a "Gentle on OneDrive" section.
+- **Known, left for later:** a sidecar is renamed as its own step, so if the photo's rename
+  fails, a `name.ext.xmp` can still be renamed (undo reverts it); rebuilding the Timeline grid
+  at 200,000 items still takes about a second.
+- Version 0.7.0.
+
 ### Version 0.6.0: one working folder, apply in batches, a real photo browser (2026-11-20)
 
 Owner's request: applying 2,113 resized OneDrive files (62 GB) at once could swamp OneDrive; no

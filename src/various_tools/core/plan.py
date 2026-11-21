@@ -640,7 +640,9 @@ def _wait_for_upload(
                 state.gave_up = True
                 span = pace.upload_timeout_s
                 how_long = f"{span / 60:.0f} minutes" if span >= 60 else f"{span:.0f} seconds"
-                stop = f"OneDrive did not upload anything for {how_long}; continuing without waiting"
+                stop = (
+                    f"OneDrive did not upload anything for {how_long}; continuing without waiting"
+                )
                 ctx.log.warning(stop)
                 result.notes.append(stop)
             return False
@@ -707,7 +709,15 @@ def apply_plan(
                 skipped = False
                 if pace.wait_for_upload and batch_outputs and not upload_state.gave_up:
                     skipped = _wait_for_upload(
-                        ctx, pace, batch_outputs, batch_no, seq - 1, total, beat, result, upload_state
+                        ctx,
+                        pace,
+                        batch_outputs,
+                        batch_no,
+                        seq - 1,
+                        total,
+                        beat,
+                        result,
+                        upload_state,
                     )
                 batch_outputs = []
                 if not skipped:

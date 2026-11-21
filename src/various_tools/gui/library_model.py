@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -36,6 +38,19 @@ _ATTRIBUTE = "_library_model"
 LOADING_TEXT = "Loading your photos…"
 
 
+def timeline_order(items: Sequence[MediaItem]) -> list[MediaItem]:
+    """Newest month and day first; inside a day oldest first; items without a date last."""
+
+    def key(item: MediaItem) -> tuple[int, int, datetime, str]:
+        taken = item.taken
+        if taken is None:
+            return (1, 0, datetime.min, str(item.path).casefold())
+        # Plain integers and datetimes compare much faster than timestamps (200,000 items).
+        return (0, -taken.toordinal(), taken, str(item.path).casefold())
+
+    return sorted(items, key=key)
+
+
 @dataclass
 class _Loaded:
     """What the worker read: the items, their filter index and the months they cover."""
@@ -45,6 +60,7 @@ class _Loaded:
     items: list[MediaItem]
     index: FilterIndex
     months: list[tuple[int, int]]
+    order: list[int]  # indices into ``items`` in timeline order, made once here
 
 
 def _read_library(
@@ -59,7 +75,10 @@ def _read_library(
         except Exception as exc:  # noqa: BLE001 - a broken cache shows as empty
             log.warning("Could not read the media library %s: %s", path, exc)
     found = {(i.taken.year, i.taken.month) for i in items if i.taken is not None}
-    return _Loaded(generation, stamp, items, FilterIndex(items), sorted(found, reverse=True))
+    ranked = timeline_order(items)
+    position = {id(item): n for n, item in enumerate(items)}
+    order = [position[id(item)] for item in ranked]
+    return _Loaded(generation, stamp, items, FilterIndex(items), sorted(found, reverse=True), order)
 
 
 class LibraryModel(QObject):
@@ -80,6 +99,8 @@ class LibraryModel(QObject):
         self._by_path: dict[str, MediaItem] | None = None
         self._shown_idx: list[int] = []
         self._shown_cache: list[MediaItem] | None = None
+        self._order: list[int] = []
+        self._timeline_cache: list[MediaItem] | None = None
         self._located_cache: list[MediaItem] | None = None
         self._filter = MediaFilter()
         self._stamp: tuple[object, ...] | None = None
@@ -121,11 +142,20 @@ class LibraryModel(QObject):
         self._set_loading(True)
         worker = Worker(lambda _w: _read_library(generation, roots, path, stamp))
         worker.succeeded.connect(self._loaded)
+        worker.failed.connect(lambda exc: self._failed(generation, exc))
         worker.start()
 
     def _loaded(self, result: object) -> None:
         if isinstance(result, _Loaded) and result.generation == self._generation:
             self._apply(result)  # a result of an older read is dropped: a newer one is coming
+
+    def _failed(self, generation: int, error: object) -> None:
+        """The read itself failed: keep what is shown, stop saying "Loading", try again later."""
+        log.warning("Could not read the media library: %s", error)
+        if generation != self._generation:
+            return  # an older read; the newer one is still coming
+        self._stamp = None  # so that reload_if_stale tries again
+        self._set_loading(False)
 
     def _set_loading(self, loading: bool) -> None:
         if loading != self._loading:
@@ -137,9 +167,10 @@ class LibraryModel(QObject):
         self._items = result.items
         self._index = result.index
         self._months = result.months
+        self._order = result.order
         self._by_path = None
         self._shown_idx = self._index.select(self._filter)
-        self._shown_cache = self._located_cache = None
+        self._shown_cache = self._located_cache = self._timeline_cache = None
         self._set_loading(False)
         self.itemsChanged.emit()
         self.changed.emit()
@@ -166,6 +197,18 @@ class LibraryModel(QObject):
         return self._shown_cache
 
     @property
+    def timeline_shown(self) -> list[MediaItem]:
+        """The items that pass the filter in timeline order (see :func:`timeline_order`). The
+        order was made once when the library was read; a filter only picks from it."""
+        if self._timeline_cache is None:
+            keep = bytearray(len(self._items))
+            for i in self._shown_idx:
+                keep[i] = 1
+            items = self._items
+            self._timeline_cache = [items[i] for i in self._order if keep[i]]
+        return self._timeline_cache
+
+    @property
     def filter(self) -> MediaFilter:
         return self._filter
 
@@ -175,7 +218,7 @@ class LibraryModel(QObject):
         among = self._shown_idx if FilterIndex.narrows(self._filter, flt) else None
         self._filter = flt
         self._shown_idx = self._index.select(flt, among)
-        self._shown_cache = self._located_cache = None
+        self._shown_cache = self._located_cache = self._timeline_cache = None
         self.filterChanged.emit()
         self.changed.emit()
 

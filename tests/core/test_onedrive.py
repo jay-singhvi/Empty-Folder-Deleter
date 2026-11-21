@@ -167,7 +167,16 @@ def test_upload_pending_on_a_real_onedrive_file() -> None:  # pragma: no cover
 
 @pytest.mark.parametrize(
     "name",
-    ["desktop.ini", "Thumbs.db", "~$report.docx", "scratch.TMP", ".DS_Store", "a:b.txt", "x.", "y "],
+    [
+        "desktop.ini",
+        "Thumbs.db",
+        "~$report.docx",
+        "scratch.TMP",
+        ".DS_Store",
+        "a:b.txt",
+        "x.",
+        "y ",
+    ],
 )
 def test_upload_pending_cannot_tell_for_files_onedrive_never_syncs(
     in_onedrive: Path, monkeypatch: pytest.MonkeyPatch, name: str

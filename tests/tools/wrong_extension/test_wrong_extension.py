@@ -398,4 +398,3 @@ def test_sidecars_obey_the_never_touch_list(tmp_path: Path, root: Path) -> None:
     _write(root / "a.jpg.xmp", SIDE)
     plan = TOOL.scan(_opts(root, exclude_globs=["*.xmp"]), _ctx(tmp_path))
     assert _renames(plan, root) == {"a.jpg": "a.png"}
-

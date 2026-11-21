@@ -239,4 +239,4 @@ def test_progress_during_a_wait_keeps_later_waits_going(
     result = apply_plan(_plan(tmp_path, 6), _ctx(tmp_path, journal, _pace(upload_timeout_s=10.0)))
     gave_up = [n for n in result.notes if "did not upload anything" in n]
     assert len(gave_up) == 1  # only after the second batch's full timeout without progress
-    assert sum(sleeps) == pytest.approx(10.0 + 5.0)  # batch 1 waited one poll, batch 2 its full timeout
+    assert sum(sleeps) == pytest.approx(10.0 + 5.0)

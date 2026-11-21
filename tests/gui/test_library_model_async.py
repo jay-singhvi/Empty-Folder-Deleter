@@ -146,3 +146,46 @@ def test_filtering_two_hundred_thousand_items_does_not_freeze_the_window(
         worst = max(worst, time.perf_counter() - t0)
     assert worst < 0.25, f"a keystroke took {worst * 1000:.0f} ms"
     assert 0 < len(model.shown) < 200_000
+
+
+def test_a_failed_read_keeps_the_items_and_lets_a_later_reload_work(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_places(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    assert len(model.all_items) == 3
+    real = lm._read_library  # pyright: ignore[reportPrivateUsage]
+
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("the read blew up")
+
+    monkeypatch.setattr(lm, "_read_library", broken)
+    model.reload()
+    assert model.loading
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    assert len(model.all_items) == 3  # the previous items stay
+    monkeypatch.setattr(lm, "_read_library", real)
+    assert model.reload_if_stale() is True  # not stuck "loading", and the failed read is retried
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    assert len(model.all_items) == 3
+
+
+def test_the_timeline_order_is_made_once_and_not_again_per_keystroke(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.gui.timeline_page import timeline_order
+
+    _two_places(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+
+    def boom(_items: object) -> object:
+        raise AssertionError("must not sort again")
+
+    monkeypatch.setattr(lm, "timeline_order", boom)
+    assert model.timeline_shown == timeline_order(model.shown)
+    model.set_filter(MediaFilter(text="a"))
+    assert model.timeline_shown == timeline_order(model.shown)
+    model.set_filter(MediaFilter())
+    assert model.timeline_shown == timeline_order(model.shown)

@@ -15,7 +15,6 @@ from __future__ import annotations
 import calendar
 import logging
 from collections.abc import Callable, Sequence
-from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -37,7 +36,14 @@ from various_tools.core.context import RunContext
 from various_tools.core.media.library import MediaItem, MediaLibrary, SyncReport, library_path
 from various_tools.gui.change_date_dialog import ChangeDateDialog
 from various_tools.gui.library_folders_dialog import LibraryFoldersDialog
-from various_tools.gui.library_model import LOADING_TEXT, LibraryModel, library_model
+from various_tools.gui.library_model import (
+    LOADING_TEXT,
+    LibraryModel,
+    library_model,
+)
+from various_tools.gui.library_model import (
+    timeline_order as timeline_order,  # re-exported: the order now lives with the model
+)
 from various_tools.gui.state import AppState
 from various_tools.gui.widgets.filter_bar import FilterBar
 from various_tools.gui.widgets.media_grid import (
@@ -73,19 +79,6 @@ def summary_text(photos: int, videos: int, report: SyncReport | None = None) -> 
         notes = _count(len(report.errors), "note", "notes")
         text += f" {notes} (point here to read it)."
     return text
-
-
-def timeline_order(items: Sequence[MediaItem]) -> list[MediaItem]:
-    """Newest month and day first; inside a day oldest first; items without a date last."""
-
-    def key(item: MediaItem) -> tuple[int, int, datetime, str]:
-        taken = item.taken
-        if taken is None:
-            return (1, 0, datetime.min, str(item.path).casefold())
-        # Plain integers and datetimes compare much faster than timestamps (200,000 items).
-        return (0, -taken.toordinal(), taken, str(item.path).casefold())
-
-    return sorted(items, key=key)
 
 
 class TimelinePage(QWidget):
@@ -229,7 +222,7 @@ class TimelinePage(QWidget):
             self._set_status(LOADING_TEXT)
 
     def _rebuild(self) -> None:
-        shown = timeline_order(self.model.shown)
+        shown = self.model.timeline_shown
         self._shown = shown
         self.grid.set_items(shown)
         self._build_tree()

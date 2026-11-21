@@ -200,3 +200,114 @@ def force_download(path: Path, wait_seconds: int = 30) -> tuple[bool, str]:
             return False, f"{attrib_detail}; {read_detail}"
         return False, read_detail
     return True, "downloaded"
+
+
+# ----- upload state ------------------------------------------------------------------------------
+
+FILE_READ_ATTRIBUTES = 0x0080
+FILE_SHARE_ALL = 0x1 | 0x2 | 0x4  # read, write, delete
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+CF_PLACEHOLDER_INFO_BASIC = 0
+CF_IN_SYNC_STATE_IN_SYNC = 1
+HRESULT_NOT_A_CLOUD_FILE = 0x80070178  # HRESULT_FROM_WIN32(ERROR_NOT_A_CLOUD_FILE)
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+NOT_A_PLACEHOLDER = "not-a-placeholder"
+
+
+class _PlaceholderBasicInfo(ctypes.Structure):
+    """``CF_PLACEHOLDER_BASIC_INFO`` (cfapi.h): PinState, InSyncState, then the file ids."""
+
+    _fields_ = (
+        ("PinState", ctypes.c_int32),
+        ("InSyncState", ctypes.c_int32),
+        ("FileId", ctypes.c_int64),
+        ("SyncRootFileId", ctypes.c_int64),
+        ("FileIdentityLength", ctypes.c_uint32),
+        ("FileIdentity", ctypes.c_ubyte * 1),
+    )
+
+
+_INFO_BUFFER_BYTES = ctypes.sizeof(_PlaceholderBasicInfo) + 512  # room for the file identity
+
+
+def _query_in_sync_state(path: Path) -> int | str | None:
+    """The placeholder's ``InSyncState``, :data:`NOT_A_PLACEHOLDER`, or ``None`` (cannot tell).
+
+    The file is opened with ``FILE_READ_ATTRIBUTES`` only and without following the reparse
+    point, so nothing is ever recalled or downloaded.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        cldapi = ctypes.WinDLL("cldapi")
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        get_info = cldapi.CfGetPlaceholderInfo
+        get_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        get_info.restype = ctypes.c_int32
+    except (OSError, AttributeError):
+        return None
+    handle = create_file(
+        long_path(path),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_ALL,
+        None,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE:
+        return None
+    try:
+        buffer = ctypes.create_string_buffer(_INFO_BUFFER_BYTES)
+        returned = ctypes.c_uint32(0)
+        hresult = int(
+            get_info(handle, CF_PLACEHOLDER_INFO_BASIC, buffer, _INFO_BUFFER_BYTES, returned)
+        )
+        if (hresult & 0xFFFFFFFF) == HRESULT_NOT_A_CLOUD_FILE:
+            return NOT_A_PLACEHOLDER
+        if hresult < 0:
+            return None
+        info = _PlaceholderBasicInfo.from_buffer(buffer)
+        return int(info.InSyncState)
+    finally:
+        close_handle(handle)
+
+
+def upload_pending(path: Path) -> bool | None:
+    """True while a file inside a OneDrive folder is not yet in sync with the cloud.
+
+    Read with the Cloud Files API on a handle opened for attributes only, so it never downloads
+    anything. A file that is not a placeholder yet, inside a OneDrive folder, counts as waiting
+    to be uploaded. ``None`` when it cannot tell: not a OneDrive folder, not Windows, or the
+    Cloud Files API is missing or refuses.
+    """
+    if not is_inside_onedrive(path):
+        return None
+    state = _query_in_sync_state(path)
+    if state is None:
+        return None
+    if state == NOT_A_PLACEHOLDER:
+        return True
+    return state != CF_IN_SYNC_STATE_IN_SYNC

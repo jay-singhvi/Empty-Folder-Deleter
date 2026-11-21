@@ -38,7 +38,11 @@ from various_tools.gui.library_model import LibraryModel, library_model
 from various_tools.gui.state import AppState
 from various_tools.gui.widgets.filter_bar import FilterBar
 from various_tools.gui.widgets.media_grid import MediaGrid
-from various_tools.gui.widgets.world_map import WorldMap
+from various_tools.gui.widgets.world_map import (
+    WorldMap,
+    remove_legacy_tile_folders,
+    tile_source_folder,
+)
 
 log = logging.getLogger(__name__)
 
@@ -288,8 +292,15 @@ class MapPage(QWidget):
 
     def _apply_tiles(self, settings: Settings) -> None:
         if settings.map_online_tiles:
-            cache = settings.resolved_cache_folder() / TILE_FOLDER
-            self.map.set_tile_source(settings.map_tile_url, cache, user_agent())
+            root = settings.resolved_cache_folder() / TILE_FOLDER
+            remove_legacy_tile_folders(root)  # older versions kept pictures of any source here
+            self.map.set_tile_source(
+                settings.map_tile_url,
+                tile_source_folder(root, settings.map_tile_url),
+                user_agent(),
+                cache_root=root,
+                cache_limit_mb=settings.map_tile_cache_mb,
+            )
         else:
             self.map.set_tile_source(None, None, "")
         self.attribution.setText(ATTRIBUTION if settings.map_online_tiles else "")

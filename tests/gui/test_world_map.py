@@ -281,3 +281,73 @@ def test_tiles_stop_after_five_failures_in_a_row_until_the_source_is_set_again(
     widget.set_tile_source("https://tile.example/{z}/{x}/{y}.png", tmp_path, "UA")
     widget.grab()
     assert len(manager.requests) > total
+
+
+# ----- tile cache: one folder per source, capped (part 1, item 5) --------------------------------
+
+
+def _fill(folder: Path, names: list[str], size: int, start: float) -> None:
+    import os
+
+    for n, name in enumerate(names):
+        path = folder / "1" / "0" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+        os.utime(path, (start + n, start + n))
+
+
+def test_each_tile_source_gets_its_own_folder(tmp_path: Path) -> None:
+    a = wm.tile_source_folder(tmp_path, "https://a.example/{z}/{x}/{y}.png")
+    b = wm.tile_source_folder(tmp_path, "https://b.example/{z}/{x}/{y}.png")
+    assert a != b
+    assert a.parent == tmp_path == b.parent
+    assert a == wm.tile_source_folder(tmp_path, "https://a.example/{z}/{x}/{y}.png")
+    assert a.name.isalnum()
+
+
+def test_prune_removes_the_oldest_files_first(tmp_path: Path) -> None:
+    _fill(tmp_path / "src1", ["old.png", "mid.png"], 400, start=1000)
+    _fill(tmp_path / "src2", ["new.png"], 400, start=5000)
+
+    removed = wm.prune_tile_cache(tmp_path, max_bytes=800)
+
+    assert removed == 1
+    assert not (tmp_path / "src1" / "1" / "0" / "old.png").exists()
+    assert (tmp_path / "src1" / "1" / "0" / "mid.png").exists()
+    assert (tmp_path / "src2" / "1" / "0" / "new.png").exists()
+    assert wm.prune_tile_cache(tmp_path, max_bytes=800) == 0
+
+
+def test_prune_leaves_a_cache_under_the_limit_alone_and_survives_a_missing_folder(
+    tmp_path: Path,
+) -> None:
+    _fill(tmp_path / "s", ["a.png"], 100, start=1)
+    assert wm.prune_tile_cache(tmp_path, max_bytes=10_000) == 0
+    assert wm.prune_tile_cache(tmp_path / "nothing", max_bytes=1) == 0
+
+
+def test_old_layout_folders_are_removed_but_source_folders_stay(tmp_path: Path) -> None:
+    _fill(tmp_path / "3", ["1.png"], 10, start=1)  # old: <z>/<x>/<y>.png straight under the root
+    (tmp_path / "7").mkdir()
+    keep = wm.tile_source_folder(tmp_path, "https://a.example/{z}/{x}/{y}.png")
+    _fill(keep, ["k.png"], 10, start=1)
+
+    wm.remove_legacy_tile_folders(tmp_path)
+
+    assert not (tmp_path / "3").exists() and not (tmp_path / "7").exists()
+    assert (keep / "1" / "0" / "k.png").exists()
+
+
+def test_the_widget_prunes_the_cache_when_the_source_is_set(qtbot: QtBot, tmp_path: Path) -> None:
+    root = tmp_path / "map_tiles"
+    folder = wm.tile_source_folder(root, "https://tile.example/{z}/{x}/{y}.png")
+    _fill(folder, ["a.png", "b.png", "c.png"], 1024 * 1024, start=100)
+    widget = WorldMap()
+    qtbot.addWidget(widget)
+
+    widget.set_tile_source(
+        "https://tile.example/{z}/{x}/{y}.png", folder, "UA", cache_root=root, cache_limit_mb=2
+    )
+
+    left = sorted(p.name for p in folder.rglob("*.png"))
+    assert left == ["b.png", "c.png"]

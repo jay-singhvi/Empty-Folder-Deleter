@@ -45,6 +45,7 @@ JOURNAL_FILE = "journal.sqlite"
 # The detailed online map (off by default). OpenStreetMap asks apps to cache tiles
 # and to say who they are.
 DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+DEFAULT_MAP_TILE_CACHE_MB = 200
 
 # Defaults for the external-program timeouts. Core media code uses them as parameter defaults,
 # and tools pass the user's value from ``ctx.settings``. They live here, not in core/media, so
@@ -191,6 +192,19 @@ class Settings(BaseModel):
             "Where the detailed map pictures come from, with {z}, {x} and {y} for the zoom and "
             f"the picture's place. Default: {DEFAULT_TILE_URL} (OpenStreetMap). Used only when "
             "Detailed online map is on."
+        ),
+        json_schema_extra=_hint("Map", advanced=True),
+    )
+
+    map_tile_cache_mb: int = Field(
+        default=DEFAULT_MAP_TILE_CACHE_MB,
+        ge=1,
+        le=100_000,
+        title="Map picture cache size (MB)",
+        description=(
+            "How much disk space the downloaded map pictures may use. When the folder grows "
+            "past this, the oldest pictures are removed first. "
+            f"Default: {DEFAULT_MAP_TILE_CACHE_MB}."
         ),
         json_schema_extra=_hint("Map", advanced=True),
     )

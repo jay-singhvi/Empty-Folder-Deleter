@@ -477,9 +477,15 @@ class MainWindow(QMainWindow):
             page = self.tool_page(page_id)
         self.stack.setCurrentWidget(page)
         item = self._tool_items.get(page_id)
-        if item is not None and self.sidebar.currentItem() is not item:
+        if self.sidebar.currentItem() is not item:
+            # A page without a sidebar row (Home) clears the highlight, so the sidebar never
+            # points at a page that is not shown.
             self.sidebar.blockSignals(True)
-            self.sidebar.setCurrentItem(item)
+            if item is None:
+                self.sidebar.setCurrentItem(None)  # type: ignore[arg-type]
+                self.sidebar.clearSelection()
+            else:
+                self.sidebar.setCurrentItem(item)
             self.sidebar.blockSignals(False)
         return page
 

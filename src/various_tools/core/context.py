@@ -69,6 +69,9 @@ class RunContext:
     # The journal run this context is applying right now (set by apply_plan), else None. The GUI
     # reads it to refuse an undo of a run that is still being applied in this process.
     applying_run_id: int | None = None
+    # Set by a saved recipe: a mapping stored under ``"_recipe"`` in the journal's copy of the
+    # run's options, so History can group the steps of one recipe run. The plan is not changed.
+    recipe_tag: Mapping[str, object] | None = None
 
     def report(self, done: int, total: int, message: str = "") -> None:
         """Report progress. The GUI and the CLI each draw it their own way."""

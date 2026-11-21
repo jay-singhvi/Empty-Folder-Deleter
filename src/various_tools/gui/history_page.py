@@ -656,6 +656,19 @@ class HistoryPage(QWidget):
             self.inform("Undo failed", f"The run could not be undone: {exc}")
         self.reload()
 
+    def _all_runs_of(self, recipe_run_id: str) -> list[RunRecord]:
+        """The loaded runs plus every journal run of that recipe run (the list shows only the
+        newest runs, and a step may be older than that)."""
+        found = {r.id: r for r in self._runs}
+        path = self._state.settings.journal_path()
+        try:
+            with Journal(path) as journal:
+                for r in journal.runs_mentioning(recipe_run_id):
+                    found.setdefault(r.id, r)
+        except (sqlite3.Error, OSError) as exc:
+            log.warning("Could not look up the recipe run in the journal: %s", exc)
+        return list(found.values())
+
     def undo_recipe_run(self) -> Worker | None:
         """Undo every step of the selected run's recipe run, last step first, after one question.
 
@@ -666,7 +679,7 @@ class HistoryPage(QWidget):
         mark = parse_recipe_mark(run.options_json) if run is not None else None
         if run is None or mark is None or self._busy or self._closing:
             return None
-        members = recipe_run_members(self._runs, mark.run_id)
+        members = recipe_run_members(self._all_runs_of(mark.run_id), mark.run_id)
         if not members:
             return None
         busy_ids = applying_run_ids()

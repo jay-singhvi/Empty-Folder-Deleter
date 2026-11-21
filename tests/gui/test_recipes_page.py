@@ -382,6 +382,31 @@ def test_history_labels_and_undoes_a_recipe_run(
     assert summary.index("Run 2") < summary.index("Run 1")
 
 
+def test_undo_recipe_run_finds_steps_beyond_the_loaded_page(
+    qtbot: QtBot,
+    window: MainWindow,
+    gui_state: AppState,
+    tmp_path: Path,
+    dialogs: Dialogs,
+) -> None:
+    root = _tree(tmp_path)
+    save_recipes(recipes_path(gui_state.settings_path), [_tidy()])
+    recipes = window.recipes()
+    dialogs.attach(recipes)
+    recipes.prepare_page = dialogs.attach
+    _run_whole_recipe(qtbot, recipes, gui_state, root)
+    history = window.history_page
+    history.reload()
+    qtbot.waitUntil(lambda: not history.loading, timeout=15000)
+    history.runs_view.selectRow(0)
+    qtbot.waitUntil(lambda: not history.loading and history.undo_info() is not None, timeout=15000)
+    history._runs = history._runs[:1]  # pyright: ignore[reportPrivateUsage]  # only the newest step is loaded
+    dialogs.default = False  # look at the question only
+    assert history.undo_recipe_run() is None
+    question = dialogs.confirms[-1][1]
+    assert "step 1: " in question and "step 2: " in question
+
+
 def test_history_refuses_a_recipe_run_that_is_still_applying(
     qtbot: QtBot,
     window: MainWindow,

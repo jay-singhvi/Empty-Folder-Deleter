@@ -726,6 +726,7 @@ class PlanTable(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._model = PlanModel(self)
+        self._shown_count: int | None = None  # cached "N shown" while a filter is on
         self._proxy = _PlanProxy(self._model, self)
         self._model.set_shown_filter(self._proxy.shows)
 
@@ -977,8 +978,9 @@ class PlanTable(QWidget):
     def _view_action_nodes(self) -> list[Node]:
         """The action rows the filter shows, in the order the list shows them (sort included)."""
         proxy, model = self._proxy, self._model
-        if not proxy.active and self.view.header().sortIndicatorSection() < 0:
-            return [n for n in model.all_nodes() if n.action is not None]  # model order
+        if proxy.sortColumn() < 0 and self.view.header().sortIndicatorSection() < 0:
+            # No sort column: the list shows the rows in model order (a filter only hides some).
+            return [n for n in model.all_nodes() if n.action is not None and proxy.shows(n)]
         found: list[Node] = []
 
         def visit(parent: QModelIndex) -> None:
@@ -1250,6 +1252,7 @@ class PlanTable(QWidget):
             expanded, known = self._expanded_groups()
             node = self._current_node()
             current_action = node.action if node is not None else None
+        self._shown_count = None
         self.view.setUpdatesEnabled(False)
         try:
             self._model.load(plan, tool_id, sizes, mode)
@@ -1325,6 +1328,7 @@ class PlanTable(QWidget):
         return mode if isinstance(mode, str) else SHOW_ALL
 
     def _filters_changed(self, *_: object) -> None:
+        self._shown_count = None
         kind = self._kind_filter()
         self._proxy.set_filters(self.filter_edit.text(), kind, self._tick_mode())
         if self._proxy.active and self._proxy.rowCount() <= self.MAX_AUTO_EXPAND_GROUPS:
@@ -1335,13 +1339,16 @@ class PlanTable(QWidget):
     def _update_status(self) -> None:
         text = self._model.status_text()
         if self._proxy.active and self._model.plan is not None:
-            text += f" · {len(self.shown_action_indices()):,} shown"
+            if self._shown_count is None:  # walked once per filter change, not once per tick
+                self._shown_count = len(self.shown_action_indices())
+            text += f" · {self._shown_count:,} shown"
         self.totals_label.setText(text)
 
     def _on_checks_changed(self) -> None:
         if self._tick_mode() != SHOW_ALL:
             # Rows moved in or out of the Ticked / Not ticked view.
             self._proxy.set_filters(self.filter_edit.text(), self._kind_filter(), self._tick_mode())
+            self._shown_count = None
         self._update_status()
         self.selectionChanged.emit()
 

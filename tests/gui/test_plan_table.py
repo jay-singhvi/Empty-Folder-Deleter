@@ -558,3 +558,52 @@ def test_bulk_ticking_thousands_of_empty_folders_is_quick(qtbot: QtBot, tmp_path
     table.tick_only_first(10)
     assert sum(1 for a in plan.actions if a.selected) >= 10
     assert time.monotonic() - start < 20  # per-row passes took minutes; one pass takes a second
+
+
+def _flat_plan(root: Path, count: int) -> Plan:
+    return Plan(
+        tool="x",
+        roots=[root],
+        actions=[
+            PlannedAction(
+                ActionKind.MOVE, root / f"{'keep' if i % 2 else 'drop'}{i}.txt", root / "o"
+            )
+            for i in range(count)
+        ],
+    )
+
+
+def test_a_single_tick_with_a_text_filter_does_not_walk_the_list_again(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _flat_plan(tmp_path, 200)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "x")
+    table.filter_edit.setText("keep")
+    assert "100 shown" in table.totals_label.text()
+    walks: list[int] = []
+    real = table.shown_action_indices
+    monkeypatch.setattr(table, "shown_action_indices", lambda: (walks.append(1), real())[1])
+    table.set_action_checked(1, False)
+    table.set_action_checked(3, False)
+    assert walks == [] and "100 shown" in table.totals_label.text()
+    table.filter_edit.setText("drop")
+    assert walks == [1] and "100 shown" in table.totals_label.text()
+
+
+def test_the_model_order_shortcut_applies_with_a_filter_and_no_sort(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    plan = _flat_plan(tmp_path, 40)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "x")
+    table.filter_edit.setText("drop")
+    assert table._proxy.sortColumn() < 0  # pyright: ignore[reportPrivateUsage]
+    nodes = table._view_action_nodes()  # pyright: ignore[reportPrivateUsage]
+    assert [n.index for n in nodes] == [i for i in range(40) if i % 2 == 0]
+    table.tick_only_first(3)
+    # The shown ("drop") rows: only the first three stay ticked; the hidden rows are untouched.
+    assert [i for i, a in enumerate(plan.actions) if i % 2 == 0 and a.selected] == [0, 2, 4]
+    assert all(a.selected for i, a in enumerate(plan.actions) if i % 2)

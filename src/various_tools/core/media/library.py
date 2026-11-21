@@ -571,10 +571,9 @@ class MediaLibrary:
         done = 0
         try:
             for done, (key, lat, lon) in enumerate(rows, start=1):
-                if ctx is not None:
-                    if done % 200 == 1:
-                        ctx.check_cancelled()
-                        ctx.report(done - 1, len(rows), "Naming places")
+                if ctx is not None and done % 200 == 1:
+                    ctx.check_cancelled()
+                    ctx.report(done - 1, len(rows), "Naming places")
                 place = _place_of(float(lat), float(lon))
                 self._conn.execute(
                     "UPDATE items SET place_city = ?, place_region = ?, place_country = ?, "

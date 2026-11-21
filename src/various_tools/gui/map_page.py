@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 ATTRIBUTION = "Map pictures © OpenStreetMap contributors"
 TILE_FOLDER = "map_tiles"
 FOCUS_ZOOM = 12
+MIN_READY_SIZE = 50  # a map narrower than this has not been laid out yet
 BANNER_OFF = (
     "This map shows only the outline of the land. A detailed street map is available, but it "
     "is loaded from OpenStreetMap, so OpenStreetMap would see which areas you look at (roughly "
@@ -147,6 +148,7 @@ class MapPage(QWidget):
 
         self.map.clusterClicked.connect(self._cluster_clicked)
         self.model.changed.connect(self._rebuild)
+        self._pending_focus: Path | None = None
         state.on_settings_changed(self._settings_changed)
         self._apply_tiles(state.settings)
         self._rebuild()
@@ -204,24 +206,58 @@ class MapPage(QWidget):
         self.map.fit_all()
 
     def focus_item(self, path: Path) -> bool:
-        """Centre the map on this item, ring it and list the photos around it. False if unknown."""
+        """Centre the map on this item, ring it and list the photos around it. False if unknown.
+
+        Before the map has its real size (the page was never shown) the circles a place is
+        drawn in do not exist yet, so the list of photos around the item waits until the page
+        is shown; the map is centred and the item ringed at once.
+        """
         self.model.reload_if_stale()
         item = self.model.item_for(path)
         if item is None or item.lat is None or item.lon is None:
             return False
+        cleared = False
         if item not in self._located:
             self.model.set_filter(MediaFilter())  # a filter hides it: show everything again
+            cleared = True
             item = self.model.item_for(path)
             if item is None or item.lat is None or item.lon is None:
                 return False
         self.map.set_view(item.lat, item.lon, max(self.map.zoom, FOCUS_ZOOM))
+        self.map.set_highlight(item.lat, item.lon)
+        if cleared:
+            self.status_label.setText(
+                f"{self._summary(self.model.roots())} The filter was cleared to show this item."
+            )
+        if self._map_ready():
+            self._list_around(item, path)
+        else:
+            self._pending_focus = path
+        return True
+
+    def _map_ready(self) -> bool:
+        """The map is on screen with a real size, so its circles can be looked up."""
+        return self.isVisible() and self.map.width() > MIN_READY_SIZE
+
+    def _list_around(self, item: MediaItem, path: Path) -> None:
+        assert item.lat is not None and item.lon is not None
+        self.map.set_view(item.lat, item.lon, self.map.zoom)  # centre for the real size
         self.map.set_highlight(item.lat, item.lon)
         members = [m for m in self.map.members_near(item.lat, item.lon) if isinstance(m, MediaItem)]
         self._cluster_clicked(members or [item])
         row = self.grid.row_of_path(path)
         if row >= 0:
             self.grid.set_current(row)
-        return True
+
+    def _apply_pending_focus(self) -> None:
+        path, self._pending_focus = self._pending_focus, None
+        if path is None or not shiboken6.isValid(self) or not self._map_ready():
+            if path is not None and shiboken6.isValid(self):
+                self._pending_focus = path  # not sized yet: the next show tries again
+            return
+        item = self.model.item_for(path)
+        if item is not None and item.lat is not None and item.lon is not None:
+            self._list_around(item, path)
 
     def change_dates(self, paths: object) -> ChangeDateDialog | None:
         if not isinstance(paths, list) or not paths:
@@ -283,6 +319,8 @@ class MapPage(QWidget):
     def showEvent(self, event: Any) -> None:  # noqa: N802 (Qt name)
         super().showEvent(event)
         self.model.reload_if_stale()  # the Timeline may have updated the library meanwhile
+        if self._pending_focus is not None:
+            QTimer.singleShot(0, self._apply_pending_focus)  # after the layout has sized the map
 
     def shutdown(self) -> None:
         self.grid.shutdown()

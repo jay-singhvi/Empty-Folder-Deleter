@@ -202,3 +202,28 @@ def test_sidebar_has_a_photos_and_videos_section(window: MainWindow) -> None:
     assert labels[-1][0] == "App"
     assert isinstance(window.show_page("__timeline__"), TimelinePage)
     assert isinstance(window.show_page("__map__"), MapPage)
+
+
+def test_focus_item_before_the_page_was_shown_lists_the_place_once_it_is_shown(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    root = _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    assert page.focus_item(root / "rome.jpg")  # never shown: the map has no real size yet
+    assert page.map.highlight == (41.0, 12.0)
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.waitUntil(lambda: [i.path.name for i in page.grid.items()] == ["rome.jpg"], timeout=5000)
+    assert page.grid.selected_rows() == [0]
+    centre = page.map.lonlat_to_screen(12.0, 41.0)
+    assert abs(centre.x() - page.map.width() / 2) < 2
+
+
+def test_focus_item_says_when_it_cleared_a_filter(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    root = _two_places(gui_state, tmp_path)
+    page = _page(qtbot, gui_state)
+    page.model.set_filter(MediaFilter(text="paris"))
+    assert page.focus_item(root / "rome.jpg")
+    assert "filter was cleared" in page.status_label.text()

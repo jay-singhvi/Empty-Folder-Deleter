@@ -55,12 +55,18 @@ def ffprobe_json(
     entries: list[str] | None = None,
     *,
     timeout: float = PROBE_TIMEOUT_S,
+    all_streams: bool = False,
 ) -> dict[str, Any]:
-    """Run ffprobe and return its JSON. ``entries`` are passed to ``-show_entries`` when given."""
+    """Run ffprobe and return its JSON. ``entries`` are passed to ``-show_entries`` when given.
+
+    Without ``entries`` only the first video stream is listed, unless ``all_streams`` is set.
+    """
     ensure_on_device(path)
     args = [str(ffprobe), "-v", "error", "-print_format", "json"]
     if entries is None:
-        args += ["-show_format", "-show_streams", "-select_streams", "v:0"]
+        args += ["-show_format", "-show_streams"]
+        if not all_streams:
+            args += ["-select_streams", "v:0"]
     else:
         args += ["-show_entries", ":".join(entries)]
     args.append(str(path))
@@ -230,19 +236,22 @@ def _gps_from_tags(tags: dict[str, Any]) -> tuple[float, float] | None:
 def probe_video_info(ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOUT_S) -> VideoInfo:
     """Creation time, GPS tags and display size from one ffprobe call. Failures give empty info.
 
-    Reads the ``location`` and ``com.apple.quicktime.location.ISO6709`` tags (format or video
-    stream) and the video stream's width and height (swapped for a 90 or 270 degree rotation).
+    Reads ``creation_time`` (format tags, then any stream), the ``location`` and
+    ``com.apple.quicktime.location.ISO6709`` tags (format, video stream, then any stream) and the
+    first video stream's width and height (swapped for a 90 or 270 degree rotation).
     """
     try:
-        data = ffprobe_json(ffprobe, path, timeout=timeout)
+        data = ffprobe_json(ffprobe, path, timeout=timeout, all_streams=True)
     except MediaError as exc:
         log.warning("No video details for %s: %s", path, exc)
         return VideoInfo()
-    streams = as_list(data.get("streams"))
-    stream = as_dict(streams[0]) if streams else {}
+    streams = [as_dict(s) for s in as_list(data.get("streams"))]
+    stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     gps = _gps_from_tags(as_dict(as_dict(data.get("format")).get("tags")))
-    if gps is None:
-        gps = _gps_from_tags(as_dict(stream.get("tags")))
+    for candidate in [stream, *streams]:  # the video stream first, then any other
+        if gps is not None:
+            break
+        gps = _gps_from_tags(as_dict(candidate.get("tags")))
     width = height = None
     try:
         width, height = int(stream["width"]), int(stream["height"])

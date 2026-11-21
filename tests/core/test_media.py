@@ -423,3 +423,31 @@ def test_read_exif_degrades_on_unexpected_pillow_errors(
 
     monkeypatch.setattr(exif, "_exif_from_image", broken)
     assert exif.read_exif(path) == exif.ExifInfo()
+
+
+def test_probe_video_info_reads_every_stream_for_the_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as json_module
+    import subprocess as sp
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    seen: list[list[str]] = []
+    payload = {
+        "format": {"tags": {}},
+        "streams": [
+            {"codec_type": "audio", "tags": {"creation_time": "2020-06-01T10:00:00.000000Z"}},
+            {"codec_type": "video", "width": 640, "height": 480, "tags": {}},
+        ],
+    }
+
+    def fake(args: list[str], timeout: float = 60) -> sp.CompletedProcess[str]:
+        seen.append(args)
+        return sp.CompletedProcess(args, 0, json_module.dumps(payload), "")
+
+    monkeypatch.setattr(ffmpeg, "run_tool", fake)
+    info = ffmpeg.probe_video_info(Path("ffprobe"), clip)
+    assert "-select_streams" not in seen[0]  # not only v:0
+    assert info.creation_time is not None and info.creation_time.year in (2020,)
+    assert (info.width, info.height) == (640, 480)  # the video stream, not stream 0

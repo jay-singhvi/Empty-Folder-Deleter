@@ -39,7 +39,7 @@ import math
 import os
 import stat as stat_module
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -50,7 +50,7 @@ from typing import Any
 
 from send2trash import send2trash
 
-from various_tools.core import fs, recycle
+from various_tools.core import fs, onedrive, recycle
 from various_tools.core.context import Cancelled, Pace, RunContext
 from various_tools.core.fs import (
     destination_refusal,
@@ -189,6 +189,7 @@ class RunResult:
     run_id: int
     status: str  # done | partial | cancelled
     outcomes: list[ActionOutcome] = field(default_factory=list[ActionOutcome])
+    notes: list[str] = field(default_factory=list[str])  # things worth saying about the run
 
     def count(self, status: str) -> int:
         return sum(1 for o in self.outcomes if o.status == status)
@@ -200,6 +201,7 @@ _SOURCE_CHANGING = frozenset(
     {ActionKind.MOVE, ActionKind.RENAME, ActionKind.TRASH, ActionKind.DELETE}
 )
 _OUTPUT_KINDS = frozenset({ActionKind.WRITE, ActionKind.CONVERT})
+_UPLOADED_KINDS = _OUTPUT_KINDS | {ActionKind.MOVE, ActionKind.RENAME}  # leave a file to upload
 
 
 class ActionRefused(RuntimeError):
@@ -508,6 +510,7 @@ _STEP_S = 0.25
 WAIT_PAUSED_MESSAGE = "Paused, waiting for the next batch."
 _sleep = time.sleep  # tests replace this, so pacing never really waits
 _monotonic = time.monotonic  # tests replace this too
+UPLOAD_POLL_S = 5.0  # how often the files of a batch are checked for upload
 HEARTBEAT_S = 30.0  # a paused or waiting apply touches its journal run at least this often
 
 
@@ -578,6 +581,57 @@ def _wait_between_batches(
     ctx.check_cancelled()
 
 
+def _wait_for_upload(
+    ctx: RunContext,
+    pace: Pace,
+    paths: Sequence[Path],
+    batch: int,
+    done: int,
+    total: int,
+    beat: _Heartbeat,
+    result: RunResult,
+) -> bool:
+    """Wait until OneDrive has uploaded every path (or the timeout passes). Returns True when
+    the person asked to skip the wait. Paused time does not count towards the timeout. A file
+    that cannot be checked (``None``) counts as uploaded."""
+    elapsed = 0.0
+    since_poll = UPLOAD_POLL_S  # check at once
+    pending = list(paths)
+    ctx.skip_wait_event.clear()
+    while True:
+        ctx.check_cancelled()
+        beat.beat()
+        if ctx.skip_wait_event.is_set():
+            return True
+        if ctx.pause_event.is_set():
+            ctx.report(done, total, WAIT_PAUSED_MESSAGE)
+            _sleep(_STEP_S)
+            continue
+        if since_poll >= UPLOAD_POLL_S:
+            since_poll = 0.0
+            pending = [p for p in pending if onedrive.upload_pending(p) is True]
+            if not pending:
+                return False
+        if elapsed >= pace.upload_timeout_s:
+            note = (
+                f"OneDrive had not finished uploading {len(pending)} of {len(paths)} files "
+                f"from batch {batch} after {_clock_text(pace.upload_timeout_s)}; went on."
+            )
+            ctx.log.warning(note)
+            result.notes.append(note)
+            return False
+        ctx.report(
+            done,
+            total,
+            f"Waiting for OneDrive to upload {len(pending)} of {len(paths)} files… "
+            f"({_clock_text(pace.upload_timeout_s - elapsed)})",
+        )
+        step = min(_STEP_S, pace.upload_timeout_s - elapsed)
+        _sleep(step)
+        elapsed += step
+        since_poll += step
+
+
 def apply_plan(
     plan: Plan,
     ctx: RunContext,
@@ -605,6 +659,7 @@ def apply_plan(
     pace = ctx.pace
     batches = math.ceil(total / pace.batch_size) if pace is not None else 0
     waited_at = 0
+    batch_outputs: list[Path] = []  # what this batch wrote, for the upload wait
     executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
     try:
         for seq, action in enumerate(actions, start=1):
@@ -617,9 +672,16 @@ def apply_plan(
                 and waited_at != executed
             ):
                 waited_at = executed
-                _wait_between_batches(
-                    ctx, pace, executed // pace.batch_size, batches, seq - 1, total, beat
-                )
+                batch_no = executed // pace.batch_size
+                skipped = False
+                if pace.wait_for_upload and batch_outputs:
+                    skipped = _wait_for_upload(
+                        ctx, pace, batch_outputs, batch_no, seq - 1, total, beat, result
+                    )
+                batch_outputs = []
+                if not skipped:
+                    _wait_between_batches(ctx, pace, batch_no, batches, seq - 1, total, beat)
+                ctx.skip_wait_event.clear()
             ctx.check_cancelled()
             ctx.report(seq - 1, total, f"{action.kind}: {action.src or action.dst or ''}")
             src = str(action.src) if action.src is not None else None
@@ -684,6 +746,8 @@ def apply_plan(
                 _RUNNING.reset(token)
             landed = produced or final_dst
             journal.set_action(action_id, "done", dst=landed)
+            if landed is not None and action.kind in _UPLOADED_KINDS:
+                batch_outputs.append(landed)
             if action.kind in _OUTPUT_KINDS:
                 after = _file_stat(landed)
                 if after is not None:

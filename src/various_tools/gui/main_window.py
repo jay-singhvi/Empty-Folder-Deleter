@@ -39,10 +39,14 @@ from PySide6.QtWidgets import (
 )
 
 from various_tools import __version__
+from various_tools.core.media.places import PLACES_ATTRIBUTION
+from various_tools.core.plan import Plan
 from various_tools.gui import shell
 from various_tools.gui.history_page import HistoryPage
 from various_tools.gui.home_page import HomePage
+from various_tools.gui.library_model import library_model
 from various_tools.gui.map_page import MapPage
+from various_tools.gui.recipes_page import RecipesPage
 from various_tools.gui.settings_page import SettingsPage
 from various_tools.gui.state import AppState
 from various_tools.gui.timeline_page import TimelinePage
@@ -57,6 +61,7 @@ log = logging.getLogger(__name__)
 APP_TITLE = "Various Tools"
 HOME_ID = "__home__"
 HISTORY_ID = "__history__"
+RECIPES_ID = "__recipes__"
 SETTINGS_ID = "__settings__"
 TIMELINE_ID = "__timeline__"
 MAP_ID = "__map__"
@@ -161,6 +166,7 @@ class MainWindow(QMainWindow):
         self.tool_pages: dict[str, ToolPage] = {}
         self.timeline_page: TimelinePage | None = None  # created on first use
         self.map_page: MapPage | None = None
+        self.recipes_page: RecipesPage | None = None  # created on first use
         self.history_page = HistoryPage(state)
         self.settings_page = SettingsPage(state, shell_backend=shell_backend)
         self.home_page = HomePage(state, media_section=MEDIA_SECTION, media_pages=MEDIA_PAGES)
@@ -250,11 +256,14 @@ class MainWindow(QMainWindow):
         )
         self.find_tool_action = self._action("Find a tool", lambda: self.focus_search(), "Ctrl+K")
         self.home_action = self._action("Home", lambda: self.show_page(HOME_ID))
+        self.recipes_action = self._action("Recipes", lambda: self.show_page(RECIPES_ID))
+        self.recipes_action.setToolTip("Saved lists of steps you can run one after the other.")
         view_menu.addAction(self.show_all_action)
         view_menu.addAction(self.show_log_action)
         view_menu.addAction(self.find_tool_action)
         view_menu.addSeparator()
         view_menu.addAction(self.home_action)
+        view_menu.addAction(self.recipes_action)
 
         help_menu = bar.addMenu("&Help")
         self.shortcuts_action = self._action("Keyboard shortcuts", lambda: self.show_shortcuts())
@@ -347,7 +356,8 @@ class MainWindow(QMainWindow):
         self.inform(
             f"About {APP_TITLE}",
             f"{APP_TITLE} {__version__}\n\nOne app for tidying folders and photos. Every tool "
-            "previews first and changes nothing until you Apply.",
+            "previews first and changes nothing until you Apply.\n\n"
+            f"{PLACES_ATTRIBUTION}",
         )
 
     # ----- sidebar ----------------------------------------------------------------------------
@@ -381,7 +391,11 @@ class MainWindow(QMainWindow):
         font.setBold(True)
         other.setFont(0, font)
         self.sidebar.addTopLevelItem(other)
-        for page_id, label in ((HISTORY_ID, "History"), (SETTINGS_ID, "Settings")):
+        for page_id, label in (
+            (RECIPES_ID, "Recipes"),
+            (HISTORY_ID, "History"),
+            (SETTINGS_ID, "Settings"),
+        ):
             item = QTreeWidgetItem([label])
             item.setData(0, _PAGE_ROLE, page_id)
             other.addChild(item)
@@ -448,9 +462,26 @@ class MainWindow(QMainWindow):
             page.runApplied.connect(lambda _run: self.history_page.reload())
             page.runUndone.connect(self._run_undone)
             page.busyChanged.connect(self._busy_changed)
+            page.scanFinished.connect(self._scan_finished)
+            page.clipboardCopied.connect(self._clipboard_copied)
             self.stack.addWidget(page)
             self.tool_pages[tool_id] = page
         return page
+
+    def recipes(self) -> RecipesPage:
+        """The Recipes page, created on first use and read again each time it is shown."""
+        if self.recipes_page is None:
+            page = RecipesPage(self.state)
+            page.runApplied.connect(lambda _run: self.history_page.reload())
+            page.runUndone.connect(self._run_undone)
+            page.busyChanged.connect(self._busy_changed)
+            page.scanFinished.connect(self._scan_finished)
+            page.clipboardCopied.connect(self._clipboard_copied)
+            self.stack.addWidget(page)
+            self.recipes_page = page
+        else:
+            self.recipes_page.refresh()
+        return self.recipes_page
 
     def show_page(self, page_id: str) -> QWidget:
         page: QWidget
@@ -462,10 +493,13 @@ class MainWindow(QMainWindow):
             page = self.history_page
         elif page_id == SETTINGS_ID:
             page = self.settings_page
+        elif page_id == RECIPES_ID:
+            page = self.recipes()
         elif page_id == TIMELINE_ID:
             if self.timeline_page is None:
                 self.timeline_page = TimelinePage(self.state)
                 self.timeline_page.showOnMap.connect(self.show_on_map)
+                self.timeline_page.openTool.connect(self.open_tool_with_folders)
                 self.stack.addWidget(self.timeline_page)
             page = self.timeline_page
         elif page_id == MAP_ID:
@@ -494,6 +528,22 @@ class MainWindow(QMainWindow):
         page = self.show_page(MAP_ID)
         if isinstance(page, MapPage):
             page.focus_item(Path(str(path)))
+
+    def open_tool_with_folders(self, tool_id: str, folders: list[object]) -> ToolPage | None:
+        """Open a tool on these folders (the Timeline's "Find duplicates…" on the library)."""
+        page = self.open_tool(tool_id)
+        if page is not None:
+            page.set_folders([str(folder) for folder in folders])
+        return page
+
+    def _clipboard_copied(self, message: str) -> None:
+        self.statusBar().showMessage(message, 5000)
+
+    def _scan_finished(self, plan: object) -> None:
+        """A Duplicate Finder scan is remembered by the photo library, so the Timeline can show
+        those groups; the library ignores files it does not hold."""
+        if isinstance(plan, Plan) and plan.tool == "duplicates":
+            library_model(self.state).update_duplicates(plan)
 
     def open_tool(self, tool_id: str, folder: str | None = None) -> ToolPage | None:
         """Show a tool's page and optionally put ``folder`` in its first folder field."""
@@ -549,6 +599,8 @@ class MainWindow(QMainWindow):
         for page in self.tool_pages.values():
             page.shutdown()
         self.history_page.shutdown()
+        if self.recipes_page is not None:
+            self.recipes_page.shutdown()
         for media_page in (self.timeline_page, self.map_page):
             if media_page is not None:
                 media_page.shutdown()

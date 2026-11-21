@@ -128,7 +128,9 @@ def test_filtering_two_hundred_thousand_items_does_not_freeze_the_window(
         )  # fmt: skip
     with MediaLibrary(db) as lib:
         lib._conn.executemany(  # pyright: ignore[reportPrivateUsage]
-            "INSERT INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows
+            "INSERT INTO items (key, path, kind, size, mtime, taken, date_source, lat, lon, "
+            "width, height, cloud_only) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
         )
         lib._conn.commit()  # pyright: ignore[reportPrivateUsage]
 
@@ -146,6 +148,28 @@ def test_filtering_two_hundred_thousand_items_does_not_freeze_the_window(
         worst = max(worst, time.perf_counter() - t0)
     assert worst < 0.25, f"a keystroke took {worst * 1000:.0f} ms"
     assert 0 < len(model.shown) < 200_000
+
+    # Rebuilding the Timeline: the grouped layout is made in the worker, so handing a read
+    # over to the window (model, month list, grid layout) is quick. The bound is loose; the real
+    # figure is well under 100 ms.
+    model.set_filter(MediaFilter())
+    page = TimelinePage(gui_state)
+    qtbot.addWidget(page)
+    page.resize(1000, 700)
+    page.show()
+    page.grid.load_thumbnail = lambda _p: None  # type: ignore[method-assign]
+    loaded = lm._read_library(  # pyright: ignore[reportPrivateUsage]
+        model._generation,  # pyright: ignore[reportPrivateUsage]
+        model.roots(),
+        db,
+        model._stamp_now(),  # pyright: ignore[reportPrivateUsage]
+    )
+    t0 = time.perf_counter()
+    model._apply(loaded)  # pyright: ignore[reportPrivateUsage]
+    handover = time.perf_counter() - t0
+    assert len(page.grid.items()) == 200_000
+    assert page.grid.month_headers()
+    assert handover < 0.6, f"handing over 200,000 items took {handover * 1000:.0f} ms"
 
 
 def test_a_failed_read_keeps_the_items_and_lets_a_later_reload_work(
@@ -189,3 +213,45 @@ def test_the_timeline_order_is_made_once_and_not_again_per_keystroke(
     assert model.timeline_shown == timeline_order(model.shown)
     model.set_filter(MediaFilter())
     assert model.timeline_shown == timeline_order(model.shown)
+
+
+def test_update_duplicates_works_off_the_gui_thread_and_reloads_once_saved(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gui.test_library_places_duplicates import _library, _plan  # noqa: PLC2701
+
+    from various_tools.core.media import library_duplicates as ld
+
+    root = _library(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    threads: list[int] = []
+    real = ld.LibraryDuplicates.update_from_plan
+
+    def spy(self: ld.LibraryDuplicates, *args: object, **kwargs: object) -> int:
+        threads.append(threading.get_ident())
+        return real(self, *args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(ld.LibraryDuplicates, "update_from_plan", spy)
+    assert model.update_duplicates(_plan(root)) == 0  # the work is in the background
+    qtbot.waitUntil(lambda: len(model.duplicate_index) == 1, timeout=10000)
+    assert threads and threads[0] != threading.get_ident()
+
+
+def test_a_scan_outside_the_library_keeps_the_saved_groups(
+    qtbot: QtBot, gui_state: AppState, tmp_path: Path
+) -> None:
+    from tests.gui.test_library_places_duplicates import _library, _plan  # noqa: PLC2701
+
+    from various_tools.core.plan import Plan
+
+    root = _library(gui_state, tmp_path)
+    model = LibraryModel(gui_state)
+    qtbot.waitUntil(lambda: not model.loading, timeout=10000)
+    model.update_duplicates(_plan(root))
+    qtbot.waitUntil(lambda: len(model.duplicate_index) == 1, timeout=10000)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    model.update_duplicates(Plan(tool="duplicates", roots=[elsewhere]))
+    qtbot.wait(300)
+    assert len(model.duplicate_index) == 1

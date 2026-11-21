@@ -70,6 +70,25 @@ def _things(count: int) -> str:
     return "1 photo or video" if count == 1 else f"{count:,} photos and videos"
 
 
+def place_text(items: Sequence[MediaItem]) -> str:
+    """The commonest place name among ``items``, plus how many other places there are.
+
+    For example "Paris, Île-de-France, France" or "Paris, Île-de-France, France and 2 other
+    places"; "" when none has a place name.
+    """
+    counts: dict[str, int] = {}
+    for item in items:
+        if item.place is not None:
+            counts[item.place.text] = counts.get(item.place.text, 0) + 1
+    if not counts:
+        return ""
+    best = max(counts, key=lambda text: (counts[text], text))
+    others = len(counts) - 1
+    if others == 0:
+        return best
+    return f"{best} and {others} other {'place' if others == 1 else 'places'}"
+
+
 def span_text(items: Sequence[MediaItem]) -> str:
     """For example "May 2019 to August 2021", or "May 2019", or "" when none has a date."""
     dates = [i.taken for i in items if i.taken is not None]
@@ -200,15 +219,19 @@ class MapPage(QWidget):
     def _describe(self, members: list[object]) -> str:
         items = [m for m in members if isinstance(m, MediaItem)]
         span = span_text(items)
-        return _things(len(items)) + (f"\n{span}" if span else "")
+        where = place_text(items)
+        text = _things(len(items))
+        return text + (f"\n{where}" if where else "") + (f"\n{span}" if span else "")
 
     def _cluster_clicked(self, payloads: list[Any]) -> None:
         items = [p for p in payloads if isinstance(p, MediaItem)]
         items.sort(key=lambda i: (i.taken is None, i.taken or 0, str(i.path).casefold()))
         self.grid.set_items(items)
         span = span_text(items)
+        where = place_text(items)
         self.place_label.setText(
             f"{_things(len(items))} here"
+            + (f" near {where}" if where else "")
             + (f" ({span})" if span else "")
             + ". Double-click one to open it."
         )

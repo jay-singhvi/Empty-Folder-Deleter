@@ -38,7 +38,7 @@ import os
 import re
 import threading
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QMessageBox,
@@ -77,6 +78,7 @@ from various_tools.core.context import Pace
 from various_tools.core.deps import TOOL_SPECS, install_hint
 from various_tools.core.journal import Journal, UndoReport, undo_run
 from various_tools.core.plan import WAIT_PAUSED_MESSAGE, ActionKind, Plan, RunResult
+from various_tools.core.recipe import step_from_options
 from various_tools.core.report import action_sizes
 from various_tools.core.schema import describe, format_value
 from various_tools.gui.apply_dialog import (
@@ -86,6 +88,7 @@ from various_tools.gui.apply_dialog import (
     pace_to_preselect,
     plan_touches_onedrive,
 )
+from various_tools.gui.recipe_store import RecipeStore
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
     UndoInfo,
@@ -104,6 +107,7 @@ from various_tools.gui.wording import (
     HIDE_SETTINGS,
     PAUSE_TEXT,
     RESUME_TEXT,
+    SAVE_RECIPE_STEP,
     SHOW_DETAILS,
     SKIP_WAIT_TEXT,
     STOP_TEXT,
@@ -145,6 +149,7 @@ Inform = Callable[[str, str], None]
 ChooseExport = Callable[[], tuple[str, str] | None]
 ChooseExtraPath = Callable[[Any], str | None]  # a tool extra -> the chosen file, or None
 ChoosePace = Callable[[ApplyAsk], tuple[bool, Pace | None]]  # -> (confirmed, pace)
+ChooseRecipe = Callable[[list[str]], str | None]  # saved recipe names -> the recipe (maybe new)
 
 
 def rememberable_fields(model: type[ToolOptions]) -> list[str]:
@@ -269,6 +274,23 @@ def _default_inform(parent: QWidget) -> Inform:
     return inform
 
 
+def _default_choose_recipe(parent: QWidget) -> ChooseRecipe:
+    def choose(names: list[str]) -> str | None:
+        new = "New recipe…"
+        title = "Save as recipe step"
+        picked, ok = QInputDialog.getItem(
+            parent, title, "Add this step to:", [*names, new], editable=False
+        )
+        if not ok:
+            return None
+        if picked != new:
+            return str(picked)
+        text, ok = QInputDialog.getText(parent, title, "Name of the new recipe:")
+        return str(text).strip() if ok and str(text).strip() else None
+
+    return choose
+
+
 def _default_choose_extra_path(parent: QWidget) -> ChooseExtraPath:
     def choose(extra: Any) -> str | None:
         title = str(extra.label)
@@ -299,11 +321,26 @@ class ToolPage(QWidget):
     runUndone = Signal(int)
     busyChanged = Signal(bool)
     clipboardCopied = Signal(str)
+    # The plan a scan just produced (shown in the list, not applied).
+    scanFinished = Signal(object)
 
-    def __init__(self, state: AppState, tool: Tool, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        state: AppState,
+        tool: Tool,
+        parent: QWidget | None = None,
+        *,
+        preset: tuple[Mapping[str, Any], bool] | None = None,
+    ) -> None:
+        """``preset`` is ``(options, own_folders)`` for a page that runs one step of a recipe:
+        the form starts from those options, nothing is remembered for next time, and the
+        "Save as recipe step" action is not offered."""
         super().__init__(parent)
         self.state = state
         self.tool = tool
+        self._preset = preset
+        # Set by the Recipes page: stored in the journal with each run of this page's apply.
+        self.recipe_tag: Mapping[str, object] | None = None
         self.plan: Plan | None = None
         self.applied_plan: Plan | None = None  # the copy the last apply worked on
         self.result: RunResult | None = None
@@ -323,6 +360,7 @@ class ToolPage(QWidget):
         self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
         # The Apply window. Tests set ``choose_pace`` (or, as before, ``confirm``).
         self.choose_pace: ChoosePace = self._open_apply_dialog
+        self.choose_recipe: ChooseRecipe = _default_choose_recipe(self)
         self._default_confirm_hook = self.confirm
 
         # ----- header ------------------------------------------------------------------
@@ -343,7 +381,12 @@ class ToolPage(QWidget):
         # person chose other folders for this tool (remembered with the other options).
         self._ws_name = workspace_field_name(tool)
         self._override = bool(
-            self._ws_name and self.state.last_options(tool.id).get(OTHER_FOLDERS_KEY) is True
+            self._ws_name
+            and (
+                preset[1]
+                if preset is not None
+                else self.state.last_options(tool.id).get(OTHER_FOLDERS_KEY) is True
+            )
         )
         self.form = SchemaForm(
             tool.Options, self._initial_values(), load_choices=self._choices_worker
@@ -403,6 +446,11 @@ class ToolPage(QWidget):
             "Save the plan (or the applied result) as CSV, Excel or HTML."
         )
         more_menu.addSeparator()
+        self.save_step_action = more_menu.addAction(SAVE_RECIPE_STEP)
+        self.save_step_action.setToolTip(
+            "Add these options to a recipe, to run again later with other steps."
+        )
+        self.save_step_action.setVisible(preset is None)
         self.reset_options_action = more_menu.addAction("Reset options to defaults")
         self.reset_options_action.setToolTip(
             "Put every option back to its default. The folders stay as they are."
@@ -573,6 +621,7 @@ class ToolPage(QWidget):
         self.apply_button.clicked.connect(lambda _c=False: self.apply())
         self.export_button.triggered.connect(lambda _c=False: self.export())
         self.reset_options_action.triggered.connect(lambda _c=False: self.reset_options())
+        self.save_step_action.triggered.connect(lambda _c=False: self.save_as_recipe_step())
         self.compare_button.clicked.connect(lambda _c=False: self.open_compare())
         self.undo_button.clicked.connect(lambda _c=False: self.undo_last())
         self.select_all_button.clicked.connect(lambda _c=False: self.select_all(True))
@@ -610,6 +659,11 @@ class ToolPage(QWidget):
     # ----- options ----------------------------------------------------------------------------
 
     def _initial_values(self) -> dict[str, Any]:
+        if self._preset is not None:
+            values = dict(self._preset[0])
+            if self._ws_name and not self._override:
+                values.pop(self._ws_name, None)
+            return values
         remembered = self.state.last_options(self.tool.id)
         keep = set(rememberable_fields(self.tool.Options))
         values = {name: value for name, value in remembered.items() if name in keep}
@@ -742,6 +796,16 @@ class ToolPage(QWidget):
             self._override_session_only = True  # this launch only: not remembered
         return self.form.set_first_folder(path)
 
+    def set_folders(self, paths: list[str]) -> bool:
+        """Put several folders into the first folder field, like :meth:`set_folder` (a field
+        that holds one folder gets the first). Returns False if there is nothing to set."""
+        if not paths or not self.set_folder(paths[0]):
+            return False
+        name = self.form.folder_fields()[0]
+        if len(paths) > 1 and self.form.field_spec(name).kind == "list":
+            self.form.set_field_value(name, list(paths))
+        return True
+
     def _build_options(self) -> ToolOptions | None:
         try:
             return cast(ToolOptions, self.form.build())
@@ -751,6 +815,8 @@ class ToolPage(QWidget):
 
     def _remember_options(self, options: ToolOptions) -> None:
         """Remember what this scan used, except options that must start from the default."""
+        if self._preset is not None:
+            return  # a recipe step must not change what the tool's own page remembers
         values = options.model_dump(mode="json")
         remembered = {
             name: values[name]
@@ -767,6 +833,25 @@ class ToolPage(QWidget):
             else:
                 remembered[OTHER_FOLDERS_KEY] = self._override
         self.state.remember_options(self.tool.id, remembered)
+
+    def save_as_recipe_step(self) -> bool:
+        """Add the current options to a new or existing recipe (asked through ``choose_recipe``).
+        The working folder is not saved unless this page uses other folders."""
+        options = self._build_options()
+        if options is None:
+            return False
+        step = step_from_options(
+            self.tool, options.model_dump(mode="json"), own_folders=self._override
+        )
+        store = RecipeStore(self.state.settings_path)
+        if store.notice:
+            self.inform("Recipes", store.notice)
+        chosen = self.choose_recipe(store.names())
+        if chosen is None:
+            return False
+        number = store.add_step(chosen, step)
+        self._set_status(f"Saved as step {number} of the recipe {chosen.strip()}.")
+        return True
 
     # ----- scan -------------------------------------------------------------------------------
 
@@ -807,6 +892,7 @@ class ToolPage(QWidget):
         plan, sizes = value  # type: ignore[misc]
         assert isinstance(plan, Plan)
         self.plan = plan
+        self.scanFinished.emit(plan)
         self.result = None
         self._applied = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
@@ -983,6 +1069,7 @@ class ToolPage(QWidget):
         self._close_compare()
         tool = self.tool
         self.applied_plan = plan
+        recipe_tag = self.recipe_tag
 
         pause_event, skip_event = threading.Event(), threading.Event()
         self._pause_event, self._skip_wait_event = pause_event, skip_event
@@ -991,6 +1078,7 @@ class ToolPage(QWidget):
 
         def job(ctx: Any) -> RunResult:
             ctx.pace = pace
+            ctx.recipe_tag = recipe_tag
             ctx.pause_event = pause_event
             ctx.skip_wait_event = skip_event
             return tool.apply(plan, ctx)

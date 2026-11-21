@@ -38,6 +38,8 @@ hiddenimports = []
 datas += copy_metadata("various-tools")
 # The offline world map reads its land outlines through importlib.resources.
 datas += [(str(ROOT / "src" / "various_tools" / "gui" / "data" / "world_land.json"), "various_tools/gui/data")]
+# Offline place names (GeoNames, CC BY 4.0) for the media library.
+datas += [(str(ROOT / "src" / "various_tools" / "core" / "media" / "data" / "places.npz"), "various_tools/core/media/data")]
 # Every tool, the GUI and the CLI are imported by name at run time (entry points, pkgutil
 # fallback), so PyInstaller's static analysis cannot see all of them.
 hiddenimports += collect_submodules("various_tools")

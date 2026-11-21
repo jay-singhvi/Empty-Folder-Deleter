@@ -280,6 +280,17 @@ class Journal:
             ).fetchall()
         return [RunRecord(*row) for row in rows]
 
+    def runs_mentioning(self, text: str) -> list[RunRecord]:
+        """Every run whose options contain ``text`` (a plain substring), newest first. For
+        finding the runs of one recipe run however many runs the journal holds."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, tool, options_json, started, finished, status FROM runs "
+                "WHERE instr(options_json, ?) > 0 ORDER BY id DESC",
+                (text,),
+            ).fetchall()
+        return [RunRecord(*row) for row in rows]
+
     def run(self, run_id: int) -> RunRecord | None:
         with self._lock:
             row = self._conn.execute(

@@ -25,9 +25,12 @@ import os
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
@@ -97,10 +100,8 @@ def month_title(year: int, month: int, count: int) -> str:
     return f"{calendar.month_name[month]} {year} · {count:,}"
 
 
-def day_title(item: MediaItem, count: int) -> str:
-    taken = item.taken
-    assert taken is not None
-    return f"{taken:%A} {taken.day} {calendar.month_name[taken.month]} {taken.year} · {count:,}"
+def day_title(day: date, count: int) -> str:
+    return f"{day:%A} {day.day} {calendar.month_name[day.month]} {day.year} · {count:,}"
 
 
 def _copy_path(text: str) -> None:
@@ -116,6 +117,52 @@ def _path_key(path: Path) -> str:
 def _key(entry: MediaItem) -> str:
     """Cache key: the path plus size and time, so a changed file gets a new thumbnail."""
     return f"{_path_key(entry.path)}|{entry.size}|{entry.mtime}"
+
+
+@dataclass
+class Groups:
+    """The month and day headers of a list in timeline order, worked out without the grid.
+
+    ``runs`` are ``(month, day, start, end)``: items ``start`` to ``end`` of the list share that
+    month (``(0, 0)`` when undated) and day (``None`` when undated). It is made in a background
+    worker (:func:`groups_from_days`) so the window thread only lays out headers and rows, which
+    is quick even at 200,000 items.
+    """
+
+    runs: list[tuple[tuple[int, int], date | None, int, int]] = field(
+        default_factory=list[tuple[tuple[int, int], date | None, int, int]]
+    )
+    month_counts: dict[tuple[int, int], int] = field(default_factory=dict[tuple[int, int], int])
+    day_counts: dict[date, int] = field(default_factory=dict[date, int])
+
+
+def days_of(items: Sequence[MediaItem]) -> Any:
+    """Each item's day as an ordinal (0 when undated), as a numpy array."""
+    return np.fromiter(
+        (i.taken.toordinal() if i.taken is not None else 0 for i in items),
+        dtype=np.int64,
+        count=len(items),
+    )
+
+
+def groups_from_days(days: Any) -> Groups:
+    """Runs of equal days, in order, from an array of day ordinals (0 for undated)."""
+    n = len(days)
+    groups = Groups()
+    if n == 0:
+        return groups
+    cuts = np.flatnonzero(np.diff(days) != 0) + 1
+    starts = [0, *cuts.tolist()]
+    ends = [*cuts.tolist(), n]
+    for start, end in zip(starts, ends, strict=True):
+        ordinal = int(days[start])
+        day = date.fromordinal(ordinal) if ordinal > 0 else None
+        month = (day.year, day.month) if day is not None else (0, 0)
+        groups.runs.append((month, day, start, end))
+        groups.month_counts[month] = groups.month_counts.get(month, 0) + (end - start)
+        if day is not None:
+            groups.day_counts[day] = groups.day_counts.get(day, 0) + (end - start)
+    return groups
 
 
 class _Band:
@@ -165,6 +212,7 @@ class MediaGrid(QAbstractScrollArea):
         self.captions = captions
         self._thumb = max(MIN_THUMB, min(MAX_THUMB, thumb_size))
         self._items: list[MediaItem] = []
+        self._groups: Groups | None = None
         self._row_index: dict[str, int] | None = None
         self._bands: list[_Band] = []
         self._tops: list[int] = []
@@ -188,6 +236,8 @@ class MediaGrid(QAbstractScrollArea):
         self.edit_file: Callable[[Path], bool] = edit_with_windows
         self.show_properties: Callable[[Path], bool] = reveal.show_properties
         self.confirm: Callable[[str, str], bool] = self._default_confirm
+        # Set by the Timeline: True for an item that has a duplicate (it gets a small badge).
+        self.is_duplicate: Callable[[MediaItem], bool] | None = None
         self.activate: Callable[[int], object] = self.open_row
         self.load_thumbnail: Callable[[Path], bytes | None] = lambda p: thumbs.thumbnail_jpeg(
             p, THUMB_PX
@@ -206,10 +256,15 @@ class MediaGrid(QAbstractScrollArea):
 
     # ----- items -------------------------------------------------------------------------------
 
-    def set_items(self, items: Sequence[MediaItem]) -> None:
-        """Show ``items`` (in the given order), replacing what was shown."""
+    def set_items(self, items: Sequence[MediaItem], groups: Groups | None = None) -> None:
+        """Show ``items`` (in the given order), replacing what was shown.
+
+        A grouped grid needs the month and day runs of the list; the caller may hand over ones
+        made earlier (in a worker) with ``groups``, otherwise they are worked out here.
+        """
         self._generation += 1
         self._items = list(items)
+        self._groups = groups
         self._row_index = None
         self._selected.clear()
         self._current = -1
@@ -287,55 +342,43 @@ class MediaGrid(QAbstractScrollArea):
         row_starts: list[int] = []
         row_bands: list[int] = []
         months: dict[tuple[int, int], int] = {}
-        items = self._items
-        month_counts: dict[tuple[int, int], int] = {}
-        day_counts: dict[object, int] = {}
-        if self.grouped:
-            for item in items:
-                taken = item.taken
-                mk = (taken.year, taken.month) if taken is not None else (0, 0)
-                month_counts[mk] = month_counts.get(mk, 0) + 1
-                if taken is not None:
-                    day_counts[taken.date()] = day_counts.get(taken.date(), 0) + 1
+        cols = self._cols
         y = _PAD
-        last_month: tuple[int, int] | None = None
-        last_day: object = None
-        row_start = -1
         row_h = self._tile_h() + _GAP
+        total = len(self._items)
 
-        def close_row(end: int, at: int, month: tuple[int, int]) -> int:
-            row_starts.append(row_start)
-            row_bands.append(len(bands))
-            bands.append(_Band(at, row_h, _ROW, start=row_start, end=end, month=month))
-            return at + row_h
+        def add_rows(start: int, end: int, month: tuple[int, int]) -> None:
+            nonlocal y
+            for row_start in range(start, end, cols):
+                row_starts.append(row_start)
+                row_bands.append(len(bands))
+                row_end = min(end, row_start + cols)
+                bands.append(_Band(y, row_h, _ROW, start=row_start, end=row_end, month=month))
+                y += row_h
 
-        for i, item in enumerate(items):
-            taken = item.taken
-            mk = (taken.year, taken.month) if taken is not None and self.grouped else (0, 0)
-            if self.grouped:
-                day = taken.date() if taken is not None else None
-                new_month = mk != last_month
-                if new_month or (day != last_day and day is not None):
-                    if row_start >= 0:
-                        y = close_row(i, y, last_month or (0, 0))
-                        row_start = -1
-                    if new_month:
-                        months[mk] = len(bands)
-                        title = month_title(mk[0], mk[1], month_counts[mk])
-                        bands.append(_Band(y, _MONTH_H, _MONTH, title, month=mk))
-                        y += _MONTH_H
-                    if day is not None:
-                        title = day_title(item, day_counts[day])
-                        bands.append(_Band(y, _DAY_H, _DAY, title, month=mk))
-                        y += _DAY_H
-                    last_month, last_day = mk, day
-            if row_start >= 0 and i - row_start >= self._cols:
-                y = close_row(i, y, last_month or (0, 0))
-                row_start = -1
-            if row_start < 0:
-                row_start = i
-        if row_start >= 0:
-            y = close_row(len(items), y, last_month or (0, 0))
+        if self.grouped:
+            groups = self._groups
+            if (
+                groups is None
+                or (groups.runs and groups.runs[-1][3] != total)
+                or (not groups.runs and total)
+            ):
+                groups = groups_from_days(days_of(self._items))
+            last_month: tuple[int, int] | None = None
+            for month, day, start, end in groups.runs:
+                if month != last_month:
+                    months[month] = len(bands)
+                    title = month_title(month[0], month[1], groups.month_counts[month])
+                    bands.append(_Band(y, _MONTH_H, _MONTH, title, month=month))
+                    y += _MONTH_H
+                    last_month = month
+                if day is not None:
+                    title = day_title(day, groups.day_counts[day])
+                    bands.append(_Band(y, _DAY_H, _DAY, title, month=month))
+                    y += _DAY_H
+                add_rows(start, end, month)
+        else:
+            add_rows(0, total, (0, 0))
         self._bands = bands
         self._tops = [b.top for b in bands]
         self._row_starts = row_starts
@@ -591,6 +634,10 @@ class MediaGrid(QAbstractScrollArea):
     def tooltip_for(self, row: int) -> str:
         entry = self._items[row]
         tip = f"{entry.path}\nDate from: {entry.date_source}"
+        if entry.place is not None:
+            tip += f"\nPlace: {entry.place.text}"
+        if self.is_duplicate is not None and self.is_duplicate(entry):
+            tip += "\nHas a duplicate (see the preview for the other copies)"
         if entry.cloud_only:
             tip += "\nIn OneDrive only: not on this device"
         return tip
@@ -678,6 +725,8 @@ class MediaGrid(QAbstractScrollArea):
             painter.drawPixmap(target, pixmap)
         else:
             self._paint_placeholder(painter, tile, item)
+        if self.is_duplicate is not None and self.is_duplicate(item):
+            self._paint_badge(painter, tile)
         if row == self._current and self.hasFocus():
             painter.setPen(pal.color(QPalette.ColorRole.Highlight))
             painter.drawRect(tile.adjusted(-2, -2, 1, 1))
@@ -690,6 +739,21 @@ class MediaGrid(QAbstractScrollArea):
                     self.caption(row).replace("\n", " · "), Qt.TextElideMode.ElideMiddle, size
                 ),
             )
+
+    def _paint_badge(self, painter: QPainter, tile: QRect) -> None:
+        """A small "2" ring in the corner: this item has a duplicate."""
+        d = max(14, self._thumb // 5)
+        badge = QRect(tile.right() - d - 2, tile.top() + 2, d, d)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setBrush(QColor(200, 90, 20, 230))
+        painter.drawEllipse(badge)
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setPixelSize(max(8, d - 6))
+        painter.setFont(font)
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "2")
+        painter.setFont(self.font())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_placeholder(self, painter: QPainter, tile: QRect, item: MediaItem) -> None:
         painter.setPen(Qt.PenStyle.NoPen)

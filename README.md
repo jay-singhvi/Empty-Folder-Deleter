@@ -187,6 +187,32 @@ Every documented use of the original scripts has a command. All of them preview 
 | `python-v3-Extract_Project_Code.py` (project source into one text file) | `various-tools project_export scan FOLDER --mode contents`, then `apply`. `--exts .py,.ipynb`, `--exclude-globs`, `--strip-comments/--no-strip-comments`, `--include-markdown-cells`, `--include-outputs`, `--output-format txt\|md`, `--output-path FILE`, `--copy-to-clipboard`. |
 | `python-v1-Extract_Project_Structure.py` (list project files with filters) | `various-tools project_export scan FOLDER --mode tree --exts .py,.md --exclude-globs .git,.venv`, then `apply` to write the listing. |
 
+## Recipes
+
+A recipe is a saved, named list of steps; each step is a tool with its options. Open **Recipes**
+in the sidebar (App section) or the View menu. Make a recipe with New and Add step, or add the
+current options of any tool page with **More > Save as recipe step...**. Three starters are
+offered on the empty page: "Tidy a folder", "Prepare photos to share" and "Fix photo names".
+
+**Run recipe** goes through the steps one by one on the working folder. Each step scans first
+and shows its list with the usual Apply window (batches and the OneDrive wait included); nothing
+changes until you apply. After the apply, or on **Skip this step**, the next step opens; **Stop**
+ends the recipe. Every step is its own journaled run, so History shows "Recipe: NAME, step 2 of
+3", and **Undo this recipe run** undoes the steps from last to first after one question.
+
+On the command line (the folders are given because the command line has no working folder):
+
+```
+various-tools recipe list
+various-tools recipe show "Tidy a folder"
+various-tools recipe run "Tidy a folder" D:\Photos            # scans the first step only
+various-tools recipe run "Tidy a folder" D:\Photos --apply    # each step: scan, ask, apply
+```
+
+Recipes live in `recipes.json` next to `settings.toml`. A step whose tool or options no longer
+fit is marked "needs attention" and blocks the run until it is changed. A file that cannot be
+read is renamed to `recipes.json.bad-<time>`, never discarded. Details: [docs/recipes.md](docs/recipes.md).
+
 ## Desktop app
 
 Start *Various Tools* from the Start menu, or double-click `Various Tools.exe`. From a source checkout run `uv run various-tools-gui` (or `python -m various_tools.gui`). Every tool has a page in the sidebar, grouped by category, with a search box.
@@ -246,6 +272,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - The app icon is drawn in code (`src/various_tools/gui/icon.py`).
+- Place names: GeoNames (geonames.org), CC BY 4.0.
 
 ## Support
 

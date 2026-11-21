@@ -705,3 +705,30 @@ def test_queued_raw_files_are_read_and_stored_before_a_cancel_is_honoured(
     stored = {i.path.name: i for i in lib.items()}
     assert sorted(stored) == ["IMG_0.CR3", "IMG_1.CR3"]  # queued, then read, then kept
     assert all(i.taken == datetime(2022, 3, 4, 5, 6, 7) for i in stored.values())
+
+
+def test_a_half_migrated_v1_file_opens_and_keeps_its_rows(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "library.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE items (key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, "
+        "size INTEGER NOT NULL, mtime REAL NOT NULL, taken TEXT, date_source TEXT NOT NULL, "
+        "lat REAL, lon REAL, width INTEGER, height INTEGER, cloud_only INTEGER NOT NULL, "
+        "place_city TEXT)"  # a first attempt that stopped after one new column
+    )
+    conn.execute(
+        "INSERT INTO items VALUES ('k', 'p', 'photo', 1, 1.0, NULL, 'modified', NULL, NULL, "
+        "NULL, NULL, 0, NULL)"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    with MediaLibrary(path) as lib:
+        assert len(lib.items()) == 1
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == library_module.SCHEMA_VERSION
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
+    conn.close()
+    assert {"place_city", "place_region", "place_country", "place_done"} <= columns

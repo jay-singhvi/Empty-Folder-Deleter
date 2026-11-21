@@ -5,6 +5,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.8.0: saved recipes, duplicates in the photo library, place names (2026-11-21)
+
+Owner's request: "start wave 2". Design: `docs/superpowers/specs/2026-11-21-wave-2-design.md`.
+
+- **Saved recipes** (new *Recipes* page in App, and the View menu): a recipe is a named list of
+  tools with their settings, run in order on the working folder. Every step looks first, shows
+  its list and asks through the usual Apply window (batches and the OneDrive wait included);
+  *Skip this step* and *Stop* are there. A tool page's *More* menu has *Save as recipe step…*.
+  History labels each step ("Recipe: NAME, step 2 of 3") and *Undo this recipe run* undoes its
+  steps from last to first. A recipe never stores *Delete forever*. Three starter recipes are
+  offered. Stored in `recipes.json` next to the settings; a damaged file is kept aside as
+  `recipes.json.bad-<time>`. CLI: `various-tools recipe list | show NAME | run NAME FOLDERS
+  [--apply]`.
+- **Duplicates in the photo library:** the Timeline's *Find duplicates…* opens the Duplicate
+  Finder on the library folders (its thresholds, compare view and Apply unchanged). After its
+  scan the Timeline can show *Only photos with a duplicate*, marks them with a badge, and the
+  preview lists the other copies. Nothing is moved from the Timeline.
+- **Place names, offline:** photos and videos with a GPS place show the nearest town ("Paris,
+  Île-de-France, France") in the preview, the grid's tooltip, and on the map, and the filter bar
+  gets *Place* (country, then region). Built in from GeoNames (cities over 15,000 people, CC BY
+  4.0, 418 KB); nothing goes online. More than 50 km from any such town shows no name.
+- **Faster Timeline:** the grouped layout is prepared in the background; at 200,000 items the
+  window pauses about a quarter of a second instead of about a second.
+- Version 0.8.0.
+- **Review fixes:**
+  - A recipe step never keeps 🔒 locked options or options that replace the originals (for
+    example "overwrite"); a hand-edited `recipes.json` that holds them is "needs attention" and
+    does not run (GUI and CLI). The starter "Prepare photos to share" is now one safe step (Resize
+    media without metadata), because a recipe cannot point a second step at the first one's output.
+  - The library file upgrade from 0.7 can be run again if it stopped half way (only missing
+    columns are added, in one transaction).
+  - The Timeline's duplicate groups are saved off the window thread. A scan of folders outside the
+    library folders no longer replaces them, and a scan replaces only the groups under the folders
+    it looked in; the library is read again only when they changed.
+  - Recipes page: the next step opens only after a clean apply (not cancelled, no failed action);
+    "Change step" refuses a step whose tool is gone; the file is read again after a run; each
+    step's scan feeds the photo library and its copied results show in the status bar.
+  - History: "Undo this recipe run" finds every step of the run in the journal, not only the
+    loaded rows.
+  - CLI `recipe run`: exits 1 when a later step has nothing selected, warns when a plan deletes
+    permanently but `delete_mode` is `trash`, and prints the folders each step uses.
+  - Place naming of old library rows can be cancelled and reports progress; with the places list
+    missing it logs once and tries again next time. The Timeline grid lays itself out again when
+    handed empty groups for a non-empty list.
+
 ### Version 0.7.0: the items left for later, and waiting for OneDrive (2026-11-21)
 
 Owner's request: "start on the items left for later". Design:

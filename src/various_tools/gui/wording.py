@@ -177,3 +177,21 @@ def format_wait(seconds: float) -> str:
     if secs and not hours:
         parts.append(_unit(secs, "second"))
     return " ".join(parts)
+
+
+# ----- recipes -----------------------------------------------------------------------------------
+
+SAVE_RECIPE_STEP = "Save as recipe step…"
+RECIPES_TITLE = "Recipes"
+RECIPES_INTRO = (
+    "A recipe is a saved list of steps. Each step is a tool with its options. Running a recipe "
+    "goes through the steps one by one on the working folder: you look at each list and apply "
+    "it, or skip the step."
+)
+NO_RECIPES_TEXT = "No recipes yet. Make one with New, or start from one of these:"
+RUN_RECIPE = "Run recipe"
+SKIP_STEP = "Skip this step"
+STOP_RECIPE = "Stop"
+NEEDS_ATTENTION = "needs attention"
+UNDO_RECIPE_RUN = "Undo this recipe run"
+NEW_RECIPE_NAME = "New recipe"

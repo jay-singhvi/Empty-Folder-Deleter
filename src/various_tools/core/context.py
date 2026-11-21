@@ -35,12 +35,18 @@ class Pace:
 
     batch_size: int
     pause_s: float
+    # Also wait, after each batch, until OneDrive reports every file the batch wrote as
+    # uploaded (at most ``upload_timeout_s``), then wait ``pause_s`` as usual.
+    wait_for_upload: bool = False
+    upload_timeout_s: float = 1800.0
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
             raise ValueError("batch size must be at least 1")
         if self.pause_s < 0:
             raise ValueError("pause must not be negative")
+        if self.upload_timeout_s <= 0:
+            raise ValueError("upload timeout must be more than 0")
 
 
 def _no_progress(done: int, total: int, message: str) -> None:

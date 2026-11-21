@@ -6,6 +6,22 @@ This repository started as the **Empty Folder Deleter** Tkinter app; that app is
 
 ## Screenshots
 
+![The Home page with the tool cards](docs/images/home.png)
+
+Home: every tool, and the working folder they share.
+
+![A tool page: Sort by type with its plan](docs/images/tool-page-sort-by-type.png)
+
+A tool page: Sort by type, with the plan to check before applying.
+
+![The Timeline page](docs/images/timeline.png)
+
+Timeline: photos and videos by the date they were taken.
+
+![The Map page](docs/images/map.png)
+
+Map: where the photos were taken (the built-in offline map).
+
 ![The main window with the Empty Folder Deleter tool: options form and the plan as a folder tree](docs/images/main-window-empty-folders.png)
 
 The Empty Folder Deleter tool: the options form and the plan as a folder tree.
@@ -238,3 +254,7 @@ If you encounter any problems or have any suggestions, please [open an issue](ht
 ---
 
 Developed with ❤️ by Jay Singhvi
+
+## Gentle on OneDrive
+
+`apply` can work in batches: `--batch-size N --pause 5m`. Add `--wait-for-upload` (with an optional `--upload-timeout 30m`, 30 minutes by default) to also wait, after each batch, until OneDrive has uploaded the files that batch wrote. The Apply window has the same choice. Files OneDrive cannot report on count as uploaded, and nothing is downloaded to check.

@@ -8,7 +8,11 @@ light theme) into ``docs/images/``:
 * ``duplicates-compare.png``: the duplicates compare view on generated pictures;
 * ``disk-usage-size-map.png``: Disk Usage with its size map;
 * ``history.png``: History after two applied runs;
-* ``settings-external-programs.png``: Settings, scrolled to the external programs.
+* ``settings-external-programs.png``: Settings, scrolled to the external programs;
+* ``home.png``: the Home page with its tool cards;
+* ``tool-page-sort-by-type.png``: a tool page (Sort by type) with a scanned plan;
+* ``timeline.png``: the Timeline of a generated photo library;
+* ``map.png``: the Map of the same library (the built-in offline map, no network).
 
 No personal data can appear:
 
@@ -133,38 +137,85 @@ def make_trees() -> dict[str, Path]:
     photos = DEMO / "Photos"
     photos.mkdir()
     make_photos(photos)
-    return {"empty": files, "usage": usage, "sort": sorting, "photos": photos}
+    library = DEMO / "Library"
+    make_library(library)
+    return {
+        "empty": files,
+        "usage": usage,
+        "sort": sorting,
+        "photos": photos,
+        "library": library,
+    }
+
+
+# Made-up trips for the Timeline and Map: (folder, "YYYY:MM:DD", latitude, longitude, count).
+TRIPS: tuple[tuple[str, str, float, float, int], ...] = (
+    ("Lisbon", "2023:04:14", 38.72, -9.14, 6),
+    ("Kyoto", "2023:11:02", 35.01, 135.77, 7),
+    ("Cape Town", "2024:02:18", -33.92, 18.42, 5),
+    ("New York", "2024:06:09", 40.71, -74.0, 6),
+    ("Reykjavik", "2024:09:21", 64.15, -21.94, 5),
+    ("Home", "2025:01:05", 47.61, -122.33, 4),
+)
+
+
+def make_library(folder: Path) -> None:
+    """Generated pictures with a taken date and a place, so the Timeline and Map have content."""
+    from PIL import Image
+
+    exif_ifd, gps_ifd = 0x8769, 0x8825
+
+    def dms(value: float) -> tuple[float, float, float]:
+        value = abs(value)
+        degrees = int(value)
+        minutes = int((value - degrees) * 60)
+        return float(degrees), float(minutes), round((value - degrees - minutes / 60) * 3600, 2)
+
+    for trip, (name, date, lat, lon, count) in enumerate(TRIPS):
+        year, month, day = (int(part) for part in date.split(":"))
+        for i in range(count):
+            data = Image.Exif()
+            data.get_ifd(exif_ifd)[0x9003] = f"{year}:{month:02d}:{day + i % 3:02d} 1{i % 10}:20:00"
+            gps = data.get_ifd(gps_ifd)
+            gps[1], gps[2] = "N" if lat >= 0 else "S", dms(lat + i * 0.003)
+            gps[3], gps[4] = "E" if lon >= 0 else "W", dms(lon + i * 0.003)
+            picture = make_scene(trip * 7 + i, (480, 360))
+            target = folder / name / f"{name} {i + 1:02d}.jpg"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            picture.save(target, "JPEG", quality=88, exif=data.tobytes())
+
+
+def make_scene(seed: int, size: tuple[int, int] = (1600, 1200)) -> Any:
+    """A generated landscape picture; the seed changes its colours."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    image = Image.new("RGB", size, (120 + seed * 7 % 60, 170, 220))
+    draw = ImageDraw.Draw(image)
+    w, h = size
+    draw.rectangle((0, int(h * 0.62), w, h), fill=(70, 140 - seed % 30, 70))
+    draw.ellipse((int(w * 0.68), int(h * 0.1), int(w * 0.86), int(h * 0.34)), fill=(250, 220, 90))
+    for i in range(6):
+        x = int(w * (0.08 + 0.15 * i))
+        draw.polygon(
+            [
+                (x, int(h * 0.62)),
+                (x + int(w * 0.07), int(h * 0.3)),
+                (x + int(w * 0.14), int(h * 0.62)),
+            ],
+            fill=(90 + 10 * i, 110, 130 + seed % 100),
+        )
+    return image.filter(ImageFilter.GaussianBlur(1.2))
 
 
 def make_photos(folder: Path) -> None:
     """A generated picture, an exact copy and a smaller re-save, plus an unrelated picture."""
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image
 
-    def scene(seed: int, size: tuple[int, int] = (1600, 1200)) -> Image.Image:
-        image = Image.new("RGB", size, (120 + seed * 7 % 60, 170, 220))
-        draw = ImageDraw.Draw(image)
-        w, h = size
-        draw.rectangle((0, int(h * 0.62), w, h), fill=(70, 140 - seed % 30, 70))
-        draw.ellipse(
-            (int(w * 0.68), int(h * 0.1), int(w * 0.86), int(h * 0.34)), fill=(250, 220, 90)
-        )
-        for i in range(6):
-            x = int(w * (0.08 + 0.15 * i))
-            draw.polygon(
-                [
-                    (x, int(h * 0.62)),
-                    (x + int(w * 0.07), int(h * 0.3)),
-                    (x + int(w * 0.14), int(h * 0.62)),
-                ],
-                fill=(90 + 10 * i, 110, 130 + seed),
-            )
-        return image.filter(ImageFilter.GaussianBlur(1.2))
-
-    original = scene(1)
+    original = make_scene(1)
     original.save(folder / "Lake view.jpg", quality=92)
     shutil.copyfile(folder / "Lake view.jpg", folder / "Lake view (copy).jpg")
     original.resize((800, 600)).save(folder / "Lake view small.jpg", quality=85)
-    scene(9).transpose(Image.Transpose.FLIP_LEFT_RIGHT).save(folder / "Hills.jpg", quality=90)
+    make_scene(9).transpose(Image.Transpose.FLIP_LEFT_RIGHT).save(folder / "Hills.jpg", quality=90)
 
 
 # ----- fakes --------------------------------------------------------------------------------------
@@ -259,13 +310,26 @@ def main() -> int:
         remove_demo_folder()
 
 
+def fill_library(state: Any) -> None:
+    """Read the generated library into the catalog (in the demo folder) before the pages open."""
+    from various_tools.core.context import make_context
+    from various_tools.core.media.library import MediaLibrary, library_path
+
+    ctx = make_context(state.settings, with_journal=False)
+    try:
+        with MediaLibrary(library_path(state.settings)) as lib:
+            lib.sync(state.settings.library_folders, ctx)
+    finally:
+        ctx.close()
+
+
 def shoot() -> int:
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication
 
     from various_tools.gui import app as gui_app
     from various_tools.gui import workers
-    from various_tools.gui.main_window import HISTORY_ID, SETTINGS_ID
+    from various_tools.gui.main_window import HISTORY_ID, HOME_ID, MAP_ID, SETTINGS_ID, TIMELINE_ID
     from various_tools.gui.shell import FakeRegistry
     from various_tools.gui.state import AppState
     from various_tools.gui.theme import apply_theme
@@ -281,6 +345,7 @@ def shoot() -> int:
                 f'data_folder = "{(DEMO / "data").as_posix()}"',
                 f'cache_folder = "{(DEMO / "cache").as_posix()}"',
                 f'onedrive_root = "{(DEMO / "OneDrive").as_posix()}"',
+                f'library_folders = ["{trees["library"].as_posix()}"]',
                 'theme = "light"',
                 'ollama_url = "http://localhost:11434"',
                 "",
@@ -295,6 +360,7 @@ def shoot() -> int:
     app.setFont(QFont("Segoe UI", 9))  # what the app shows on Windows; offscreen has no default
     state = AppState.load(config)
     state.deps = FakeDeps()  # type: ignore[assignment]
+    fill_library(state)
     window = gui_app.make_window(state, shell_backend=FakeRegistry())
     quiet(window)
     window.resize(WIDTH, HEIGHT)
@@ -350,7 +416,28 @@ def shoot() -> int:
     settle(app, 0.5)
     save(window, "history.png")
 
-    # 6. Settings, at the external programs.
+    # 6. Home, a tool page, the Timeline and the Map.
+    window.show_page(HOME_ID)
+    settle(app, 0.5)
+    save(window, "home.png")
+
+    page = window.open_tool("sort_by_type", str(trees["sort"]))
+    assert page is not None
+    run_page(app, page)
+    settle(app, 0.5)
+    save(window, "tool-page-sort-by-type.png")
+
+    timeline = window.show_page(TIMELINE_ID)
+    wait(app, lambda: not workers.active_workers(), timeout=60)
+    settle(app, 1.5)  # thumbnails load in the background
+    save(window, "timeline.png")
+
+    window.show_page(MAP_ID)
+    settle(app, 1.5)
+    save(window, "map.png")
+    del timeline
+
+    # 7. Settings, at the external programs.
     window.show_page(SETTINGS_ID)
     settle(app, 0.3)
     panel = window.settings_page.tools_panel

@@ -196,6 +196,10 @@ class RunResult:
 
 
 Handler = Callable[[PlannedAction], Path | None]
+# Called just before each action runs with the outcomes so far (keyed by the source path text).
+# It returns the action to run (it may change ``dst``), or a reason text to skip it. This lets
+# a tool tie one action to another, such as a sidecar to the file it follows.
+BeforeAction = Callable[[PlannedAction, Mapping[str, "ActionOutcome"]], "PlannedAction | str"]
 
 _SOURCE_CHANGING = frozenset(
     {ActionKind.MOVE, ActionKind.RENAME, ActionKind.TRASH, ActionKind.DELETE}
@@ -636,8 +640,12 @@ def apply_plan(
     plan: Plan,
     ctx: RunContext,
     handlers: Mapping[ActionKind, Handler] | None = None,
+    before_action: BeforeAction | None = None,
 ) -> RunResult:
     """Apply the selected actions in order, journaling each one first.
+
+    ``before_action`` may change or skip an action just before it runs (see
+    :data:`BeforeAction`); a skip is journaled like a refused action.
 
     ``handlers`` supply ``write`` and ``convert`` actions, which are specific to a tool. A
     handler may journal side effects of its own with :func:`trash_extra` or
@@ -661,6 +669,8 @@ def apply_plan(
     waited_at = 0
     batch_outputs: list[Path] = []  # what this batch wrote, for the upload wait
     executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
+    finished: dict[str, ActionOutcome] = {}  # by source path text, for ``before_action``
+    seen = 0  # how many outcomes are already in ``finished``
     try:
         for seq, action in enumerate(actions, start=1):
             ctx.check_cancelled()
@@ -686,7 +696,19 @@ def apply_plan(
             ctx.report(seq - 1, total, f"{action.kind}: {action.src or action.dst or ''}")
             src = str(action.src) if action.src is not None else None
 
-            refusal = _guard(action, plan, ctx, refused_roots)
+            refusal: str | None = None
+            if before_action is not None:
+                for earlier in result.outcomes[seen:]:
+                    if earlier.src is not None:
+                        finished[earlier.src] = earlier
+                seen = len(result.outcomes)
+                adjusted = before_action(action, finished)
+                if isinstance(adjusted, str):
+                    refusal = adjusted
+                else:
+                    action = adjusted
+            if refusal is None:
+                refusal = _guard(action, plan, ctx, refused_roots)
             if refusal is not None:
                 journal.record_action(
                     run_id,

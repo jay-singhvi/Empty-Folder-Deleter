@@ -102,12 +102,31 @@ def _empty_folders_batch(plan: Plan, actions: list[PlannedAction], checked: bool
     set_folders_selected(plan, folders, checked)
 
 
+def _wrong_extension_hook(plan: Plan, action: PlannedAction, checked: bool) -> None:
+    """Fix File Extensions: a file and its sidecars tick together; a sidecar needs its file."""
+    from various_tools.tools.wrong_extension import set_selected
+
+    set_selected(plan, action, checked)
+
+
+def _wrong_extension_batch(plan: Plan, actions: list[PlannedAction], checked: bool) -> None:
+    from various_tools.tools.wrong_extension import set_many_selected
+
+    set_many_selected(plan, actions, checked)
+
+
 # The only per-tool code in the table. A tool id maps to what a check-box click should do.
-SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
+SELECTION_HOOKS: dict[str, SelectionHook] = {
+    "empty_folders": _empty_folders_hook,
+    "wrong_extension": _wrong_extension_hook,
+}
 # The batch form of a hook: many actions, one value, one pass. Bulk operations use it, so that
 # ticking thousands of rows does not cost one pass over the plan per row.
 BatchSelectionHook = Callable[[Plan, list[PlannedAction], bool], None]
-BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {"empty_folders": _empty_folders_batch}
+BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {
+    "empty_folders": _empty_folders_batch,
+    "wrong_extension": _wrong_extension_batch,
+}
 
 
 # Column titles, in plain words (exports and the CLI keep their own names).

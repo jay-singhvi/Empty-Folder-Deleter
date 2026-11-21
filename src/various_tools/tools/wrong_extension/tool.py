@@ -11,6 +11,10 @@ Safety:
 * junctions and symlinks are never followed (``fs.walk``), and the root is never renamed;
 * the new name never replaces anything: ``unique_destination`` picks a free name, and names that
   other planned renames will take are counted as taken;
+* sidecar files (``name.xmp``, ``name.aae``, ``name.thm`` and ``name.ext.xmp``, any letter case)
+  follow their file as renames of their own, planned right after it and in one group, so they
+  are ticked, applied and undone together. A sidecar whose new name is taken is left alone and
+  noted;
 * ``scan()`` only reads. ``apply()`` runs the plan through the generic engine, which journals
   every rename so History can undo it.
 """
@@ -45,9 +49,10 @@ from various_tools.tools.wrong_extension.signatures import (
 
 log = logging.getLogger(__name__)
 
-HEAD_BYTES = 64
+HEAD_BYTES = 4096  # two MPEG audio frames (MP1, MP2) need more than the usual 64
 DEFAULT_EXCLUDE_GLOBS = (".git", "node_modules")
 TOOL_ID = "wrong_extension"
+SIDECAR_EXTS = (".xmp", ".aae", ".thm")
 
 
 class WrongExtensionOptions(ToolOptions):
@@ -122,6 +127,73 @@ def _free_name(folder: Path, name: str, reserved: set[str]) -> Path:
     return candidate
 
 
+class _Siblings:
+    """The file names in each folder, read once, for sidecar matching (never changes anything)."""
+
+    def __init__(self) -> None:
+        self._folders: dict[str, list[str]] = {}
+
+    def names(self, folder: Path) -> list[str]:
+        key = _key(folder)
+        if key not in self._folders:
+            try:
+                with os.scandir(long_path(folder)) as entries:
+                    self._folders[key] = [
+                        e.name for e in entries if e.is_file(follow_symlinks=False)
+                    ]
+            except OSError as exc:
+                log.warning("Could not list %s: %s", folder, exc)
+                self._folders[key] = []
+        return self._folders[key]
+
+
+def _plan_sidecars(
+    main: PlannedAction,
+    siblings: _Siblings,
+    reserved: set[str],
+    notes: list[str],
+) -> list[PlannedAction]:
+    """Rename actions for the sidecars of ``main``, or an empty list.
+
+    ``<name.ext>.<sidecar ext>`` follows the file's new full name. ``<stem>.<sidecar ext>``
+    follows only when the stem itself changes (a taken name got a ``_dupN`` suffix).
+    """
+    assert main.src is not None and main.dst is not None
+    folder = main.src.parent
+    names = siblings.names(folder)
+    taken = {n.casefold() for n in names}
+    wanted: list[tuple[str, str]] = []  # (old sidecar prefix, new prefix)
+    wanted.append((main.src.name, main.dst.name))
+    if main.src.stem != main.dst.stem:
+        wanted.append((main.src.stem, main.dst.stem))
+    found: list[PlannedAction] = []
+    for old_prefix, new_prefix in wanted:
+        for ext in SIDECAR_EXTS:
+            old_name = next(
+                (n for n in names if n.casefold() == (old_prefix + ext).casefold()), None
+            )
+            if old_name is None:
+                continue
+            new_name = new_prefix + old_name[len(old_prefix) :]
+            old_path = folder / old_name
+            if any(a.src is not None and _key(a.src) == _key(old_path) for a in found):
+                continue
+            target = folder / new_name
+            if new_name.casefold() in taken or _key(target) in reserved:
+                notes.append(f"skipped: sidecar's new name is already taken: {old_path}")
+                continue
+            reserved.add(_key(target))
+            found.append(
+                PlannedAction(
+                    kind=ActionKind.RENAME,
+                    src=old_path,
+                    dst=target,
+                    reason=f"sidecar of {main.src.name}",
+                )
+            )
+    return found
+
+
 class WrongExtension:
     id = TOOL_ID
     name = "Fix File Extensions"
@@ -148,6 +220,8 @@ class WrongExtension:
         wanted_families = set(opts.families)
         reserved: set[str] = set()
         checked = unreadable = 0
+        siblings = _Siblings()
+        claimed: set[str] = set()  # sidecars already planned with another file
         for index, root in enumerate(roots, start=1):
             ctx.report(index - 1, len(roots), f"Scanning {root}")
             for info in walk(root, exclude_globs=opts.exclude_globs):
@@ -164,9 +238,21 @@ class WrongExtension:
                 action = self._plan_rename(info.path, head, reserved)
                 if action is not None:
                     plan.actions.append(action)
+                    sidecars = [
+                        side
+                        for side in _plan_sidecars(action, siblings, reserved, plan.notes)
+                        if side.src is not None and _key(side.src) not in claimed
+                    ]
+                    if sidecars:
+                        action.group_id = f"{action.src}"
+                        for side in sidecars:
+                            assert side.src is not None
+                            claimed.add(_key(side.src))
+                            side.group_id = action.group_id
+                            plan.actions.append(side)
         ctx.report(len(roots), len(roots), "Scan finished")
 
-        found = len(plan.actions)
+        found = sum(1 for a in plan.actions if not a.reason.startswith("sidecar of "))
         plan.notes.insert(
             0,
             f"Found {found} file(s) with the wrong extension among {checked} checked."

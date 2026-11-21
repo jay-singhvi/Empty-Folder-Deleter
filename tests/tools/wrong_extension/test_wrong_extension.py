@@ -219,3 +219,92 @@ def test_protected_roots_are_refused(tmp_path: Path) -> None:
         WrongExtensionOptions.model_validate({"roots": [Path(tmp_path.anchor)]}), _ctx(tmp_path)
     )
     assert plan.actions == [] and plan.roots == [] and plan.notes
+
+
+# ----- sidecar files go with their file --------------------------------------------------------
+
+SIDE = b"sidecar"
+
+
+def test_name_dot_ext_sidecars_follow_the_rename_case_insensitively(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "IMG_1.jpg", PNG)
+    _write(root / "img_1.JPG.XMP", SIDE)  # other letter case: matched too
+    _write(root / "other.jpg.xmp", SIDE)  # not ours
+    before = _files(root)
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    renames = _renames(plan, root)
+    assert renames["IMG_1.jpg"] == "IMG_1.png"
+    assert renames["img_1.JPG.XMP"] == "IMG_1.png.XMP"
+    assert "other.jpg.xmp" not in renames
+    result = TOOL.apply(plan, ctx)
+    assert result.status == "done", [o.detail for o in result.outcomes]
+    assert "IMG_1.png" in _files(root) and "IMG_1.png.XMP" in _files(root)
+    assert {a.kind for a in journal.actions(result.run_id)} == {"rename"}
+    report = undo_run(journal, result.run_id)
+    assert report.failed == () and report.skipped == ()
+    assert _files(root) == before
+
+
+def test_stem_sidecars_follow_when_the_stem_changes(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    _write(root / "photo.jpg", PNG)
+    _write(root / "photo.png", PNG)  # forces the name photo_dup1.png
+    for ext in (".xmp", ".aae", ".thm"):
+        _write(root / f"photo{ext}", SIDE)
+    before = _files(root)
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    renames = _renames(plan, root)
+    assert renames["photo.jpg"] == "photo_dup1.png"
+    for ext in (".xmp", ".aae", ".thm"):
+        assert renames[f"photo{ext}"] == f"photo_dup1{ext}"
+    result = TOOL.apply(plan, ctx)
+    assert result.count("done") == 4
+    undo_run(journal, result.run_id)
+    assert _files(root) == before
+
+
+def test_a_stem_sidecar_stays_when_the_stem_does_not_change(tmp_path: Path, root: Path) -> None:
+    _write(root / "photo.jpg", PNG)
+    _write(root / "photo.xmp", SIDE)
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert _renames(plan, root) == {"photo.jpg": "photo.png"}
+
+
+def test_a_sidecar_whose_new_name_is_taken_is_skipped_and_noted(tmp_path: Path, root: Path) -> None:
+    _write(root / "IMG_1.jpg", PNG)
+    _write(root / "IMG_1.jpg.xmp", SIDE)
+    _write(root / "IMG_1.png.xmp", b"already here")
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    assert _renames(plan, root) == {"IMG_1.jpg": "IMG_1.png"}
+    assert any("IMG_1.jpg.xmp" in note and "skipped" in note for note in plan.notes)
+
+
+def test_a_file_and_its_sidecars_form_one_group_so_they_tick_together(
+    tmp_path: Path, root: Path
+) -> None:
+    _write(root / "a.jpg", PNG)
+    _write(root / "a.jpg.xmp", SIDE)
+    _write(root / "b.jpg", PNG)
+    plan = TOOL.scan(_opts(root), _ctx(tmp_path))
+    by_src = {a.src.name: a for a in plan.actions if a.src is not None}
+    assert by_src["a.jpg"].group_id is not None
+    assert by_src["a.jpg"].group_id == by_src["a.jpg.xmp"].group_id
+    assert by_src["b.jpg"].group_id is None
+    assert "a.jpg" in by_src["a.jpg.xmp"].reason
+
+
+def test_mp2_content_named_mp3_is_renamed_to_mp2(
+    tmp_path: Path, root: Path, journal: Journal
+) -> None:
+    header = b"\xff\xfd\x80\x00"
+    frame = header + b"\x00" * (144 * 128000 // 44100 - 4)
+    _write(root / "song.mp3", frame * 3)
+    _write(root / "tagged.flac", b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 3000)
+    ctx = _ctx(tmp_path, journal)
+    plan = TOOL.scan(_opts(root), ctx)
+    assert _renames(plan, root) == {"song.mp3": "song.mp2"}

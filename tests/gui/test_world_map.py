@@ -349,8 +349,7 @@ def test_the_widget_prunes_the_cache_when_the_source_is_set(qtbot: QtBot, tmp_pa
         "https://tile.example/{z}/{x}/{y}.png", folder, "UA", cache_root=root, cache_limit_mb=2
     )
 
-    left = sorted(p.name for p in folder.rglob("*.png"))
-    assert left == ["b.png", "c.png"]
+    qtbot.waitUntil(lambda: sorted(p.name for p in folder.rglob("*.png")) == ["b.png", "c.png"])
 
 
 # ----- wrapping across the 180 degree line and 50,000 points (part 1, item 6) --------------------
@@ -425,3 +424,65 @@ def test_fifty_thousand_points_cluster_and_paint_fast_enough(qtbot: QtBot) -> No
         widget.set_view(0.0, 179.0 + _ * 0.2, 4)
         widget.grab()
     assert (time.perf_counter() - t1) / 5 < 1.0
+
+
+def test_cache_maintenance_runs_off_the_gui_thread(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    seen: list[int] = []
+
+    def fake_prune(_root: Path, _max_bytes: int) -> int:
+        seen.append(threading.get_ident())
+        return 0
+
+    monkeypatch.setattr(wm, "prune_tile_cache", fake_prune)
+    root = tmp_path / "map_tiles"
+    widget = WorldMap()
+    qtbot.addWidget(widget)
+    widget.set_tile_source(
+        "https://tile.example/{z}/{x}/{y}.png",
+        wm.tile_source_folder(root, "https://tile.example/{z}/{x}/{y}.png"),
+        "UA",
+        cache_root=root,
+        cache_limit_mb=2,
+    )
+    qtbot.waitUntil(lambda: bool(seen))
+    assert seen[0] != threading.get_ident()
+
+
+def test_legacy_folders_are_removed_in_the_background_once_per_session(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        wm, "remove_legacy_tile_folders", lambda _root: calls.append(threading.get_ident())
+    )
+    monkeypatch.setattr(wm, "_LEGACY_DONE", set())
+    thread = wm.remove_legacy_tile_folders_once(tmp_path)
+    assert thread is not None
+    thread.join(10)
+    assert wm.remove_legacy_tile_folders_once(tmp_path) is None  # not again this session
+    assert len(calls) == 1 and calls[0] != threading.get_ident()
+
+
+def test_hit_testing_uses_the_same_margin_copies_as_painting(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtCore import QPointF
+
+    widget = _sized(qtbot)
+    widget.set_points([(0.0, 0.0, "a")])
+    margins: list[float] = []
+    real = widget._copies  # pyright: ignore[reportPrivateUsage]
+
+    def spy(margin_px: float) -> range:
+        margins.append(margin_px)
+        return real(margin_px)
+
+    monkeypatch.setattr(widget, "_copies", spy)
+    widget._cluster_at(QPointF(10, 10))  # pyright: ignore[reportPrivateUsage]
+    assert margins == [40.0]

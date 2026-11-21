@@ -23,6 +23,7 @@ import json
 import math
 import os
 import shutil
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -125,6 +126,42 @@ def remove_legacy_tile_folders(root: Path) -> None:
     for entry in entries:
         if entry.name.isdigit() and entry.is_dir(follow_symlinks=False):
             shutil.rmtree(entry.path, ignore_errors=True)
+
+
+_MAINTENANCE = threading.Lock()  # one cache clean-up at a time
+_LEGACY_DONE: set[str] = set()  # roots whose old folders were already removed this session
+
+
+def prune_tile_cache_in_background(root: Path, max_bytes: int) -> threading.Thread | None:
+    """Run :func:`prune_tile_cache` in a daemon thread, so a big cache never freezes the window.
+
+    Nothing happens when another clean-up is still running (the next save asks again).
+    """
+    if not _MAINTENANCE.acquire(blocking=False):
+        return None
+
+    def run() -> None:
+        try:
+            prune_tile_cache(root, max_bytes)
+        finally:
+            _MAINTENANCE.release()
+
+    thread = threading.Thread(target=run, name="tile-cache-prune", daemon=True)
+    thread.start()
+    return thread
+
+
+def remove_legacy_tile_folders_once(root: Path) -> threading.Thread | None:
+    """Run :func:`remove_legacy_tile_folders` in a daemon thread, once per root and session."""
+    key = os.path.normcase(os.path.abspath(root))
+    if key in _LEGACY_DONE:
+        return None
+    _LEGACY_DONE.add(key)
+    thread = threading.Thread(
+        target=lambda: remove_legacy_tile_folders(root), name="tile-legacy-clean", daemon=True
+    )
+    thread.start()
+    return thread
 
 
 def lonlat_to_world(lon: float, lat: float) -> tuple[float, float]:
@@ -372,7 +409,7 @@ class WorldMap(QWidget):
         self._cache_limit_bytes = max(1, cache_limit_mb) * 1024 * 1024
         self._written_since_prune = 0
         if self._cache_root is not None:
-            prune_tile_cache(self._cache_root, self._cache_limit_bytes)
+            prune_tile_cache_in_background(self._cache_root, self._cache_limit_bytes)
         self._tiles.clear()
         self._pending.clear()
         self._failed.clear()
@@ -513,7 +550,7 @@ class WorldMap(QWidget):
         radii = self._radii(found.counts)
         best: int | None = None
         best_d = math.inf
-        for k in self._copies(0.0):
+        for k in self._copies(40.0):  # the same margin copies as painting
             px = (found.wx + k) * s + ox
             d = np.hypot(px - pos.x(), py - pos.y())
             d = np.where(d <= radii, d, np.inf)
@@ -596,7 +633,7 @@ class WorldMap(QWidget):
                 self._written_since_prune += len(data)
                 if self._cache_root is not None and self._written_since_prune >= _PRUNE_EVERY_BYTES:
                     self._written_since_prune = 0
-                    prune_tile_cache(self._cache_root, self._cache_limit_bytes)
+                    prune_tile_cache_in_background(self._cache_root, self._cache_limit_bytes)
         if self._template is not None:
             self._remember(key, pix)
             self.update()

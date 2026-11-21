@@ -40,7 +40,7 @@ from various_tools.gui.widgets.filter_bar import FilterBar
 from various_tools.gui.widgets.media_grid import MediaGrid
 from various_tools.gui.widgets.world_map import (
     WorldMap,
-    remove_legacy_tile_folders,
+    remove_legacy_tile_folders_once,
     tile_source_folder,
 )
 
@@ -300,7 +300,7 @@ class MapPage(QWidget):
     def _apply_tiles(self, settings: Settings) -> None:
         if settings.map_online_tiles:
             root = settings.resolved_cache_folder() / TILE_FOLDER
-            remove_legacy_tile_folders(root)  # older versions kept pictures of any source here
+            remove_legacy_tile_folders_once(root)  # older versions kept pictures of any source here
             self.map.set_tile_source(
                 settings.map_tile_url,
                 tile_source_folder(root, settings.map_tile_url),

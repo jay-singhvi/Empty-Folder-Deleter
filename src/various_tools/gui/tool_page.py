@@ -758,7 +758,7 @@ class ToolPage(QWidget):
             if name in values and values[name] != PERMANENT
         }
         if self._ws_name:
-            if not self._override or self._override_session_only:
+            if not self._override:
                 remembered.pop(self._ws_name, None)  # the working folder is not a tool option
             if self._override_session_only:  # set by --folder or the shell menu: keep what was
                 remembered[OTHER_FOLDERS_KEY] = (

@@ -702,7 +702,9 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     scan: PageStep,
     tmp_path: Path,
 ) -> None:
-    page = open_tool("empty_folders", str(empty_tree))
+    page = open_tool("empty_folders")
+    page.other_folders_check.setChecked(True)  # the person's own folders are remembered
+    page.form.set_first_folder(str(empty_tree))
     scan(page)  # a scan remembers the folders and options
     assert gui_state.last_options("empty_folders")["roots"] == [str(empty_tree)]
     assert (tmp_path / "data" / "gui_state.json").is_file()
@@ -730,7 +732,9 @@ def test_options_are_remembered_and_reset_keeps_the_folders(
     empty_tree: Path,
     scan: PageStep,
 ) -> None:
-    page = open_tool("empty_folders", str(empty_tree))
+    page = open_tool("empty_folders")
+    page.other_folders_check.setChecked(True)
+    page.form.set_first_folder(str(empty_tree))
     page.form.update_values({"min_age_days": 7})
     scan(page)
 

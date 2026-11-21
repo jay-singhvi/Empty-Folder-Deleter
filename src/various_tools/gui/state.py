@@ -34,6 +34,7 @@ GUI_STATE_FORMAT = 1
 LAST_OPTIONS_KEY = "last_options"
 OLD_LAST_FOLDERS_KEY = "last_folders"
 SHOW_ALL_KEY = "show_all_settings"
+APPLY_PACE_KEY = "apply_pace"
 WORKSPACE_KEY = "workspace"
 RECENT_WORKSPACES_KEY = "recent_workspaces"
 MAX_RECENT_WORKSPACES = 8
@@ -55,6 +56,8 @@ class AppState:
     settings: Settings
     tools: dict[str, Tool]
     deps: ExternalTools = field(init=False)
+    # True once the person has used the Apply window in this session.
+    pace_picked_this_session: bool = field(default=False, init=False)
     _listeners: list[SettingsListener] = field(default_factory=list[SettingsListener])
     _show_all_listeners: list[ShowAllListener] = field(default_factory=list[ShowAllListener])
     _workspace_listeners: list[WorkspaceListener] = field(default_factory=list[WorkspaceListener])
@@ -179,6 +182,25 @@ class AppState:
     def on_show_all_changed(self, listener: ShowAllListener) -> None:
         """Call ``listener(on)`` after every :meth:`set_show_all_settings`."""
         self._show_all_listeners.append(listener)
+
+    # ----- the apply pace ---------------------------------------------------------
+
+    def apply_pace(self) -> dict[str, Any]:
+        """The last choice in the Apply window (mode, batch size, wait, unit); may be empty.
+
+        Kept in the GUI state file even when remembering options is switched off: it is a
+        preference of the Apply window, not an option of a tool.
+        """
+        raw: Any = self._read_gui_state().get(APPLY_PACE_KEY)
+        return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+    def set_apply_pace(self, values: Mapping[str, Any]) -> None:
+        """Store the choice made in the Apply window (this also counts as chosen this session)."""
+        data = self._read_gui_state()
+        data["format"] = GUI_STATE_FORMAT
+        data[APPLY_PACE_KEY] = dict(values)
+        self._write_gui_state(data)
+        self.pace_picked_this_session = True
 
     # ----- the working folder ----------------------------------------------------
 

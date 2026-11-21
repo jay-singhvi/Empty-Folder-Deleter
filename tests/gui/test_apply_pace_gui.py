@@ -13,11 +13,11 @@ from various_tools.core import plan as plan_module
 from various_tools.core.context import Pace
 from various_tools.core.plan import ActionKind, Plan, PlannedAction
 from various_tools.gui.apply_dialog import (
-    PACE_KEY,
     ApplyAsk,
     ApplyDialog,
     estimate_wait,
     onedrive_suggestion,
+    pace_to_preselect,
 )
 from various_tools.gui.state import AppState
 from various_tools.gui.tool_page import ToolPage
@@ -154,7 +154,7 @@ def test_open_dialog_remembers_the_choice(
     page.confirm = page._default_confirm_hook  # pyright: ignore[reportPrivateUsage]
     ask = ApplyAsk("t", "s", 4)
     assert page.choose_pace(ask) == (True, Pace(100, 60))
-    assert gui_state.last_options(PACE_KEY)["batch_size"] == 100
+    assert gui_state.apply_pace()["batch_size"] == 100
     assert seen
 
 
@@ -250,3 +250,25 @@ def test_stop_while_paused_ends_the_run(
     page.cancel_button.click()
     wait_idle(page)
     assert page.result is None or page.result.status == "cancelled"
+
+
+def test_the_pace_choice_is_kept_even_when_remembering_options_is_off(
+    make_state: Any, tmp_path: Path
+) -> None:
+    state: AppState = make_state(remember_last_folders=False)
+    state.set_apply_pace({"mode": "batches", "batch_size": 25, "wait": 3, "unit": "minutes"})
+    again = AppState.load(state.settings_path)
+    assert again.apply_pace()["batch_size"] == 25
+    assert state.pace_picked_this_session and not again.pace_picked_this_session
+
+
+def test_a_remembered_batches_choice_is_preselected_only_when_it_applies() -> None:
+    saved = {"mode": "batches", "batch_size": 25, "wait": 3, "unit": "minutes"}
+    plain = pace_to_preselect(saved, touches_onedrive=False, picked_this_session=False)
+    assert plain["mode"] == "all" and plain["batch_size"] == 25
+    assert pace_to_preselect(saved, touches_onedrive=True, picked_this_session=False) == saved
+    assert pace_to_preselect(saved, touches_onedrive=False, picked_this_session=True) == saved
+    all_at_once = {"mode": "all"}
+    assert pace_to_preselect(all_at_once, touches_onedrive=True, picked_this_session=True) == (
+        all_at_once
+    )

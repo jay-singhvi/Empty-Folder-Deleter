@@ -51,6 +51,32 @@ class ApplyAsk:
     summary: str
     count: int
     suggestion: str | None = None
+    touches_onedrive: bool = False
+
+
+def plan_touches_onedrive(plan: Plan) -> bool:
+    """True when a ticked action reads or writes inside a OneDrive folder (names only)."""
+    return any(
+        (a.src is not None and onedrive.is_inside_onedrive(a.src))
+        or (a.dst is not None and onedrive.is_inside_onedrive(a.dst))
+        for a in plan.actions
+        if a.selected
+    )
+
+
+def pace_to_preselect(
+    saved: Mapping[str, Any], *, touches_onedrive: bool, picked_this_session: bool
+) -> dict[str, Any]:
+    """The remembered pace as the Apply window should preselect it.
+
+    A remembered "in batches" choice is preselected only when the plan touches OneDrive or the
+    person chose it in this session; otherwise the window opens on "all at once" (the numbers
+    are kept, so choosing batches again shows the old ones).
+    """
+    chosen = dict(saved)
+    if chosen.get("mode") == "batches" and not (touches_onedrive or picked_this_session):
+        chosen["mode"] = "all"
+    return chosen
 
 
 def onedrive_suggestion(plan: Plan, sizes: Sequence[int | None]) -> str | None:

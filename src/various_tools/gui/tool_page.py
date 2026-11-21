@@ -80,10 +80,11 @@ from various_tools.core.plan import WAIT_PAUSED_MESSAGE, ActionKind, Plan, RunRe
 from various_tools.core.report import action_sizes
 from various_tools.core.schema import describe, format_value
 from various_tools.gui.apply_dialog import (
-    PACE_KEY,
     ApplyAsk,
     ApplyDialog,
     onedrive_suggestion,
+    pace_to_preselect,
+    plan_touches_onedrive,
 )
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
@@ -962,6 +963,7 @@ class ToolPage(QWidget):
             apply_summary(plan, permanent),
             len(selected),
             onedrive_suggestion(plan, self.table.sizes()),
+            plan_touches_onedrive(plan),
         )
         confirmed, pace = self._ask_to_apply(ask)
         if not confirmed:
@@ -1009,10 +1011,15 @@ class ToolPage(QWidget):
         return self.choose_pace(ask)
 
     def _open_apply_dialog(self, ask: ApplyAsk) -> tuple[bool, Pace | None]:
-        dialog = ApplyDialog(ask, self.state.last_options(PACE_KEY), self)
+        saved = pace_to_preselect(
+            self.state.apply_pace(),
+            touches_onedrive=ask.touches_onedrive,
+            picked_this_session=self.state.pace_picked_this_session,
+        )
+        dialog = ApplyDialog(ask, saved, self)
         if dialog.exec() != ApplyDialog.DialogCode.Accepted:
             return False, None
-        self.state.remember_options(PACE_KEY, dialog.values())
+        self.state.set_apply_pace(dialog.values())
         return True, dialog.pace()
 
     # ----- pause, resume, skip the wait ------------------------------------------------------

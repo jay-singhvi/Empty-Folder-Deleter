@@ -592,6 +592,11 @@ def _is_folder_field(spec: FieldSpec) -> bool:
     return spec.kind == "path" or (spec.kind == "list" and spec.item_kind == "path")
 
 
+def folder_field_names(model: type[BaseModel]) -> list[str]:
+    """Names of a model's folder fields (single or list), in declaration order."""
+    return [s.name for s in describe(model) if _is_folder_field(s)]
+
+
 def _is_path_list(spec: FieldSpec) -> bool:
     return spec.kind == "list" and (spec.widget == "folders" or spec.item_kind == "path")
 
@@ -680,6 +685,7 @@ class SchemaForm(QWidget):
         self._parse_errors: dict[str, str] = {}
         self._errors: dict[str, str] = {}
         self._loading = 0
+        self._hidden: set[str] = set()
         self._advanced_button: QToolButton | None = None
         self._advanced_body: QWidget | None = None
 
@@ -787,6 +793,21 @@ class SchemaForm(QWidget):
         self._apply_visibility()
         self.changed.emit()
         return True
+
+    def hide_field(self, name: str, hidden: bool = True) -> None:
+        """Hide (or show again) one row. A hidden field still holds and returns its value."""
+        if hidden:
+            self._hidden.add(name)
+        else:
+            self._hidden.discard(name)
+        self._apply_visibility()
+
+    def set_field_value(self, name: str, value: Any) -> None:
+        """Show ``value`` in one field without emitting ``changed`` or asking to confirm."""
+        self._load({name: value}, partial=True)
+
+    def field_spec(self, name: str) -> FieldSpec:
+        return self._fields[name].spec
 
     def set_advanced_visible(self, visible: bool) -> None:
         """Expand or collapse the "Advanced options" section."""
@@ -1171,7 +1192,13 @@ class SchemaForm(QWidget):
 
     def _apply_visibility(self) -> None:
         for field in self._fields.values():
-            if field.depends is None or field.layout is None:
+            if field.layout is None:
+                continue
+            if field.spec.name in self._hidden:
+                field.layout.setRowVisible(field.holder, False)
+                continue
+            if field.depends is None:
+                field.layout.setRowVisible(field.holder, True)
                 continue
             other, wanted = field.depends
             current = self._current(other)

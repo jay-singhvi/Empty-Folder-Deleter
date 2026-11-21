@@ -197,7 +197,7 @@ def test_totals_and_checks_update_together(qtbot: QtBot, tmp_path: Path) -> None
     assert plan.actions[0].selected is False
     assert plan.actions[1].selected is True
     assert table.totals_text() == "2 actions, 1 selected, 2.0 KB selected"
-    assert table.totals_label.text() == table.totals_text()
+    assert table.totals_label.text() == table.status_text() == "2 found · 1 ticked (2.0 KB)"
     assert changes == [1]
     table.set_action_checked(1, False)
     assert table.totals_text() == "2 actions, 0 selected, 0 B selected"
@@ -502,3 +502,108 @@ def test_switching_the_full_controls_off_clears_the_kind_filter(
     # A filter nobody can see must not hide rows that Apply would still act on.
     assert top_rows(table) == 2
     assert not table.filter_active()
+
+
+def _big_empty_folders_plan(root: Path, count: int) -> Plan:
+    """``count`` nested folders (each with a child and a junk file) as an empty-folders plan."""
+    from various_tools.tools.empty_folders.tool import JUNK_REASON
+
+    actions: list[PlannedAction] = []
+    for i in range(count // 2):
+        top = root / f"g{i}"
+        child = top / "c"
+        actions.append(PlannedAction(ActionKind.TRASH, top, None, "empty folder"))
+        actions.append(PlannedAction(ActionKind.TRASH, child, None, "empty folder"))
+        actions.append(
+            PlannedAction(ActionKind.TRASH, child / "Thumbs.db", None, f"{JUNK_REASON}: Thumbs.db")
+        )
+    return Plan(tool="empty_folders", roots=[root], actions=actions)
+
+
+def test_empty_folders_batch_form_equals_the_per_row_form(tmp_path: Path) -> None:
+    from various_tools.tools.empty_folders import set_folder_selected, set_folders_selected
+
+    one = _big_empty_folders_plan(tmp_path, 60)
+    two = _big_empty_folders_plan(tmp_path, 60)
+    picks = [i for i in range(0, len(one.actions), 4)]
+    for value in (True, False, True):
+        for i in picks:
+            src = one.actions[i].src
+            assert src is not None
+            set_folder_selected(one, src, value)
+        set_folders_selected(
+            two, [a.src for i, a in enumerate(two.actions) if i in picks and a.src], value
+        )
+        assert [a.selected for a in one.actions] == [a.selected for a in two.actions]
+    # Unticking a child unticks its parent and the junk file inside, in both forms.
+    child = tmp_path / "g1" / "c"
+    set_folder_selected(one, child, False)
+    set_folders_selected(two, [child], False)
+    assert [a.selected for a in one.actions] == [a.selected for a in two.actions]
+    assert not any(a.selected for a in two.actions if a.src and "g1" in a.src.parts)
+
+
+def test_bulk_ticking_thousands_of_empty_folders_is_quick(qtbot: QtBot, tmp_path: Path) -> None:
+    import time
+
+    plan = _big_empty_folders_plan(tmp_path, 5000)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "empty_folders")
+    start = time.monotonic()
+    table.set_shown_checked(False)
+    assert not any(a.selected for a in plan.actions)
+    table.set_shown_checked(True)
+    assert all(a.selected for a in plan.actions)
+    table.tick_only_first(10)
+    assert sum(1 for a in plan.actions if a.selected) >= 10
+    assert time.monotonic() - start < 20  # per-row passes took minutes; one pass takes a second
+
+
+def _flat_plan(root: Path, count: int) -> Plan:
+    return Plan(
+        tool="x",
+        roots=[root],
+        actions=[
+            PlannedAction(
+                ActionKind.MOVE, root / f"{'keep' if i % 2 else 'drop'}{i}.txt", root / "o"
+            )
+            for i in range(count)
+        ],
+    )
+
+
+def test_a_single_tick_with_a_text_filter_does_not_walk_the_list_again(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _flat_plan(tmp_path, 200)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "x")
+    table.filter_edit.setText("keep")
+    assert "100 shown" in table.totals_label.text()
+    walks: list[int] = []
+    real = table.shown_action_indices
+    monkeypatch.setattr(table, "shown_action_indices", lambda: (walks.append(1), real())[1])
+    table.set_action_checked(1, False)
+    table.set_action_checked(3, False)
+    assert walks == [] and "100 shown" in table.totals_label.text()
+    table.filter_edit.setText("drop")
+    assert walks == [1] and "100 shown" in table.totals_label.text()
+
+
+def test_the_model_order_shortcut_applies_with_a_filter_and_no_sort(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    plan = _flat_plan(tmp_path, 40)
+    table = PlanTable()
+    qtbot.addWidget(table)
+    table.set_plan(plan, "x")
+    table.filter_edit.setText("drop")
+    assert table._proxy.sortColumn() < 0  # pyright: ignore[reportPrivateUsage]
+    nodes = table._view_action_nodes()  # pyright: ignore[reportPrivateUsage]
+    assert [n.index for n in nodes] == [i for i in range(40) if i % 2 == 0]
+    table.tick_only_first(3)
+    # The shown ("drop") rows: only the first three stay ticked; the hidden rows are untouched.
+    assert [i for i, a in enumerate(plan.actions) if i % 2 == 0 and a.selected] == [0, 2, 4]
+    assert all(a.selected for i, a in enumerate(plan.actions) if i % 2)

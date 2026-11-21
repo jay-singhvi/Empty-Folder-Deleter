@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,7 @@ from various_tools.cli.state import (
     out,
     usage_error,
 )
+from various_tools.core.context import Pace
 from various_tools.core.plan import ActionKind, Plan, PlannedAction, RunResult
 from various_tools.core.schema import FieldSpec, describe, format_value, parse_value
 from various_tools.tools.base import Tool, ToolOptions
@@ -546,6 +548,37 @@ def _save_plan(plan: Plan, target: str) -> None:
     note(f"Plan saved to {target}")
 
 
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.IGNORECASE)
+_DURATION_UNITS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def parse_duration(text: str) -> float:
+    """Seconds from ``90``, ``30s``, ``5m`` or ``1h`` (a plain number is seconds).
+
+    Raises ``ValueError`` for anything else.
+    """
+    match = _DURATION.match(text)
+    if match is None:
+        raise ValueError(f"{text!r} is not a duration. Use seconds or a number with s, m or h.")
+    return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
+
+
+def _pace_from_flags(batch_size: int | None, pause: str | None) -> Pace | None:
+    """The ``--batch-size`` and ``--pause`` flags as a :class:`Pace`; both or neither."""
+    if batch_size is None and pause is None:
+        return None
+    if batch_size is None or pause is None:
+        usage_error("--batch-size and --pause go together: give both, or neither.")
+    assert batch_size is not None and pause is not None
+    if batch_size < 1:
+        usage_error("--batch-size must be at least 1.")
+    try:
+        seconds = parse_duration(pause)
+    except ValueError as exc:
+        usage_error(f"--pause: {exc}")
+    return Pace(batch_size, seconds)
+
+
 def _apply_exit_code(result: RunResult, selected: int) -> int:
     if result.status == "cancelled":
         return EXIT_CANCELLED
@@ -561,6 +594,7 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
         state = state_with_programs(get_state(kw["ctx"]), kw)
         yes: bool = kw["yes"]
         check_export_target(kw["export"], kw["export_format"], force=kw["force"])
+        pace = _pace_from_flags(kw["batch_size"], kw["pause"])
         overrides = collect_overrides(flags, kw, kw.get("paths"), folders)
         if kw["plan"]:
             if overrides:
@@ -621,7 +655,11 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
             raise typer.Exit(EXIT_FAILED)
 
         outcome = run_job(
-            state, lambda ctx: tool.apply(plan, ctx), label="Applying", with_journal=True
+            state,
+            lambda ctx: tool.apply(plan, ctx),
+            label="Applying",
+            with_journal=True,
+            pace=pace,
         )
         if outcome.value is not None:
             print_result(console, outcome.value)
@@ -658,6 +696,28 @@ def _apply_command(tool: Tool, flags: list[Flag], folders: FieldSpec | None) -> 
                 bool, typer.Option("--yes", help="Do not ask for confirmation (for scripts).")
             ],
             False,
+        ),
+        _param(
+            "batch_size",
+            Annotated[
+                int | None,
+                typer.Option(
+                    "--batch-size",
+                    metavar="N",
+                    help="Apply N actions, then wait (see --pause). Gentle on OneDrive.",
+                ),
+            ],
+        ),
+        _param(
+            "pause",
+            Annotated[
+                str | None,
+                typer.Option(
+                    "--pause",
+                    metavar="DURATION",
+                    help="How long to wait between batches: 90, 30s, 5m or 1h. Needs --batch-size.",
+                ),
+            ],
         ),
         _param(
             "select_all",

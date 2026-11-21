@@ -34,8 +34,11 @@ uses them to find the item in the Recycle Bin, and to recycle an output only if 
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import stat as stat_module
+import time
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -48,7 +51,7 @@ from typing import Any
 from send2trash import send2trash
 
 from various_tools.core import fs, recycle
-from various_tools.core.context import Cancelled, RunContext
+from various_tools.core.context import Cancelled, Pace, RunContext
 from various_tools.core.fs import (
     destination_refusal,
     is_case_only_rename,
@@ -84,9 +87,12 @@ class PlannedAction:
     reason: str = ""
     group_id: str | None = None
     selected: bool = True
+    # Small tool-specific facts to check again at apply time (for example the planned old and
+    # new date of a file). Saved with the plan; only written when it is not empty.
+    extra: dict[str, str] = field(default_factory=dict[str, str])
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "kind": str(self.kind),
             "src": str(self.src) if self.src is not None else None,
             "dst": str(self.dst) if self.dst is not None else None,
@@ -94,6 +100,9 @@ class PlannedAction:
             "group_id": self.group_id,
             "selected": self.selected,
         }
+        if self.extra:
+            data["extra"] = dict(self.extra)
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PlannedAction:
@@ -105,6 +114,7 @@ class PlannedAction:
             reason=str(data.get("reason", "")),
             group_id=data.get("group_id"),
             selected=bool(data.get("selected", True)),
+            extra={str(k): str(v) for k, v in dict(data.get("extra") or {}).items()},
         )
 
 
@@ -408,7 +418,12 @@ def _execute(
 
 @contextmanager
 def extra_action(
-    kind: ActionKind, src: Path | None, dst: Path | None = None, reason: str = ""
+    kind: ActionKind,
+    src: Path | None,
+    dst: Path | None = None,
+    reason: str = "",
+    *,
+    stat_path: Path | None = None,
 ) -> Generator[None]:
     """Journal a side effect of the running ``write``/``convert`` action as its own row.
 
@@ -423,7 +438,8 @@ def extra_action(
     pending, then marked done when the block finishes, or failed (and the error re-raised) when
     it raises. A recycle that raised although the item is gone did happen: it is marked done,
     with the error kept, and nothing is raised. For a ``trash`` row the size and ``mtime_ns``
-    of ``src`` are recorded first. Raises :class:`RuntimeError` outside :func:`apply_plan`.
+    of ``src`` (or of ``stat_path``, when the item sits under another name) are recorded first.
+    Raises :class:`RuntimeError` outside :func:`apply_plan`.
     """
     running = _RUNNING.get()
     if running is None:
@@ -438,7 +454,7 @@ def extra_action(
         raise ActionRefused(f"{kind} of {src or dst} refused: {refusal}")
     row = journal.record_action(run_id, seq, str(kind), src, dst, reason)
     if kind is ActionKind.TRASH:
-        before = _file_stat(src)
+        before = _file_stat(stat_path or src)
         if before is not None:
             journal.set_item_stat(row, *before)
     try:
@@ -462,6 +478,17 @@ def trash_extra(path: Path, reason: str = "") -> None:
         _send_to_trash(path)
 
 
+def trash_replaced(original: Path, aside: Path, reason: str = "") -> None:
+    """Recycle ``aside``, the old content of ``original``, journaled as a ``trash`` row of
+    ``original`` (the row's ``dst`` is the name the Recycle Bin knows it by). A handler uses
+    this after it moved the original aside and put its replacement in place, so the path is
+    never empty and undo still restores the old content to ``original``."""
+    with extra_action(ActionKind.TRASH, original, aside, reason, stat_path=aside):
+        if not os.path.lexists(long_path(aside)):
+            raise FileNotFoundError(f"source is gone: {aside}")
+        _send_to_trash(aside)
+
+
 def _final_destination(action: PlannedAction) -> Path | None:
     """Where a move or rename really goes: collisions are resolved now, so the journal records
     where the file went. A rename that only changes letter case keeps its name."""
@@ -473,6 +500,82 @@ def _final_destination(action: PlannedAction) -> Path | None:
     if action.src is not None and is_case_only_rename(action.src, dst):
         return dst
     return unique_destination(dst.parent, dst.name)
+
+
+log = logging.getLogger(__name__)
+
+_STEP_S = 0.25
+WAIT_PAUSED_MESSAGE = "Paused, waiting for the next batch."
+_sleep = time.sleep  # tests replace this, so pacing never really waits
+_monotonic = time.monotonic  # tests replace this too
+HEARTBEAT_S = 30.0  # a paused or waiting apply touches its journal run at least this often
+
+
+class _Heartbeat:
+    """Touches the journal run while apply waits (pause, pacing), so it never looks stale."""
+
+    def __init__(self, journal: Journal, run_id: int) -> None:
+        self._journal = journal
+        self._run_id = run_id
+        self._last = _monotonic()
+
+    def beat(self) -> None:
+        now = _monotonic()
+        if now - self._last < HEARTBEAT_S:
+            return
+        self._last = now
+        try:
+            self._journal.touch_run(self._run_id)
+        except Exception:  # a failed heartbeat must not stop the apply
+            log.warning("could not touch journal run %s", self._run_id, exc_info=True)
+
+
+def _clock_text(seconds: float) -> str:
+    whole = max(0, math.ceil(seconds))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _honour_pause(ctx: RunContext, done: int, total: int, beat: _Heartbeat) -> None:
+    """Wait while the run is paused; still cancellable."""
+    ctx.skip_wait_event.clear()
+    while ctx.pause_event.is_set():
+        ctx.check_cancelled()
+        beat.beat()
+        ctx.report(done, total, "Paused.")
+        _sleep(_STEP_S)
+
+
+def _wait_between_batches(
+    ctx: RunContext,
+    pace: Pace,
+    batch: int,
+    batches: int,
+    done: int,
+    total: int,
+    beat: _Heartbeat,
+) -> None:
+    """Wait ``pace.pause_s`` after a batch, in short steps. Cancel, pause and skip are honoured."""
+    remaining = pace.pause_s
+    ctx.skip_wait_event.clear()  # a skip asked for earlier must not cut this wait short
+    while remaining > 0:
+        ctx.check_cancelled()
+        beat.beat()
+        if ctx.skip_wait_event.is_set():
+            break
+        if ctx.pause_event.is_set():
+            ctx.report(done, total, WAIT_PAUSED_MESSAGE)
+            _sleep(_STEP_S)
+            continue
+        ctx.report(
+            done, total, f"Batch {batch} of {batches} done. Next batch in {_clock_text(remaining)}."
+        )
+        step = min(_STEP_S, remaining)
+        _sleep(step)
+        remaining -= step
+    ctx.skip_wait_event.clear()
+    ctx.check_cancelled()
 
 
 def apply_plan(
@@ -493,12 +596,30 @@ def apply_plan(
     handler_map: Mapping[ActionKind, Handler] = handlers or {}
 
     run_id = journal.start_run(plan.tool, plan.options_json)
+    ctx.applying_run_id = run_id
+    beat = _Heartbeat(journal, run_id)
     result = RunResult(run_id=run_id, status="done")
     actions = plan.selected_actions()
     total = len(actions)
     refused_roots = _refused_roots(plan, ctx)
+    pace = ctx.pace
+    batches = math.ceil(total / pace.batch_size) if pace is not None else 0
+    waited_at = 0
+    executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
     try:
         for seq, action in enumerate(actions, start=1):
+            ctx.check_cancelled()
+            _honour_pause(ctx, seq - 1, total, beat)
+            if (
+                pace is not None
+                and executed
+                and executed % pace.batch_size == 0
+                and waited_at != executed
+            ):
+                waited_at = executed
+                _wait_between_batches(
+                    ctx, pace, executed // pace.batch_size, batches, seq - 1, total, beat
+                )
             ctx.check_cancelled()
             ctx.report(seq - 1, total, f"{action.kind}: {action.src or action.dst or ''}")
             src = str(action.src) if action.src is not None else None
@@ -527,6 +648,7 @@ def apply_plan(
                 )
                 continue
 
+            executed += 1
             final_dst = _final_destination(action)
             action_id = journal.record_action(
                 run_id, seq, str(action.kind), action.src, final_dst, action.reason
@@ -575,4 +697,5 @@ def apply_plan(
     if result.status != "cancelled":
         result.status = "partial" if result.count("failed") else "done"
     journal.finish_run(run_id, result.status)
+    ctx.applying_run_id = None
     return result

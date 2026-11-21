@@ -27,6 +27,8 @@ from typing import Any
 
 from PySide6.QtCore import (
     QAbstractItemModel,
+    QEvent,
+    QItemSelection,
     QItemSelectionModel,
     QModelIndex,
     QObject,
@@ -36,7 +38,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -45,6 +47,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPushButton,
+    QSpinBox,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -56,6 +60,15 @@ from various_tools.gui.plan_edit import human_size
 from various_tools.gui.wording import kind_label
 
 ALL_KINDS = "All kinds"
+SHOW_ALL = "all"
+SHOW_TICKED = "ticked"
+SHOW_UNTICKED = "unticked"
+SHOW_LABELS: dict[str, str] = {
+    SHOW_ALL: "All",
+    SHOW_TICKED: "Ticked",
+    SHOW_UNTICKED: "Not ticked",
+}
+DEFAULT_TICK_FIRST = 100
 EM_DASH = "—"
 SORT_ROLE = int(Qt.ItemDataRole.UserRole)
 
@@ -73,8 +86,23 @@ def _empty_folders_hook(plan: Plan, action: PlannedAction, checked: bool) -> Non
     set_folder_selected(plan, action.src, checked)
 
 
+def _empty_folders_batch(plan: Plan, actions: list[PlannedAction], checked: bool) -> None:
+    """The same as ``_empty_folders_hook`` for each action, in one pass over the plan."""
+    from various_tools.tools.empty_folders import set_folders_selected
+
+    folders = [a.src for a in actions if a.src is not None]
+    for action in actions:
+        if action.src is None:
+            action.selected = checked
+    set_folders_selected(plan, folders, checked)
+
+
 # The only per-tool code in the table. A tool id maps to what a check-box click should do.
 SELECTION_HOOKS: dict[str, SelectionHook] = {"empty_folders": _empty_folders_hook}
+# The batch form of a hook: many actions, one value, one pass. Bulk operations use it, so that
+# ticking thousands of rows does not cost one pass over the plan per row.
+BatchSelectionHook = Callable[[Plan, list[PlannedAction], bool], None]
+BATCH_SELECTION_HOOKS: dict[str, BatchSelectionHook] = {"empty_folders": _empty_folders_batch}
 
 
 # Column titles, in plain words (exports and the CLI keep their own names).
@@ -381,6 +409,18 @@ class PlanModel(QAbstractItemModel):
             text += f", {human_size(known)} selected"
         return text
 
+    def status_text(self) -> str:
+        """ "2,113 found · 150 ticked (4.4 GB)": what the list holds and what is ticked."""
+        if self._plan is None:
+            return "No plan"
+        actions = self._plan.actions
+        ticked = [i for i, a in enumerate(actions) if a.selected]
+        text = f"{len(actions):,} found · {len(ticked):,} ticked"
+        if any(s is not None for s in self._sizes):
+            known = sum(s for s in (self._sizes[i] for i in ticked) if s is not None)
+            text += f" ({human_size(known)})"
+        return text
+
     # ----- check states -----------------------------------------------------------------
 
     def _group_state(self, node: Node) -> Qt.CheckState:
@@ -412,20 +452,39 @@ class PlanModel(QAbstractItemModel):
         targets = [n for n in _subtree_actions(node) if n is node or shown is None or shown(n)]
         self.set_actions_checked(targets, checked)
 
-    def set_actions_checked(self, targets: Iterable[Node], checked: bool) -> None:
-        """Check or uncheck these action rows, each through the tool's selection hook."""
+    def _apply_checked(self, targets: Iterable[Node], checked: bool) -> None:
         plan = self._plan
-        if plan is None or not self._editable:
+        if plan is None:
             return
+        actions = [t.action for t in targets if t.action is not None]
+        batch = BATCH_SELECTION_HOOKS.get(self._tool_id)
         hook = SELECTION_HOOKS.get(self._tool_id)
-        for target in targets:
-            action = target.action
-            if action is None:
-                continue
+        if batch is not None and len(actions) > 1:
+            batch(plan, actions, checked)
+            return
+        for action in actions:
             if hook is not None:
                 hook(plan, action, checked)
             else:
                 action.selected = checked
+
+    def set_actions_checked(self, targets: Iterable[Node], checked: bool) -> None:
+        """Check or uncheck these action rows, each through the tool's selection hook.
+
+        The views are told once, after the last row, never per row.
+        """
+        if self._plan is None or not self._editable:
+            return
+        self._apply_checked(targets, checked)
+        self.refresh_checks()
+        self.checksChanged.emit()
+
+    def tick_only(self, universe: Iterable[Node], ticked: Iterable[Node]) -> None:
+        """Uncheck every row of ``universe``, then check ``ticked``; one update at the end."""
+        if self._plan is None or not self._editable:
+            return
+        self._apply_checked(universe, False)
+        self._apply_checked(ticked, True)
         self.refresh_checks()
         self.checksChanged.emit()
 
@@ -595,22 +654,27 @@ class _PlanProxy(QSortFilterProxyModel):
         self._model = model
         self._text = ""
         self._kind = ""
+        self._tick = SHOW_ALL
         self.setSourceModel(model)
         self.setSortRole(SORT_ROLE)
+        # A check-box change must not re-run the filter over every row (100,000 rows take
+        # seconds); the table re-filters itself when the Show filter needs it.
+        self.setDynamicSortFilter(False)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.setRecursiveFilteringEnabled(True)
 
-    def set_filters(self, text: str, kind: str) -> None:
+    def set_filters(self, text: str, kind: str, tick: str = SHOW_ALL) -> None:
         # begin/endFilterChange replace the deprecated invalidateFilter() (Qt 6.10+).
         self.beginFilterChange()
         self._text = text.strip().casefold()
         self._kind = kind
+        self._tick = tick
         self.endFilterChange()
 
     @property
     def active(self) -> bool:
-        """True while a text or kind filter hides rows (or could)."""
-        return bool(self._text or self._kind)
+        """True while a text, kind or ticked filter hides rows (or could)."""
+        return bool(self._text or self._kind or self._tick != SHOW_ALL)
 
     def shows(self, node: Node) -> bool:
         """The row is shown by the current filter (its parents too)."""
@@ -625,8 +689,12 @@ class _PlanProxy(QSortFilterProxyModel):
         action = node.action
         if action is None:
             # A group shows only when one of its children does (recursive filtering).
-            return not self._text and not self._kind
+            return not self.active
         if self._kind and str(action.kind) != self._kind:
+            return False
+        if self._tick == SHOW_TICKED and not action.selected:
+            return False
+        if self._tick == SHOW_UNTICKED and action.selected:
             return False
         if not self._text:
             return True
@@ -658,6 +726,7 @@ class PlanTable(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._model = PlanModel(self)
+        self._shown_count: int | None = None  # cached "N shown" while a filter is on
         self._proxy = _PlanProxy(self._model, self)
         self._model.set_shown_filter(self._proxy.shows)
 
@@ -674,6 +743,24 @@ class PlanTable(QWidget):
             "check boxes that cover everything inside a folder."
         )
         self.totals_label = QLabel("No plan")
+        # The selection row is always visible (not only with "Show all settings").
+        self.tick_all_button = QPushButton("Tick all")
+        self.untick_all_button = QPushButton("Untick all")
+        self.tick_first_label = QLabel("Tick only the first")
+        self.tick_first_spin = QSpinBox()
+        self.tick_first_spin.setRange(1, 10_000_000)
+        self.tick_first_spin.setValue(DEFAULT_TICK_FIRST)
+        self.tick_first_spin.setGroupSeparatorShown(True)
+        self.tick_first_button = QPushButton("▸")
+        self.tick_first_button.setToolTip(
+            "Untick every row that is shown, then tick the first rows in the order of the list."
+        )
+        self.tick_first_button.setAccessibleName("Tick only the first rows")
+        self.show_label = QLabel("Show:")
+        self.show_combo = QComboBox()
+        for mode, label in SHOW_LABELS.items():
+            self.show_combo.addItem(label, mode)
+        self.show_combo.setToolTip("Show every row, only the ticked rows or only the others.")
 
         self.view = QTreeView()
         self.view.setModel(self._proxy)
@@ -692,6 +779,7 @@ class PlanTable(QWidget):
         self.reveal: Callable[[Path], bool] = reveal.show_in_explorer
         self.open_file: Callable[[Path], bool] = reveal.open_path
         self.confirm: Callable[[str, str], bool] = self._default_confirm
+        self.show_properties: Callable[[Path], bool] = reveal.show_properties
 
         top = QHBoxLayout()
         self._toolbar = top
@@ -706,10 +794,26 @@ class PlanTable(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top)
+        picking = QHBoxLayout()
+        self._selection_row = picking
+        for widget in (self.tick_all_button, self.untick_all_button):
+            picking.addWidget(widget)
+        picking.addSpacing(12)
+        for widget in (self.tick_first_label, self.tick_first_spin, self.tick_first_button):
+            picking.addWidget(widget)
+        picking.addStretch(1)
+        picking.addWidget(self.show_label)
+        picking.addWidget(self.show_combo)
+        layout.addLayout(picking)
         layout.addWidget(self.view, 1)
         layout.addWidget(self.totals_label)
 
         self.filter_edit.textChanged.connect(self._filters_changed)
+        self.show_combo.currentIndexChanged.connect(self._filters_changed)
+        self.tick_first_button.clicked.connect(lambda _c=False: self.tick_only_first())
+        self.find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.find_shortcut.activated.connect(self.focus_filter)
+        self.view.installEventFilter(self)
         self.kind_combo.currentIndexChanged.connect(self._filters_changed)
         self.view_combo.currentIndexChanged.connect(self._view_chosen)
         self._model.checksChanged.connect(self._on_checks_changed)
@@ -860,6 +964,140 @@ class PlanTable(QWidget):
     def editable(self) -> bool:
         return self._model.editable
 
+    def set_selection_enabled(self, enabled: bool) -> None:
+        """Enable or disable the "Tick only the first" controls (the page owns the other two
+        buttons)."""
+        self.tick_first_spin.setEnabled(enabled)
+        self.tick_first_button.setEnabled(enabled)
+
+    def focus_filter(self) -> None:
+        """Ctrl+F: put the cursor in the filter box."""
+        self.filter_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.filter_edit.selectAll()
+
+    def _view_action_nodes(self) -> list[Node]:
+        """The action rows the filter shows, in the order the list shows them (sort included)."""
+        proxy, model = self._proxy, self._model
+        if proxy.sortColumn() < 0 and self.view.header().sortIndicatorSection() < 0:
+            # No sort column: the list shows the rows in model order (a filter only hides some).
+            return [n for n in model.all_nodes() if n.action is not None and proxy.shows(n)]
+        found: list[Node] = []
+
+        def visit(parent: QModelIndex) -> None:
+            for row in range(proxy.rowCount(parent)):
+                index = proxy.index(row, 0, parent)
+                node = model.node_at(proxy.mapToSource(index))
+                if node is not None and node.action is not None:
+                    found.append(node)
+                if proxy.hasChildren(index):
+                    visit(index)
+
+        visit(QModelIndex())
+        return found
+
+    def tick_only_first(self, count: int | None = None) -> int:
+        """Untick every shown row, then tick the first ``count`` shown rows in the order of the
+        list (the spin box value when ``count`` is None). Returns how many rows are ticked."""
+        if self._model.plan is None or not self._model.editable:
+            return 0
+        wanted = self.tick_first_spin.value() if count is None else count
+        nodes = self._view_action_nodes()
+        first = nodes[: max(wanted, 0)]
+        self._model.tick_only(nodes, first)
+        return len(first)
+
+    def highlight_all_shown(self) -> int:
+        """Ctrl+A: highlight every row the filter shows, also inside folded groups."""
+        proxy = self._proxy
+        selection = QItemSelection()
+        last = proxy.columnCount() - 1
+        count = 0
+
+        def visit(parent: QModelIndex) -> None:
+            nonlocal count
+            rows = proxy.rowCount(parent)
+            if not rows:
+                return
+            selection.select(proxy.index(0, 0, parent), proxy.index(rows - 1, last, parent))
+            count += rows
+            for row in range(rows):
+                index = proxy.index(row, 0, parent)
+                if proxy.hasChildren(index):
+                    visit(index)
+
+        visit(QModelIndex())
+        self.view.selectionModel().select(
+            selection, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+        return count
+
+    def _highlighted_nodes(self) -> list[Node]:
+        """The action rows that are highlighted. A highlighted group or folder row stands for
+        the shown rows below it. Each action once."""
+        seen: set[int] = set()
+        result: list[Node] = []
+        proxy, model = self._proxy, self._model
+        # Walk the selected ranges (selectedRows() is far too slow for 100,000 rows).
+        blocks = self.view.selectionModel().selection()
+        for k in range(blocks.count()):
+            block = blocks.at(k)
+            parent = block.parent()
+            for row in range(block.top(), block.bottom() + 1):
+                node = model.node_at(proxy.mapToSource(proxy.index(row, 0, parent)))
+                if node is None:
+                    continue
+                if node.action is None:
+                    targets = [t for t in _subtree_actions(node) if proxy.shows(t)]
+                else:
+                    targets = [node]
+                for target in targets:
+                    if target.index not in seen:
+                        seen.add(target.index)
+                        result.append(target)
+        return result
+
+    def highlighted_action_indices(self) -> list[int]:
+        """Plan positions of the highlighted actions (see :meth:`_highlighted_nodes`)."""
+        return [n.index for n in self._highlighted_nodes()]
+
+    def tick_highlighted(self, checked: bool) -> int:
+        nodes = self._highlighted_nodes()
+        self._model.set_actions_checked(nodes, checked)
+        return len(nodes)
+
+    def tick_only_highlighted(self) -> int:
+        """Untick every shown row, then tick the highlighted ones."""
+        nodes = self._highlighted_nodes()
+        self._model.tick_only(self._view_action_nodes(), nodes)
+        return len(nodes)
+
+    def toggle_highlighted(self) -> int:
+        """Space: tick or untick the highlighted rows, all to the opposite of the first one."""
+        nodes = self._highlighted_nodes()
+        if not nodes:
+            return 0
+        if len(nodes) > 1:
+            position = {n.index: i for i, n in enumerate(self._view_action_nodes())}
+            nodes.sort(key=lambda n: position.get(n.index, len(position)))
+        first = nodes[0].action
+        assert first is not None
+        self._model.set_actions_checked(nodes, not first.selected)
+        return len(nodes)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched is self.view and event.type() == QEvent.Type.KeyPress:
+            assert isinstance(event, QKeyEvent)
+            mods = event.modifiers()
+            if event.key() == Qt.Key.Key_A and mods == Qt.KeyboardModifier.ControlModifier:
+                self.highlight_all_shown()
+                return True
+            space = event.key() == Qt.Key.Key_Space and mods == Qt.KeyboardModifier.NoModifier
+            if space and self.view.selectionModel().hasSelection():
+                if self._model.editable:
+                    self.toggle_highlighted()
+                return True
+        return super().eventFilter(watched, event)
+
     def set_editable(self, editable: bool) -> None:
         """Allow or forbid changing the check boxes (the tool page forbids it while busy)."""
         self._model.set_editable(editable)
@@ -867,35 +1105,74 @@ class PlanTable(QWidget):
     def totals_text(self) -> str:
         return self._model.totals_text()
 
+    def status_text(self) -> str:
+        """The line under the list, for example "2,113 found · 150 ticked (4.4 GB)"."""
+        return self._model.status_text()
+
     # ----- right-click menu ------------------------------------------------------------------
 
     def context_menu_at(self, pos: QPoint) -> QMenu | None:
         """The right-click menu for the row at ``pos`` (viewport coordinates), not shown yet.
 
-        One "show" entry per place the row is about (for a duplicate: this copy and the kept
-        copy), then Open and Copy path for the row's own file. Entries for a path that no
-        longer exists are disabled. None when there is no row at ``pos``.
+        It acts on the highlighted rows (the row under the cursor is highlighted first when it
+        is not part of the highlight): Tick, Untick, Tick only these. With one row: one "show"
+        entry per place the row is about (for a duplicate: this copy and the kept copy), then
+        Open, Properties and Copy path for the row's own file; entries for a path that no
+        longer exists are disabled. With several rows only Copy paths is available. None when
+        there is no row at ``pos``.
         """
-        node = self._model.node_at(self._proxy.mapToSource(self.view.indexAt(pos)))
+        proxy_index = self.view.indexAt(pos)
+        node = self._model.node_at(self._proxy.mapToSource(proxy_index))
         if node is None:
             return None
+        selection = self.view.selectionModel()
+        if not selection.isRowSelected(proxy_index.row(), proxy_index.parent()):
+            selection.select(
+                proxy_index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        rows = self._highlighted_nodes()
+        menu = QMenu(self.view)
+        editable = self._model.editable
+        for label, handler in (
+            ("Tick", lambda: self.tick_highlighted(True)),
+            ("Untick", lambda: self.tick_highlighted(False)),
+            ("Tick only these", self.tick_only_highlighted),
+        ):
+            entry = menu.addAction(label)
+            entry.setEnabled(editable and bool(rows))
+            entry.triggered.connect(lambda _c=False, h=handler: h())
+        menu.addSeparator()
+        menu.setToolTipsVisible(True)
+        if len(rows) > 1:
+            for label in ("Open", reveal.SHOW, "Properties"):
+                entry = menu.addAction(label)
+                entry.setEnabled(False)
+                entry.setToolTip("Highlight a single row to use this.")
+            paths = [p for p in (_action_path(n.action) for n in rows if n.action) if p]
+            copy_entry = menu.addAction("Copy paths")
+            copy_entry.triggered.connect(
+                lambda _c=False, ps=paths: self._copy_text("\n".join(str(p) for p in ps))
+            )
+            return menu
         targets = reveal.reveal_targets(node.action, node.path, self._model.is_duplicates())
         if not targets:
-            return None
-        menu = QMenu(self.view)
+            return menu if editable else None
         for target in targets:
             entry = menu.addAction(target.label)
             entry.setEnabled(target.exists)
             entry.setToolTip(str(target.path))
             entry.triggered.connect(lambda _c=False, p=target.path: self.reveal(p))
         own = targets[0]
-        menu.addSeparator()
         open_entry = menu.addAction("Open")
         open_entry.setEnabled(own.exists and not own.is_destination)
         open_entry.triggered.connect(lambda _c=False, p=own.path: self._open(p))
+        properties = menu.addAction("Properties")
+        properties.setEnabled(own.exists)
+        properties.triggered.connect(lambda _c=False, p=own.path: self.show_properties(p))
         copy_entry = menu.addAction("Copy path")
         copy_entry.triggered.connect(lambda _c=False, p=own.own_path: self._copy_path(p))
-        menu.setToolTipsVisible(True)
         return menu
 
     def _show_context_menu(self, pos: QPoint) -> None:
@@ -915,10 +1192,14 @@ class PlanTable(QWidget):
         return self.open_file(path)
 
     @staticmethod
-    def _copy_path(path: Path) -> None:
+    def _copy_text(text: str) -> None:
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
-            clipboard.setText(str(path))
+            clipboard.setText(text)
+
+    @classmethod
+    def _copy_path(cls, path: Path) -> None:
+        cls._copy_text(str(path))
 
     def _default_confirm(self, title: str, text: str) -> bool:
         answer = QMessageBox.question(
@@ -971,17 +1252,18 @@ class PlanTable(QWidget):
             expanded, known = self._expanded_groups()
             node = self._current_node()
             current_action = node.action if node is not None else None
+        self._shown_count = None
         self.view.setUpdatesEnabled(False)
         try:
             self._model.load(plan, tool_id, sizes, mode)
             self._sync_kinds()
-            self._proxy.set_filters(self.filter_edit.text(), self._kind_filter())
+            self._proxy.set_filters(self.filter_edit.text(), self._kind_filter(), self._tick_mode())
             self._restore_view(keep, expanded, known, current_action)
             if not keep:
                 self._set_column_widths()
         finally:
             self.view.setUpdatesEnabled(True)
-        self.totals_label.setText(self._model.totals_text())
+        self._update_status()
         if not keep:
             self.currentActionChanged.emit(None)
 
@@ -1041,17 +1323,33 @@ class PlanTable(QWidget):
             return ""
         return str(self.kind_combo.currentData())
 
+    def _tick_mode(self) -> str:
+        mode = self.show_combo.currentData()
+        return mode if isinstance(mode, str) else SHOW_ALL
+
     def _filters_changed(self, *_: object) -> None:
+        self._shown_count = None
         kind = self._kind_filter()
-        self._proxy.set_filters(self.filter_edit.text(), kind)
-        if (self.filter_edit.text().strip() or kind) and (
-            self._proxy.rowCount() <= self.MAX_AUTO_EXPAND_GROUPS
-        ):
+        self._proxy.set_filters(self.filter_edit.text(), kind, self._tick_mode())
+        if self._proxy.active and self._proxy.rowCount() <= self.MAX_AUTO_EXPAND_GROUPS:
             self.view.expandAll()
+        self._update_status()
         self.filterChanged.emit(self._proxy.active)
 
+    def _update_status(self) -> None:
+        text = self._model.status_text()
+        if self._proxy.active and self._model.plan is not None:
+            if self._shown_count is None:  # walked once per filter change, not once per tick
+                self._shown_count = len(self.shown_action_indices())
+            text += f" · {self._shown_count:,} shown"
+        self.totals_label.setText(text)
+
     def _on_checks_changed(self) -> None:
-        self.totals_label.setText(self._model.totals_text())
+        if self._tick_mode() != SHOW_ALL:
+            # Rows moved in or out of the Ticked / Not ticked view.
+            self._proxy.set_filters(self.filter_edit.text(), self._kind_filter(), self._tick_mode())
+            self._shown_count = None
+        self._update_status()
         self.selectionChanged.emit()
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:

@@ -5,6 +5,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.6.0: one working folder, apply in batches, a real photo browser (2026-11-20)
+
+Owner's request: applying 2,113 resized OneDrive files (62 GB) at once could swamp OneDrive; no
+quick way to tick only 100 of 2,000, no Ctrl+A or Properties; every tool asks for the same
+folder; no Settings or Exit button; too much on screen; Timeline and Map too basic; no way to
+fix a wrong date. The owner left every decision to the builder. Design:
+`docs/superpowers/specs/2026-11-20-workspace-and-photos-design.md` (with a UX audit).
+
+- **Menu bar and toolbar:** *File* (Choose working folder… Ctrl+O, Recent folders, Settings…
+  Ctrl+,, Exit Ctrl+Q), *View* (Show all settings, Show log Ctrl+L, Find a tool Ctrl+K, Home),
+  *Help* (Keyboard shortcuts, Open settings folder, About). The toolbar has the working
+  folder, History and Settings.
+- **One working folder for every tool** (`gui_state.json`, last 8 remembered). A tool page says
+  "Looks in: the working folder (…)"; *Use other folders for this tool* shows its own folder
+  field again (remembered per tool). Temp Cleaner keeps its own folders (`workspace_field =
+  None`). When the working folder changes, a page that already shows a list keeps it and says
+  "Look again"; an old list is never applied to a new folder.
+- **Home page:** the working folder, tool cards by category, the last 5 runs.
+- **Less on screen:** after a scan the settings fold into a one-line summary (*Change
+  settings*), and thousands of "skipped: …" notes fold into counts with *Show details*.
+- **Results list:** *Tick all*, *Untick all*, *Tick only the first [N]* and *Show: All / Ticked /
+  Not ticked* are always visible; "2,113 found · 150 ticked (4.4 GB)". Ctrl+A highlights all
+  rows, Space ticks or unticks the highlighted rows, Ctrl+F jumps to the filter. Right-click:
+  Tick, Untick, Tick only these, Open, Show in File Explorer, **Properties**, Copy path(s).
+- **Apply in batches:** the Apply window offers *All at once* or *In batches of N files, then
+  wait X* (presets: 50 then 5 minutes, 100 then 1 minute, 1 then 2 seconds), with the extra
+  waiting time shown. Batches are suggested when the job touches OneDrive and is over 1 GB or
+  500 files. While it runs: Pause, Resume, Skip the wait, Stop. It is still one run in History,
+  undone in one go. CLI: `<tool> apply --batch-size 50 --pause 5m`.
+- **Photos & videos:** Timeline and Map share one library and one filter bar (search,
+  photos/videos, from/to month, folder); library folders live in a *Library folders…* dialog.
+  Timeline is one scrolling grid by month with day headings, a year/month jump list, a
+  thumbnail size slider (Ctrl+wheel), a preview pane (I), and a full-window viewer (Enter,
+  arrows, Esc). Right-click: Open, Edit, Show in File Explorer, Properties, Copy path(s),
+  Show on map, **Change date…**. Map: the clicked group's photos in a side panel, hover
+  details, Fit all, double-click zoom, and a banner offering the detailed online map (still off
+  by default).
+- **New tool Change date** (`set_date`, Organize; also from the Timeline): set an exact date,
+  only the month and year (day and time kept), or shift by days/hours/minutes. It shows old →
+  new first; with ExifTool it writes the taken date into the file, without it only the
+  modified date. The original goes to the Recycle Bin, so History can undo it. Cloud-only
+  files are skipped.
+- **Review fixes:**
+  - An apply that is paused or waiting between batches touches its journal run (a heartbeat,
+    at least every 30 seconds), and History and the tool pages refuse to undo a run that a
+    live worker in this program is applying.
+  - Change date applies the dates the preview planned (kept in the action) and never works
+    them out again, so applying one plan twice cannot shift a date twice; a file whose date
+    changed since the preview is left alone. The copy now takes the original's place before
+    the old content is recycled (the path is never empty); the journal row stays under the
+    original path, so History undo still restores it. The dialog clears its plan on every end
+    path and survives a failed library refresh. Skipped notes read "skipped: reason: path".
+    The tool no longer defaults to the whole working folder.
+  - A scan that started under another working folder shows the "working folder changed"
+    banner. A one-folder tool (Project Export) says it uses the first working folder. A folder
+    set by the shell menu or `--folder` is not remembered as "Use other folders".
+  - Ticking thousands of Empty Folders rows is one pass (it froze the window); the results list
+    caches its "shown" count and keeps the model-order shortcut with a filter and no sort.
+  - Skip the wait is offered only during "Next batch in..." waits, and an old skip no longer
+    cuts a later wait short. The pace choice is kept even when remembering options is off; a
+    remembered "in batches" choice is preselected only for OneDrive plans or after choosing it
+    in this session.
+  - Photo grid: right-click does not stat every selected file, paths are looked up through an
+    index, and a resize that keeps the column count does not lay the grid out again. Show on
+    map before the Map was ever shown waits for the map's size, and says when it cleared a
+    filter.
+- **Known, left for later:** Change date does not read a video's new date back after writing
+  it (photos are checked).
+- Version 0.6.0.
+
 ### Version 0.5.0: photo timeline, photo map and two new tools (2026-11-19)
 
 Owner's request: see all photos and videos on a timeline and on a world map, kept up to date

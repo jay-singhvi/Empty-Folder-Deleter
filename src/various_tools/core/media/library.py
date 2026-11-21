@@ -92,6 +92,59 @@ def media_kind(path: Path) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class MediaFilter:
+    """What the Timeline and the Map show: the same filter on both.
+
+    ``text`` matches the file name or the folder (every word must appear, any case); ``kind`` is
+    ``"photo"``, ``"video"`` or ``"both"``; ``start`` and ``end`` are ``(year, month)`` and
+    include both months (an item without a date never passes a date range); ``folder`` keeps
+    the items inside that folder.
+    """
+
+    text: str = ""
+    kind: str = "both"
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    folder: Path | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self == MediaFilter()
+
+
+def filter_items(items: Iterable[MediaItem], flt: MediaFilter) -> list[MediaItem]:
+    """The items that pass ``flt``, in their order."""
+    if flt.is_empty:
+        return list(items)
+    words = flt.text.casefold().split()
+    start, end = flt.start, flt.end
+    if start is not None and end is not None and start > end:
+        start, end = end, start
+    prefix = None
+    if flt.folder is not None:
+        folder = os.path.normcase(str(flt.folder))
+        prefix = folder if folder.endswith(os.sep) else folder + os.sep
+    found: list[MediaItem] = []
+    for item in items:
+        if flt.kind in ("photo", "video") and item.kind != flt.kind:
+            continue
+        if start is not None or end is not None:
+            if item.taken is None:
+                continue
+            month = (item.taken.year, item.taken.month)
+            if (start is not None and month < start) or (end is not None and month > end):
+                continue
+        if prefix is not None and not os.path.normcase(str(item.path)).startswith(prefix):
+            continue
+        if words:
+            haystack = str(item.path).casefold()
+            if not all(w in haystack for w in words):
+                continue
+        found.append(item)
+    return found
+
+
 def sort_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     """By date taken (items without one last), then by path."""
     return sorted(
@@ -171,6 +224,23 @@ class MediaLibrary:
     def with_location(self, roots: Sequence[Path] | None = None) -> list[MediaItem]:
         """Items that have a GPS position, in the same order as :meth:`items`."""
         return [i for i in self.items(roots) if i.lat is not None and i.lon is not None]
+
+    def refresh_paths(self, paths: Iterable[Path], ctx: RunContext) -> int:
+        """Read these files again (for example after their date was changed) and store them.
+
+        A file that is gone loses its row. A cloud-only file is stored without being opened
+        (rule 3). Returns how many rows were written or removed.
+        """
+        count = 0
+        for path in paths:
+            item = read_media_item(path, ctx)
+            if item is None:
+                self.forget(path)
+            else:
+                self._store(_key(path), item)
+            count += 1
+        self._conn.commit()
+        return count
 
     def forget(self, path: Path) -> None:
         """Drop one file's row (for example after the user deleted it from the app)."""
@@ -274,6 +344,23 @@ class MediaLibrary:
                 int(item.cloud_only),
             ),
         )
+
+
+def read_media_item(path: Path, ctx: RunContext) -> MediaItem | None:
+    """The library's view of one file (date, place, size), read the way ``sync`` reads it.
+
+    None when the file is gone or is not a photo or video. A cloud-only file is not opened
+    (rule 3): it gets its modified date and ``cloud_only`` set.
+    """
+    if media_kind(path) is None:
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    cloud = not onedrive.is_on_device(onedrive.get_sync_status(path))
+    info = FileInfo(path, stat.st_size, stat.st_mtime, 0)
+    return _read_file(info, cloud, ctx, need_note=False)[0]
 
 
 def _read_file(

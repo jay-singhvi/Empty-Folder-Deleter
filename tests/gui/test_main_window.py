@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
 from pytestqt.qtbot import QtBot
 
 from various_tools import __version__
@@ -46,3 +47,21 @@ def test_status_bar_shows_busy_while_a_page_works(
     assert "Working" in window.statusBar().currentMessage()
     page.busyChanged.emit(False)
     assert window.statusBar().currentMessage() == "Ready"
+
+
+def test_timeline_show_on_map_opens_the_map_centred_on_the_item(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from various_tools.gui.main_window import TIMELINE_ID
+    from various_tools.gui.map_page import MapPage
+    from various_tools.gui.timeline_page import TimelinePage
+
+    focused: list[Path] = []
+    monkeypatch.setattr(MapPage, "focus_item", lambda _self, path: focused.append(path) or True)
+    timeline = window.show_page(TIMELINE_ID)
+    assert isinstance(timeline, TimelinePage)
+    photo = tmp_path / "a.jpg"
+    timeline.showOnMap.emit(photo)
+    assert window.map_page is not None
+    assert window.stack.currentWidget() is window.map_page
+    assert focused == [photo]

@@ -53,7 +53,7 @@ from various_tools.gui.undo_rules import (
     read_undo_info,
     stale_after,
 )
-from various_tools.gui.workers import Worker
+from various_tools.gui.workers import Worker, applying_run_ids
 
 log = logging.getLogger(__name__)
 
@@ -550,6 +550,9 @@ class HistoryPage(QWidget):
         info = self.undo_info()
         if run is None or info is None or self._busy or self._closing or not info.undoable:
             return None
+        if run.id in applying_run_ids():
+            self.inform(f"Undo run {run.id}", in_progress_message(run.id))
+            return None
         if not self.confirm(
             f"Undo run {run.id}", undo_question(run.id, self._tool_name(run.tool), info)
         ):
@@ -563,7 +566,10 @@ class HistoryPage(QWidget):
 
         def job(_worker: Worker) -> UndoReport:
             # Checked again on this thread: never undo a run that is still applying.
-            if read_undo_info(path, run_id, limit=limit).in_progress:
+            if (
+                run_id in applying_run_ids()
+                or read_undo_info(path, run_id, limit=limit).in_progress
+            ):
                 raise ValueError(in_progress_message(run_id, limit))
             # Its own connection, opened and closed on this thread.
             with Journal(path) as journal:

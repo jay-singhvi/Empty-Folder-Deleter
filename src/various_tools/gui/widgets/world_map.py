@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cache, partial
 from importlib import resources
@@ -28,10 +28,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QFontMetricsF,
+    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -41,7 +42,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 MIN_ZOOM = 1
 MAX_ZOOM = 18
@@ -163,7 +164,10 @@ class WorldMap(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setMinimumSize(240, 160)
-        self.setMouseTracking(False)
+        self.setMouseTracking(True)
+        # Text for the hover tooltip of a circle, from the payloads of its members.
+        self.describe: Callable[[list[object]], str] = lambda members: f"{len(members):,} here"
+        self._highlight: tuple[float, float] | None = None
         self._payloads: list[object] = []
         self._xs: Any = np.empty(0)
         self._ys: Any = np.empty(0)
@@ -200,6 +204,40 @@ class WorldMap(QWidget):
         self._xs, self._ys = _world_arrays(points)
         self._cluster_cache.clear()
         self.update()
+
+    def set_highlight(self, lat: float | None, lon: float | None) -> None:
+        """Ring one position (``None`` removes the ring)."""
+        self._highlight = (lat, lon) if lat is not None and lon is not None else None
+        self.update()
+
+    @property
+    def highlight(self) -> tuple[float, float] | None:
+        return self._highlight
+
+    def fit_all(self) -> None:
+        """Zoom and move so that every point is on screen."""
+        if len(self._xs) == 0:
+            self._zoom, self._cx, self._cy = 1, 0.5, 0.5
+            self.update()
+            return
+        x0, x1 = float(self._xs.min()), float(self._xs.max())
+        y0, y1 = float(self._ys.min()), float(self._ys.max())
+        span = max(x1 - x0, y1 - y0, 1e-9)
+        room = max(1.0, min(self.width(), self.height()) - 80.0)
+        zoom = math.floor(math.log2(room / (TILE_PX * span)))
+        self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+        self._cx, self._cy = (x0 + x1) / 2, (y0 + y1) / 2
+        self._clamp_center()
+        self.update()
+
+    def members_near(self, lat: float, lon: float) -> list[object]:
+        """The payloads of the circle that is drawn at this position (empty when none is)."""
+        hit = self._cluster_at(self.lonlat_to_screen(lon, lat))
+        return list(hit.members) if hit is not None else []
+
+    def tooltip_at(self, pos: QPointF) -> str | None:
+        hit = self._cluster_at(pos)
+        return self.describe(list(hit.members)) if hit is not None else None
 
     def set_view(self, lat: float, lon: float, zoom: int) -> None:
         self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
@@ -286,6 +324,16 @@ class WorldMap(QWidget):
             self._press_pos = event.position()
             self._press_center = (self._cx, self._cy)
             self._dragging = False
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            text = self.tooltip_at(QPointF(event.pos()))
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._press_pos is None:
@@ -425,6 +473,7 @@ class WorldMap(QWidget):
         else:
             self._paint_tiles(painter)
         self._paint_clusters(painter, pal)
+        self._paint_highlight(painter, pal)
         if self._template is not None:
             self._paint_attribution(painter, pal)
         painter.end()
@@ -490,6 +539,15 @@ class WorldMap(QWidget):
                     Qt.AlignmentFlag.AlignCenter,
                     _short_count(count),
                 )
+
+    def _paint_highlight(self, painter: QPainter, pal: QPalette) -> None:
+        if self._highlight is None:
+            return
+        p = self.lonlat_to_screen(self._highlight[1], self._highlight[0])
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor(230, 60, 40))
+        painter.drawEllipse(p, 22.0, 22.0)
+        painter.drawEllipse(p, 20.0, 20.0)
 
     def _paint_attribution(self, painter: QPainter, pal: QPalette) -> None:
         metrics = QFontMetricsF(painter.font())

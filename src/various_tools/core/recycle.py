@@ -374,15 +374,17 @@ def restore(
     size: int | None = None,
     mtime_ns: int | None = None,
     locate_bin: BinLocator | None = None,
+    recorded_as: Path | None = None,
 ) -> RestoreResult:
     """Move the recycled item that used to be at ``original`` back there, if found exactly.
 
-    Only entries deleted within ``[deleted_after, deleted_before]`` (timezone-aware) and, when
-    ``size`` is given, of that size are considered. When ``mtime_ns`` is given, a file's
-    ``$R`` item must also have exactly that modification time (recycling is a rename, so it
-    keeps it); a folder's is not compared, because Windows may touch it while recycling, and
-    only empty folders are recycled. The newest remaining entry wins. Never replaces
-    anything. ``locate_bin`` defaults to :func:`current_user_bin`.
+        Only entries deleted within ``[deleted_after, deleted_before]`` (timezone-aware) and, when
+        ``size`` is given, of that size are considered. When ``mtime_ns`` is given, a file's
+        ``$R`` item must also have exactly that modification time (recycling is a rename, so it
+        keeps it); a folder's is not compared, because Windows may touch it while recycling, and
+        only empty folders are recycled. The newest remaining entry wins. Never replaces
+        anything. ``locate_bin`` defaults to :func:`current_user_bin`. ``recorded_as`` is another
+    path the Recycle Bin may know the item by (it was renamed aside before it was recycled).
     """
     if os.path.lexists(fs.long_path(original)):
         return RestoreResult(False, "the original location is occupied")
@@ -390,11 +392,13 @@ def restore(
     folder = locator(original)
     if folder is None:
         return RestoreResult(False, "no Recycle Bin of this user was found on that drive")
-    wanted = fs.comparable_path(original)
+    wanted = {fs.comparable_path(original)}
+    if recorded_as is not None:
+        wanted.add(fs.comparable_path(recorded_as))
     matches = [
         (index, entry)
         for index, entry in _entries(folder)
-        if fs.comparable_path(entry.original) == wanted
+        if fs.comparable_path(entry.original) in wanted
         and deleted_after <= entry.deleted <= deleted_before
         and (size is None or entry.size == size)
     ]

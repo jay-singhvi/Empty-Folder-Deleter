@@ -612,3 +612,44 @@ def test_locate_program_saves_only_a_working_program(
     assert "ffmpeg" not in gui_state.settings.external_tools
     assert problems and problems[-1][0] == "Locate ffmpeg"
     assert "Not saved" in problems[-1][1]
+
+
+def test_history_refuses_to_undo_a_run_a_live_worker_is_applying(
+    qtbot: QtBot,
+    window: MainWindow,
+    dialogs: Dialogs,
+    renamed: tuple[Path, list[str]],
+    settle: Settle,
+    gui_state: AppState,
+) -> None:
+    import threading
+
+    from various_tools.gui.workers import applying_run_ids, tool_worker
+
+    root, _original = renamed
+    history = window.history_page
+    settle(history)
+    run_id = first_run_id(history)
+    history.select_run(run_id)
+    settle(history)
+    entered, release = threading.Event(), threading.Event()
+
+    def job(ctx: Any) -> None:
+        ctx.applying_run_id = run_id  # what apply_plan does after start_run
+        entered.set()
+        release.wait(20)
+
+    worker = tool_worker(gui_state, job, with_journal=False)
+    worker.writes = True
+    worker.start()
+    try:
+        assert entered.wait(20)
+        assert applying_run_ids() == {run_id}
+        before = names(root)
+        assert history.undo_selected() is None
+        assert names(root) == before
+        assert dialogs.informs and "still applying" in dialogs.informs[-1][1]
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not worker.isRunning(), timeout=20000)
+    assert applying_run_ids() == set()

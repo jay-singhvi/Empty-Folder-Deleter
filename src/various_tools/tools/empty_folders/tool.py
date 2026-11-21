@@ -17,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -345,6 +346,45 @@ def set_folder_selected(plan: Plan, folder: Path, selected: bool) -> None:
             continue
         owner = _key(action.src.parent)
         if owner == target:
+            action.selected = selected
+        elif owner in unchecked_parents:
+            action.selected = False
+
+
+def set_folders_selected(plan: Plan, folders: Iterable[Path], selected: bool) -> None:
+    """:func:`set_folder_selected` for many folders at once, in one pass over the plan.
+
+    The result is the same as calling it for each folder in turn (the folders all get the same
+    value, and the order does not matter), but it costs one pass instead of one per folder, so
+    ticking thousands of rows stays quick.
+    """
+    junk_owner: dict[str, Path] = {}
+    for action in plan.actions:
+        if action.src is not None and _is_junk_action(action):
+            junk_owner[_key(action.src)] = action.src.parent
+    targets: set[str] = set()
+    ancestors: set[str] = set()
+    for folder in folders:
+        folder = junk_owner.get(_key(folder), folder)
+        targets.add(_key(folder))
+        if not selected:
+            for parent in Path(os.path.abspath(folder)).parents:
+                ancestors.add(_key(parent))
+    unchecked_parents: set[str] = set()
+    for action in plan.actions:
+        if action.src is None or _is_junk_action(action):
+            continue
+        src = _key(action.src)
+        if src in targets:
+            action.selected = selected
+        elif not selected and src in ancestors:
+            action.selected = False
+            unchecked_parents.add(src)
+    for action in plan.actions:
+        if action.src is None or not _is_junk_action(action):
+            continue
+        owner = _key(action.src.parent)
+        if owner in targets:
             action.selected = selected
         elif owner in unchecked_parents:
             action.selected = False

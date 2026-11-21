@@ -53,6 +53,16 @@ def active_workers() -> list[Worker]:
     return [w for w in _ACTIVE if shiboken6.isValid(w) and not w.isFinished()]
 
 
+def applying_run_ids() -> set[int]:
+    """Journal run ids that a live worker in this process is applying right now.
+
+    Such a run must never be undone, however long it has been paused or waiting.
+    """
+    return {
+        run_id for w in active_workers() if w.writes and (run_id := w.applying_run_id()) is not None
+    }
+
+
 def cancel_all() -> None:
     """Ask every running worker to stop at its next check."""
     for worker in list(_ACTIVE):
@@ -76,6 +86,7 @@ class Worker(QThread):
         self._fn = fn
         self.writes = writes
         self.cancel_event = threading.Event()
+        self.ctx: RunContext | None = None  # set by tool_worker for an apply
         self._last_emit = 0.0
         # Connected first, so it runs before anyone else hears ``finished``.
         self.finished.connect(self._release)
@@ -99,6 +110,11 @@ class Worker(QThread):
             return
         self._last_emit = now
         self.progress.emit(done, total, message)
+
+    def applying_run_id(self) -> int | None:
+        """The journal run this worker is applying, once its apply has started."""
+        ctx = self.ctx
+        return ctx.applying_run_id if ctx is not None else None
 
     def check_cancelled(self) -> None:
         if self.cancel_event.is_set():
@@ -149,9 +165,11 @@ def tool_worker(
             cancel_event=worker.cancel_event,
         )
         ctx.deps = deps
+        worker.ctx = ctx
         try:
             return job(ctx)
         finally:
+            ctx.applying_run_id = None
             ctx.close()
 
     return Worker(run, parent, writes=with_journal)

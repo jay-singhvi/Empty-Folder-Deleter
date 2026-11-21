@@ -47,6 +47,32 @@ fix a wrong date. The owner left every decision to the builder. Design:
   new first; with ExifTool it writes the taken date into the file, without it only the
   modified date. The original goes to the Recycle Bin, so History can undo it. Cloud-only
   files are skipped.
+- **Review fixes:**
+  - An apply that is paused or waiting between batches touches its journal run (a heartbeat,
+    at least every 30 seconds), and History and the tool pages refuse to undo a run that a
+    live worker in this program is applying.
+  - Change date applies the dates the preview planned (kept in the action) and never works
+    them out again, so applying one plan twice cannot shift a date twice; a file whose date
+    changed since the preview is left alone. The copy now takes the original's place before
+    the old content is recycled (the path is never empty); the journal row stays under the
+    original path, so History undo still restores it. The dialog clears its plan on every end
+    path and survives a failed library refresh. Skipped notes read "skipped: reason: path".
+    The tool no longer defaults to the whole working folder.
+  - A scan that started under another working folder shows the "working folder changed"
+    banner. A one-folder tool (Project Export) says it uses the first working folder. A folder
+    set by the shell menu or `--folder` is not remembered as "Use other folders".
+  - Ticking thousands of Empty Folders rows is one pass (it froze the window); the results list
+    caches its "shown" count and keeps the model-order shortcut with a filter and no sort.
+  - Skip the wait is offered only during "Next batch in..." waits, and an old skip no longer
+    cuts a later wait short. The pace choice is kept even when remembering options is off; a
+    remembered "in batches" choice is preselected only for OneDrive plans or after choosing it
+    in this session.
+  - Photo grid: right-click does not stat every selected file, paths are looked up through an
+    index, and a resize that keeps the column count does not lay the grid out again. Show on
+    map before the Map was ever shown waits for the map's size, and says when it cleared a
+    filter.
+- **Known, left for later:** Change date does not read a video's new date back after writing
+  it (photos are checked).
 - Version 0.6.0.
 
 ### Version 0.5.0: photo timeline, photo map and two new tools (2026-11-19)

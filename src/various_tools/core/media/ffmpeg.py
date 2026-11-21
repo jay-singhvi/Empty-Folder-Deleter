@@ -246,7 +246,8 @@ def probe_video_info(ffprobe: Path, path: Path, *, timeout: float = PROBE_TIMEOU
         log.warning("No video details for %s: %s", path, exc)
         return VideoInfo()
     streams = [as_dict(s) for s in as_list(data.get("streams"))]
-    stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    empty: dict[str, Any] = {}
+    stream = next((s for s in streams if s.get("codec_type") == "video"), empty)
     gps = _gps_from_tags(as_dict(as_dict(data.get("format")).get("tags")))
     for candidate in [stream, *streams]:  # the video stream first, then any other
         if gps is not None:

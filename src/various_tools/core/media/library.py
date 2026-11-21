@@ -31,7 +31,7 @@ from types import TracebackType
 from typing import Literal, Self
 
 from various_tools.core import onedrive
-from various_tools.core.context import RunContext
+from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import FileInfo, walk
 from various_tools.core.media import exif, ffmpeg
 from various_tools.core.media.imaging import IMAGE_EXTS, RAW_EXTS
@@ -249,6 +249,13 @@ _COLUMNS = "key, path, kind, size, mtime, taken, date_source, lat, lon, width, h
 _PLACEHOLDERS = ", ".join("?" * len(_COLUMNS.split(",")))
 
 
+def _count(report: SyncReport, *, is_new: bool) -> None:
+    if is_new:
+        report.added += 1
+    else:
+        report.updated += 1
+
+
 class MediaLibrary:
     """The library file, opened once. Use as a context manager. One thread per instance."""
 
@@ -373,11 +380,12 @@ class MediaLibrary:
         done = 0
         ffprobe_note = False
         exiftool = ctx.deps.path("exiftool")
+        raw_queue: list[tuple[str, FileInfo, bool]] = []  # RAW files waiting for ExifTool
         try:
             for root, files, unlisted in listed:
                 known = self._known_under(root)
                 seen: set[str] = set()
-                raw_queue: list[tuple[str, FileInfo]] = []
+                raw_queue = []
                 for info in files:
                     ctx.check_cancelled()
                     key = _key(info.path)
@@ -393,14 +401,10 @@ class MediaLibrary:
                         self._conn.execute("UPDATE items SET cloud_only = 1 WHERE key = ?", (key,))
                         report.unchanged += 1
                     else:
-                        if old is None:
-                            report.added += 1
-                        else:
-                            report.updated += 1
                         if not cloud and exiftool is not None and _is_raw(info.path):
-                            raw_queue.append((key, info))
+                            raw_queue.append((key, info, old is None))
                             if len(raw_queue) >= exif.EXIFTOOL_BATCH_SIZE:
-                                self._read_raw_batch(raw_queue, exiftool, ctx)
+                                self._read_raw_batch(raw_queue, exiftool, ctx, report)
                                 raw_queue = []
                         else:
                             item, note = _read_file(info, cloud, ctx, need_note=not ffprobe_note)
@@ -409,6 +413,7 @@ class MediaLibrary:
                                     ffprobe_note = True
                                 report.errors.append(note)
                             self._store(key, item)
+                            _count(report, is_new=old is None)  # only once the row is stored
                     if cloud:
                         report.cloud_only += 1
                     done += 1
@@ -416,7 +421,8 @@ class MediaLibrary:
                     if done % _COMMIT_EVERY == 0:
                         self._conn.commit()
                 if raw_queue and exiftool is not None:
-                    self._read_raw_batch(raw_queue, exiftool, ctx)
+                    self._read_raw_batch(raw_queue, exiftool, ctx, report)
+                    raw_queue = []
                 # Rows of a folder that could not be listed are kept (it is only unreachable).
                 gone = [
                     k for k in known if k not in seen and not any(k.startswith(u) for u in unlisted)
@@ -424,24 +430,39 @@ class MediaLibrary:
                 self._conn.executemany("DELETE FROM items WHERE key = ?", [(k,) for k in gone])
                 report.removed += len(gone)
                 self._conn.commit()
+        except Cancelled:
+            # Files already queued for ExifTool were chosen to be read: finish them, keep the
+            # rows, then let the cancel go on.
+            if raw_queue and exiftool is not None:
+                self._read_raw_batch(raw_queue, exiftool, ctx, report, cancellable=False)
+            raise
         finally:
             self._conn.commit()
         return report
 
     def _read_raw_batch(
-        self, queue: list[tuple[str, FileInfo]], exiftool: Path, ctx: RunContext
+        self,
+        queue: list[tuple[str, FileInfo, bool]],
+        exiftool: Path,
+        ctx: RunContext,
+        report: SyncReport,
+        *,
+        cancellable: bool = True,
     ) -> None:
         """Read the queued RAW files with one ExifTool process and store their rows."""
-        ctx.check_cancelled()
+        if cancellable:
+            ctx.check_cancelled()
         settings = ctx.settings
         infos = exif.exiftool_raw_info(
             exiftool,
-            [info.path for _k, info in queue],
+            [info.path for _k, info, _n in queue],
             settings.exiftool_read_timeout_s * max(1, len(queue) // 5),
+            single_timeout=settings.exiftool_read_timeout_s,
         )
-        for key, info in queue:
+        for key, info, is_new in queue:
             base = _base_item(info, cloud=False)
             self._store(key, _apply_raw(base, infos.get(info.path), settings.min_plausible_year))
+            _count(report, is_new=is_new)
 
     def _store(self, key: str, item: MediaItem) -> None:
         self._conn.execute(

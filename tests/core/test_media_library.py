@@ -677,3 +677,31 @@ def test_iso6709_parsing(text: str, expected: tuple[float, float] | None) -> Non
         assert found is None
     else:
         assert found == pytest.approx(expected, abs=1e-3)
+
+
+def test_queued_raw_files_are_read_and_stored_before_a_cancel_is_honoured(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "raws"
+    root.mkdir()
+    for n in range(3):
+        (root / f"IMG_{n}.CR3").write_bytes(b"raw")
+    monkeypatch.setattr(
+        ctx.deps, "path", lambda n: Path("C:/fake/exiftool.exe") if n == "exiftool" else None
+    )
+
+    def fake(_tool: Path, paths: list[Path], _timeout: float, **_kw: object) -> dict[Path, object]:
+        return {p: exif.RawInfo(datetime(2022, 3, 4, 5, 6, 7), None, 10, 10) for p in paths}
+
+    monkeypatch.setattr(exif, "exiftool_raw_info", fake)
+
+    def progress(done: int, _total: int, _message: str) -> None:
+        if done == 2:
+            ctx.cancel()
+
+    ctx.progress = progress
+    with pytest.raises(Cancelled):
+        lib.sync([root], ctx)
+    stored = {i.path.name: i for i in lib.items()}
+    assert sorted(stored) == ["IMG_0.CR3", "IMG_1.CR3"]  # queued, then read, then kept
+    assert all(i.taken == datetime(2022, 3, 4, 5, 6, 7) for i in stored.values())

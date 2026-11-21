@@ -553,10 +553,10 @@ def test_a_subfolder_that_cannot_be_listed_keeps_its_rows(
 
     real_scandir = os.scandir
 
-    def scandir(path: object) -> object:
+    def scandir(path: str) -> object:
         if Path(str(path).removeprefix("\\?\\")).name == "locked":
             raise PermissionError(13, "Access is denied")
-        return real_scandir(path)  # pyright: ignore[reportArgumentType]
+        return real_scandir(path)
 
     monkeypatch.setattr(os, "scandir", scandir)
     report = lib.sync([root], ctx)

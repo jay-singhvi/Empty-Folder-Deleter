@@ -17,8 +17,10 @@ This repository started as the **Empty Folder Deleter** Tkinter app, which is no
 
 ## Current state
 
-All plan phases (0 to 8) are implemented on `main`. `CHANGELOG.md` records what each phase did,
-the decisions taken and what is left for the owner.
+All plan phases (0 to 8) are implemented on `main`, and releases 0.4.0 to 0.8.0 followed
+(latest: v0.8.0). `CHANGELOG.md` records what each release did, the decisions taken and what
+is left. **Start with `docs/HANDOFF.md`**: the current state, the release process that
+worked, known pitfalls, and the next candidates (`docs/MODERNIZATION_PLAN.md` §7).
 
 ## Stack (decided, do not revisit)
 
@@ -41,13 +43,15 @@ the decisions taken and what is left for the owner.
 ```
 pyproject.toml  uv.lock  .python-version
 README.md  CHANGELOG.md  LICENSE  AGENTS.md  CLAUDE.md (copy of this file)
-docs/MODERNIZATION_PLAN.md   docs/tools/<tool-id>.md
+docs/MODERNIZATION_PLAN.md   docs/HANDOFF.md   docs/tools/<tool-id>.md   docs/superpowers/specs/
 src/various_tools/
-  core/                      fs, onedrive, hashing, media/{imaging,exif,ffmpeg}, journal, plan,
-                             context, deps, settings, cache
+  core/                      fs, onedrive, hashing, journal, plan, context, deps, settings, cache,
+                             recipe, media/{imaging,exif,ffmpeg,library,library_duplicates,places}
   tools/                     base.py (Tool protocol and registry), one package per tool
   cli/main.py                Typer app
-  gui/                       app.py, main_window.py, widgets/, workers.py
+  gui/                       app.py, main_window.py, home_page.py, tool_page.py, apply_dialog.py,
+                             recipes_page.py, timeline_page.py, map_page.py, library_model.py,
+                             widgets/, workers.py, wording.py
 tests/                       core/, tools/<tool>/, cli/, gui/, fixtures/legacy_reference/ (the
                              original scripts, read-only, run by the parity tests)
 packaging/                   spec, installer script, icon

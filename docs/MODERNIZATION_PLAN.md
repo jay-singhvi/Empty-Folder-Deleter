@@ -443,3 +443,48 @@ In priority order. Each one gets a plan preview, journal entries and undo like t
   under a temp directory.
 - Keep `core/` free of UI code. Keep tools free of `print`, `input` and Qt.
 - If a decision isn't covered here, choose the safer option and note it in the PR description.
+
+---
+
+## 7. After the plan: releases 0.4 to 0.8, and what comes next
+
+Phases 0 to 8 are done. Everything since then came from the owner's requests and is recorded in
+`CHANGELOG.md` and the design notes in `docs/superpowers/specs/`. The handoff for the next
+session is `docs/HANDOFF.md`.
+
+| Version | What it added | Design |
+|---|---|---|
+| 0.4.0 | Step-by-step tool page, plain words, one "Show all settings" switch | `2026-11-19-simpler-tool-page-design.md` |
+| 0.5.0 | Media library, Timeline and Map pages; Empty Files and Fix File Extensions tools | `2026-11-19-media-library-design.md` |
+| 0.6.0 | One working folder, menu bar, Home page, results-list picking, apply in batches, photo browser, Change date tool | `2026-11-20-workspace-and-photos-design.md` |
+| 0.7.0 | Wait for OneDrive to upload each batch; every 0.5/0.6 leftover (nested library folders, RAW/video places, map wrap, sidecars, …) | `2026-11-21-left-for-later-design.md` |
+| 0.8.0 | Saved recipes, duplicates in the photo library, offline place names (GeoNames) | `2026-11-21-wave-2-design.md` |
+
+Additions to the architecture since the plan was written:
+
+- **Working folder** (GUI state, `gui/state.py`): a tool's workspace field is its first folder
+  field, or its `workspace_field` attribute (`None` opts out: Temp Cleaner, Change date).
+- **Pacing** (`core/context.py` `Pace`, `core/plan.py` `apply_plan`): batches, pauses, Pause /
+  Skip the wait, a journal heartbeat while waiting, and the OneDrive upload wait
+  (`core/onedrive.upload_pending`, Cloud Files API, never recalls a file). Still one journal
+  run per apply.
+- **Hooks in `apply_plan`**: `before_action` (a tool can retarget or skip an action from what
+  was journaled before it, used by Fix File Extensions sidecars) and `PlannedAction.extra`
+  (facts to re-check at apply time, used by Change date).
+- **Recipes** (`core/recipe.py`): steps never store 🔒 locked, `replaces_originals` or
+  permanent-delete values; a hand-edited one is blocked as "needs attention". The recipe marker
+  lives only in the journal's copy of the options.
+- **Photo library** (`core/media/library.py`, schema v2, `gui/library_model.py`): read in a
+  worker, shared by Timeline and Map; `core/media/places.py` (offline, `data/places.npz`);
+  `core/media/library_duplicates.py` (fed by Duplicate Finder scans, changes no file).
+
+### Phase 9 candidates (not started; ask the owner before starting a large one)
+
+1. **Recipe steps that use the previous step's output folder** (then "Prepare photos to share"
+   can be Resize, then Strip metadata, again).
+2. **Timeline at 200,000 items**: the GUI-thread handover is about 0.25 s; a grid row layout
+   without one object per row would bring it near 0.1 s.
+3. **Face grouping** and **trips** (automatic events from date and place gaps) on the
+   Timeline. Faces need a model choice (local only, privacy) and an owner decision.
+4. **Release assets**: let `release.yml` attach the installer (it already rebuilds, tests and
+   uploads on a `v*` tag) and stop uploading local builds by hand; see `docs/HANDOFF.md`.

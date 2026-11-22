@@ -282,6 +282,16 @@ If you encounter any problems or have any suggestions, please [open an issue](ht
 
 Developed with ❤️ by Jay Singhvi
 
+## Stopping, continuing and changing the pace
+
+In the app, **Stop** ends an apply after the file it is on. The list stays, without the rows that
+were done, and the Apply button reads **Continue (N left)**: it opens the Apply window again (so
+the pace can be changed) and does only the rest, as a new run in History. The same goes for a run
+that ended with failures: the failed rows stay for another try. A new scan, or a changed setting,
+ends this. **Change pace...** (shown while an apply runs) changes the batch size and wait for the
+rest of the run. Fix File Extensions and Organize by Date ask for a new scan instead. A stopped
+`apply` on the command line can be run again with `--apply`; files already moved are skipped.
+
 ## Gentle on OneDrive
 
 `apply` can work in batches: `--batch-size N --pause 5m`. Add `--wait-for-upload` (with an optional `--upload-timeout 30m`, 30 minutes by default) to also wait, after each batch, until OneDrive has uploaded the files that batch wrote. The Apply window has the same choice. Files OneDrive cannot report on count as uploaded, and nothing is downloaded to check.

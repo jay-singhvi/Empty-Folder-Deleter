@@ -467,7 +467,13 @@ Additions to the architecture since the plan was written:
 - **Pacing** (`core/context.py` `Pace`, `core/plan.py` `apply_plan`): batches, pauses, Pause /
   Skip the wait, a journal heartbeat while waiting, and the OneDrive upload wait
   (`core/onedrive.upload_pending`, Cloud Files API, never recalls a file). Still one journal
-  run per apply.
+  run per apply. `apply_plan` reads `ctx.pace` before each action, so the GUI's "Change pace..."
+  can swap the (frozen) `Pace` of a running apply; it counts from the next batch.
+- **Continue after Stop** (`gui/continue_run.py`, `ToolPage._prepare_continue`): after a
+  cancelled run, or one with failures, the page keeps its list without the done rows (matched by
+  kind and source) and Apply reads "Continue (N left)"; Continue applies the rest as a new
+  journaled run. A new scan or changed options drop it. Fix File Extensions and Organize by Date
+  fall back to "scan again" because their rows depend on each other while applying.
 - **Hooks in `apply_plan`**: `before_action` (a tool can retarget or skip an action from what
   was journaled before it, used by Fix File Extensions sidecars) and `PlannedAction.extra`
   (facts to re-check at apply time, used by Change date).

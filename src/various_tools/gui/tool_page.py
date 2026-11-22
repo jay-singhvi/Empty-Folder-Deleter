@@ -1246,7 +1246,7 @@ class ToolPage(QWidget):
         do (0 means there is nothing to continue and the page falls back to scan again)."""
         self._continuing = False
         plan = self.plan
-        if plan is None or not can_continue(self.tool.id, value.status):
+        if plan is None or not can_continue(self.tool.id, value.status, plan):
             return 0
         sizes = drop_done(plan, value.outcomes, self.table.sizes())
         if not plan.selected_actions():

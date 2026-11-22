@@ -150,6 +150,21 @@ def test_tools_whose_rows_depend_on_each_other_fall_back_to_scan_again(tool_id: 
     assert not can_continue("duplicates", "done")
 
 
+def test_organize_continues_when_its_list_holds_only_moves(tmp_path: Path) -> None:
+    def plan_of(*kinds: ActionKind) -> Plan:
+        actions = [
+            PlannedAction(k, tmp_path / f"{i}.jpg", tmp_path / "d", "x")
+            for i, k in enumerate(kinds)
+        ]
+        return Plan(tool="organize_by_date", roots=[tmp_path], actions=actions)
+
+    assert can_continue("organize_by_date", "cancelled", plan_of(ActionKind.MOVE, ActionKind.MOVE))
+    assert not can_continue(
+        "organize_by_date", "cancelled", plan_of(ActionKind.CONVERT, ActionKind.MOVE)
+    )
+    assert not can_continue("organize_by_date", "done", plan_of(ActionKind.MOVE))
+
+
 def test_drop_done_matches_by_kind_and_source_and_keeps_sizes_in_step(tmp_path: Path) -> None:
     def row(name: str, kind: ActionKind = ActionKind.TRASH, selected: bool = True) -> PlannedAction:
         return PlannedAction(kind, tmp_path / name, None, "x", selected=selected)

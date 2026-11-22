@@ -14,22 +14,29 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 
-from various_tools.core.plan import ActionOutcome, Plan, PlannedAction
+from various_tools.core.plan import ActionKind, ActionOutcome, Plan, PlannedAction
 
 # Tools whose rows depend on each other while they apply, so that a list with the done rows
 # removed would not apply the same way. They fall back to "scan again":
-# * organize_by_date: a resize row only runs together with its move row (the applier follows
-#   the move), and a download row is tied to the files that wait for it.
+# * organize_by_date, but only when its list has resize or download rows (``convert``): a
+#   resize row only runs together with its move row (the applier follows the move), and a
+#   download row is tied to the files that wait for it. A list of moves alone (the default
+#   options) continues: each move stands on its own.
 # * wrong_extension: a sidecar row is renamed only after its file's row was done in the same
 #   run (it follows the name the file really got), so without it the sidecar is skipped.
-NO_CONTINUE_TOOLS = frozenset({"organize_by_date", "wrong_extension"})
+NO_CONTINUE_TOOLS = frozenset({"wrong_extension"})
+MOVES_ONLY_TOOLS = frozenset({"organize_by_date"})
 
 CONTINUE_STATUSES = frozenset({"cancelled", "partial"})
 
 
-def can_continue(tool_id: str, status: str) -> bool:
-    """Whether a run that ended with ``status`` can be continued for this tool."""
-    return status in CONTINUE_STATUSES and tool_id not in NO_CONTINUE_TOOLS
+def can_continue(tool_id: str, status: str, plan: Plan | None = None) -> bool:
+    """Whether a run that ended with ``status`` can be continued for this tool and list."""
+    if status not in CONTINUE_STATUSES or tool_id in NO_CONTINUE_TOOLS:
+        return False
+    if tool_id in MOVES_ONLY_TOOLS:
+        return plan is not None and all(a.kind is ActionKind.MOVE for a in plan.actions)
+    return True
 
 
 def _key(kind: str, src: str | None) -> tuple[str, str | None]:

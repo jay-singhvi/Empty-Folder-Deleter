@@ -5,6 +5,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Version 0.9.0: dates from file names, several folders at once, continue a stopped apply (2026-11-22)
+
+Owner's report: a video `Camera Roll22 - 0620624_005115.mp4` was moved to
+`2025 - 03`. Design: `docs/superpowers/specs/2026-11-22-name-dates-folders-continue-design.md`.
+
+- **Dates from file names first** (Organize photos and videos by date, and the Timeline): the
+  date a camera or WhatsApp wrote into the name (`20220624_005115.mp4`, `IMG_20220624_005115.jpg`,
+  `PXL_…`, `DJI_20220624005115_0001_D.JPG`, `IMG-20220624-WA0001.jpg`, `WhatsApp Image
+  2022-06-24 at 00.51.15.jpeg`, Telegram and Signal names, and so on) is tried before EXIF, the
+  video's creation time and the modified time, because editing or re-encoding a file changes its
+  embedded date but not its name. New option *Use the date in the file name first* (on). Names
+  without a date (`IMG_1234.HEIC`) work as before. *Skip already processed files* does not skip a
+  file whose name gives a date when the catalog says it was dated another way, so a scan of the
+  destination with *Include subfolders* lists the files an earlier version misfiled.
+  Decision (owner's request): the name wins over the metadata; turning the option off restores
+  the 0.8 order. Cloud-only files are still never read or moved.
+- **Several folders at once:** *Add…* in a folder list, *Choose working folder…* and *Add a folder
+  to the working folder…* open a folder window where several folders can be selected (Ctrl or
+  Shift + click). Single-folder boxes keep the Windows folder window.
+- **One folder list:** the tool page's folder list *is* the working folder. "Use other folders for
+  this tool" is gone; adding or removing a folder on any tool page changes the working folder for
+  every tool and the toolbar. Opening a tool on a folder (Explorer menu, `--folder`, the
+  Timeline's *Find duplicates…*) sets the working folder. Recipe steps keep their own
+  "folders for this step" choice.
+- **Continue a stopped apply:** after *Stop* (or an apply with failures) the list keeps the rows
+  that were not done, and Apply reads *Continue (N left)*: no new scan. It opens the Apply window
+  again, so the pace can be changed, and runs as a new History entry. A new scan or changed
+  options go back to *Scan again*. Fix File Extensions, and Organize by date when it also resizes
+  or downloads, still ask for a new scan because their rows depend on each other.
+- **Change the pace while applying:** *Change pace…* next to Pause sets a new batch size and wait;
+  it takes effect from the next batch.
+- Version 0.9.0.
+
 ### Version 0.8.0: saved recipes, duplicates in the photo library, place names (2026-11-21)
 
 Owner's request: "start wave 2". Design: `docs/superpowers/specs/2026-11-21-wave-2-design.md`.

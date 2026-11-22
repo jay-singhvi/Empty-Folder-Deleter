@@ -31,6 +31,8 @@ from various_tools.core.plan import Plan
 from various_tools.gui.plan_edit import human_size
 from various_tools.gui.wording import (
     ALL_AT_ONCE,
+    CHANGE_PACE_OK,
+    CHANGE_PACE_TITLE,
     CUSTOM_PRESET,
     HOW_FAST,
     ONEDRIVE_BATCH_REASON,
@@ -102,6 +104,20 @@ def onedrive_suggestion(plan: Plan, sizes: Sequence[int | None]) -> str | None:
     return ONEDRIVE_BATCH_REASON.format(count=f"{len(chosen):,}", size=human_size(size))
 
 
+def pace_to_values(pace: Pace | None) -> dict[str, Any]:
+    """A pace as the Apply window preselects it (the same form as the remembered choice)."""
+    if pace is None:
+        return {"mode": "all"}
+    return {
+        "mode": "batches",
+        "batch_size": pace.batch_size,
+        "wait": int(pace.pause_s),
+        "unit": "seconds",
+        "wait_for_upload": pace.wait_for_upload,
+        "upload_minutes": max(1, int(pace.upload_timeout_s // 60)),
+    }
+
+
 def estimate_wait(count: int, pace: Pace | None) -> float:
     """Seconds spent waiting (not working) for ``count`` actions with this pace."""
     if pace is None or count <= pace.batch_size:
@@ -115,9 +131,11 @@ class ApplyDialog(QDialog):
         ask: ApplyAsk,
         last: Mapping[str, Any] | None = None,
         parent: QWidget | None = None,
+        *,
+        pace_only: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(ask.title)
+        self.setWindowTitle(CHANGE_PACE_TITLE if pace_only else ask.title)
         self._count = ask.count
         self._touches_onedrive = ask.touches_onedrive
         saved = dict(last or {})
@@ -168,7 +186,10 @@ class ApplyDialog(QDialog):
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            CHANGE_PACE_OK if pace_only else "Apply"
+        )
+        summary.setVisible(not pace_only)  # changing the pace of a run: only the pace part
         layout = QVBoxLayout(self)
         layout.addWidget(summary)
         layout.addWidget(QLabel(f"<b>{HOW_FAST}</b>"))

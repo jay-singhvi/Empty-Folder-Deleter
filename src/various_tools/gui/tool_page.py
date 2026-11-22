@@ -86,8 +86,10 @@ from various_tools.gui.apply_dialog import (
     ApplyDialog,
     onedrive_suggestion,
     pace_to_preselect,
+    pace_to_values,
     plan_touches_onedrive,
 )
+from various_tools.gui.continue_run import can_continue, drop_done
 from various_tools.gui.recipe_store import RecipeStore
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
@@ -101,8 +103,11 @@ from various_tools.gui.widgets.schema_form import SchemaForm, folder_field_names
 from various_tools.gui.widgets.size_map import SizeMapView, actions_under
 from various_tools.gui.wording import (
     APPLY_TEXT,
+    CHANGE_PACE_TEXT,
     CHANGE_SETTINGS,
     CHOOSE_WORKSPACE_FIRST,
+    CONTINUE_FAILED,
+    CONTINUE_STOPPED,
     HIDE_DETAILS,
     HIDE_SETTINGS,
     PAUSE_TEXT,
@@ -118,6 +123,7 @@ from various_tools.gui.wording import (
     USE_OTHER_FOLDERS,
     WORKSPACE_CHANGED,
     apply_label,
+    continue_label,
     found_nouns,
     looks_in_text,
     plain_value,
@@ -360,6 +366,8 @@ class ToolPage(QWidget):
         self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
         # The Apply window. Tests set ``choose_pace`` (or, as before, ``confirm``).
         self.choose_pace: ChoosePace = self._open_apply_dialog
+        # Change pace while an apply runs: the pace part of the same window.
+        self.choose_new_pace: ChoosePace = self._open_change_pace_dialog
         self.choose_recipe: ChooseRecipe = _default_choose_recipe(self)
         self._default_confirm_hook = self.confirm
 
@@ -467,7 +475,16 @@ class ToolPage(QWidget):
         self.resume_button = QPushButton(RESUME_TEXT)
         self.skip_wait_button = QPushButton(SKIP_WAIT_TEXT)
         self.skip_wait_button.setToolTip("Do not wait for the next batch: start it now.")
-        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+        self.change_pace_button = QPushButton(CHANGE_PACE_TEXT)
+        self.change_pace_button.setToolTip(
+            "Change how fast the rest goes. It counts from the next batch."
+        )
+        for button in (
+            self.pause_button,
+            self.resume_button,
+            self.skip_wait_button,
+            self.change_pace_button,
+        ):
             button.setVisible(False)  # shown only while an apply runs
         self.show_all_check = QCheckBox("Show all settings")
         self.show_all_check.setToolTip(
@@ -486,7 +503,12 @@ class ToolPage(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.scan_button)
         buttons.addWidget(self.cancel_button)
-        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+        for button in (
+            self.pause_button,
+            self.resume_button,
+            self.skip_wait_button,
+            self.change_pace_button,
+        ):
             buttons.addWidget(button)
         buttons.addStretch(1)
         buttons.addWidget(self.show_all_check)
@@ -618,6 +640,7 @@ class ToolPage(QWidget):
         self.pause_button.clicked.connect(lambda _c=False: self.pause_apply())
         self.resume_button.clicked.connect(lambda _c=False: self.resume_apply())
         self.skip_wait_button.clicked.connect(lambda _c=False: self.skip_wait())
+        self.change_pace_button.clicked.connect(lambda _c=False: self.change_pace())
         self.apply_button.clicked.connect(lambda _c=False: self.apply())
         self.export_button.triggered.connect(lambda _c=False: self.export())
         self.reset_options_action.triggered.connect(lambda _c=False: self.reset_options())
@@ -895,6 +918,7 @@ class ToolPage(QWidget):
         self.scanFinished.emit(plan)
         self.result = None
         self._applied = False
+        self._continuing = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
         self._show_notes(plan.notes)
         # A scan that started under another working folder shows that folder's list: say so.
@@ -963,6 +987,7 @@ class ToolPage(QWidget):
         return self._apply_pending or (self.worker is not None and self.worker.writes)
 
     def _form_changed(self) -> None:
+        self._drop_continue("The settings changed, so the list may be out of date. Scan again.")
         if self.tool.id in LIVE_PREVIEW_TOOLS and not self._applying() and not self._closing:
             self._preview_timer.start()
 
@@ -1077,7 +1102,7 @@ class ToolPage(QWidget):
         self._paused = self._waiting = False
 
         def job(ctx: Any) -> RunResult:
-            ctx.pace = pace
+            ctx.pace = self._pace  # a change of pace may already have replaced it
             ctx.recipe_tag = recipe_tag
             ctx.pause_event = pause_event
             ctx.skip_wait_event = skip_event
@@ -1144,19 +1169,86 @@ class ToolPage(QWidget):
         if self._apply_running() and self._skip_wait_event is not None:
             self._skip_wait_event.set()
 
+    def change_pace(self) -> bool:
+        """Change the pace of the running apply. It takes effect from the next batch.
+
+        The run reads ``ctx.pace`` before each action, and a ``Pace`` is never edited, only
+        replaced, so swapping it from this (UI) thread is safe.
+        """
+        worker = self._apply_worker
+        if not self._apply_running() or worker is None:
+            return False
+        selected = len(self.applied_plan.selected_actions()) if self.applied_plan else 0
+        ask = ApplyAsk(f"Change the pace: {self.tool.name}", "", selected)
+        confirmed, pace = self.choose_new_pace(ask)
+        if not confirmed or not self._apply_running():  # the run may have ended meanwhile
+            return False
+        self._pace = pace
+        ctx = worker.ctx
+        if ctx is not None:
+            ctx.pace = pace
+        if self._paused:
+            self._set_status("Pace changed. Press Resume to go on.")
+        else:
+            self._set_status(
+                "Pace changed: the rest goes " + ("in batches." if pace else "all at once.")
+            )
+        self._update_buttons()
+        return True
+
+    def _open_change_pace_dialog(self, ask: ApplyAsk) -> tuple[bool, Pace | None]:
+        dialog = ApplyDialog(ask, pace_to_values(self._pace), self, pace_only=True)
+        if dialog.exec() != ApplyDialog.DialogCode.Accepted:
+            return False, None
+        self.state.set_apply_pace(dialog.values())
+        return True, dialog.pace()
+
+    # ----- continue a stopped apply -----------------------------------------------------------
+
+    _continuing = False  # the list holds what a stopped (or partly failed) apply left
+
+    def _prepare_continue(self, value: RunResult) -> int:
+        """Keep the list for Continue: drop the done rows. Returns how many rows are left to
+        do (0 means there is nothing to continue and the page falls back to scan again)."""
+        self._continuing = False
+        plan = self.plan
+        if plan is None or not can_continue(self.tool.id, value.status):
+            return 0
+        sizes = drop_done(plan, value.outcomes, self.table.sizes())
+        if not plan.selected_actions():
+            return 0
+        self._continuing = True
+        self.table.refresh(sizes)
+        self._show_size_map(plan)
+        return len(plan.selected_actions())
+
+    def _drop_continue(self, status: str) -> None:
+        """A change that makes the kept list unreliable: back to scan again."""
+        if not self._continuing or self._applying():
+            return
+        self._continuing = False
+        self._applied = True
+        self._set_status(status)
+        self._update_buttons()
+
     def _apply_done(self, value: object) -> None:
         assert isinstance(value, RunResult)
         self.result = value
         self.last_run_id = value.run_id
         self.undo_info = undo_info_from_result(value)
-        self._applied = True
+        left = self._prepare_continue(value)
+        self._applied = not left
         text = result_summary(value)
         if value.notes:
             text += "\n\n" + "\n".join(value.notes)
         failures = [o for o in value.outcomes if o.status == "failed"][:10]
         if failures:
             text += "\n\nFailed:\n" + "\n".join(f"  {o.src}: {o.detail}" for o in failures)
-        self._set_status(text.splitlines()[0] + " Scan again to see what is left.")
+        if left:
+            hint = CONTINUE_STOPPED if value.status == "cancelled" else CONTINUE_FAILED
+            self._set_status(f"{text.splitlines()[0]} {hint}")
+        else:
+            self._set_status(text.splitlines()[0] + " Scan again to see what is left.")
         self.runApplied.emit(value.run_id)
         self._update_buttons()
         if self._closing:
@@ -1677,11 +1769,17 @@ class ToolPage(QWidget):
         self.cancel_button.setText(STOP_TEXT if applying_now else "Cancel")
         self.pause_button.setVisible(applying_now and not self._paused)
         self.resume_button.setVisible(applying_now and self._paused)
-        self.skip_wait_button.setVisible(applying_now and self._pace is not None)
+        self.skip_wait_button.setVisible(applying_now and (self._pace is not None or self._waiting))
+        self.change_pace_button.setVisible(applying_now)
         self.skip_wait_button.setEnabled(self._waiting)
         self.progress_bar.setVisible(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
-        self.apply_button.setText(APPLY_TEXT if self._applied else apply_label(self.plan))
+        if self._applied:
+            self.apply_button.setText(APPLY_TEXT)
+        elif self._continuing and self.plan is not None:
+            self.apply_button.setText(continue_label(len(self.plan.selected_actions())))
+        else:
+            self.apply_button.setText(apply_label(self.plan))
         self.more_button.setEnabled(not busy)
         self.reset_options_action.setEnabled(not busy)
         self.export_button.setEnabled(not busy and has_plan)

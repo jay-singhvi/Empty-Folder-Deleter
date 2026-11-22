@@ -135,8 +135,6 @@ PERMANENT = "permanent"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
 COMPARE_TOOLS = frozenset({"duplicates"})
 LIVE_PREVIEW_DELAY_MS = 700
-# The remembered flag "this tool uses its own folders, not the working folder".
-OTHER_FOLDERS_KEY = "_use_other_folders"
 WORKSPACE_FIELD_NAMES = frozenset({"roots", "sources", "root"})
 MAX_SUMMARY_ITEMS = 8
 # A note kind ("skipped: <reason>: <path>") is shown as a count once it repeats this often.
@@ -377,17 +375,11 @@ class ToolPage(QWidget):
             self.step_labels.append(label)
 
         # ----- options form ------------------------------------------------------------
-        # The working folder: the tool's folder option is folded into one line unless the
-        # person chose other folders for this tool (remembered with the other options).
+        # The working folder: on a tool's own page the folder option is always shown and is the
+        # working folder. A recipe step page keeps its choice of own folders (``preset[1]``);
+        # without it the field is folded into a "Looks in" line.
         self._ws_name = workspace_field_name(tool)
-        self._override = bool(
-            self._ws_name
-            and (
-                preset[1]
-                if preset is not None
-                else self.state.last_options(tool.id).get(OTHER_FOLDERS_KEY) is True
-            )
-        )
+        self._override = bool(self._ws_name and preset is not None and preset[1])
         self.form = SchemaForm(
             tool.Options, self._initial_values(), load_choices=self._choices_worker
         )
@@ -402,7 +394,7 @@ class ToolPage(QWidget):
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         workspace_layout.addWidget(self.workspace_label, 1)
         workspace_layout.addWidget(self.other_folders_check)
-        self.workspace_row.setVisible(self._ws_name is not None)
+        self.workspace_row.setVisible(self._step_has_workspace_row)
         self.other_folders_check.setChecked(self._override)
         # Step 1 folds into one line after a scan.
         self.options_summary = QLabel()
@@ -629,6 +621,7 @@ class ToolPage(QWidget):
         self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
         self.show_all_check.toggled.connect(self._show_all_toggled)
         self.form.changed.connect(self._form_changed)
+        self.form.changed.connect(self._sync_list_workspace)
         self.other_folders_check.toggled.connect(self._other_folders_toggled)
         self.change_settings_button.clicked.connect(lambda _c=False: self.toggle_options())
         self.notes_toggle.toggled.connect(self._notes_toggled)
@@ -675,17 +668,28 @@ class ToolPage(QWidget):
 
     @property
     def uses_workspace(self) -> bool:
-        """The tool has a workspace field and the person has not chosen other folders."""
+        """The tool has a workspace field and the page has no folders of its own (a recipe step
+        can have them)."""
         return self._ws_name is not None and not self._override
 
+    @property
+    def _step_has_workspace_row(self) -> bool:
+        """Only a recipe step page shows the "Looks in" line and the own-folders check box."""
+        return self._ws_name is not None and self._preset is not None
+
     def _apply_workspace_ui(self) -> None:
-        """Show the one-line "Looks in" text or the real folder field, and fill the field."""
+        """Fill the folder field from the working folder. A recipe step page also shows the
+        one-line "Looks in" text, or its own field."""
         name = self._ws_name
         if name is None:
             return
         paths = self.state.workspace()
+        if self._preset is None:
+            if paths:
+                self._put_workspace_in_field(paths)
+            return
         self.workspace_label.setText(
-            "Looks in: folders chosen for this tool"
+            "Looks in: folders chosen for this step"
             if self._override
             else looks_in_text(paths, first_only=self._workspace_is_single())
         )
@@ -704,11 +708,41 @@ class ToolPage(QWidget):
             return
         is_list = self.form.field_spec(name).kind == "list"
         value: Any = [str(p) for p in paths] if is_list else (str(paths[0]) if paths else "")
+        current = self.form.raw_values().get(name)
+        if is_list and [str(p) for p in current or []] == value:
+            return  # already shown: keep the person's selection in the list
+        if not is_list and str(current or "") == value:
+            return
         self.form.set_field_value(name, value)
+
+    def _sync_list_workspace(self) -> None:
+        """The person added, removed or dropped a folder in the list: that is the new working
+        folder (every page and the toolbar follow). A one-folder field waits for the scan."""
+        name = self._ws_name
+        if name is None or self._preset is not None or self._closing:
+            return
+        if self.form.field_spec(name).kind != "list":
+            return
+        shown = [str(p) for p in self.form.raw_values().get(name) or []]
+        if shown != [str(p) for p in self.state.workspace()]:
+            self.state.set_workspace([Path(p) for p in shown])
+
+    def _sync_single_workspace(self) -> None:
+        """When a scan starts, a one-folder field replaces the first working folder (typing
+        does not touch the recent-folders list)."""
+        name = self._ws_name
+        if name is None or self._preset is not None:
+            return
+        if self.form.field_spec(name).kind == "list":
+            self._sync_list_workspace()
+            return
+        value = str(self.form.raw_values().get(name) or "").strip()
+        workspace = self.state.workspace()
+        if value and (not workspace or str(workspace[0]) != value):
+            self.state.set_workspace([Path(value), *workspace[1:]])
 
     def _other_folders_toggled(self, on: bool) -> None:
         self._override = on
-        self._override_session_only = False  # a tick by the person is remembered
         self._apply_workspace_ui()
         self.workspace_banner.setVisible(False)
 
@@ -777,7 +811,7 @@ class ToolPage(QWidget):
         self.options_collapsed = folded
         self.options_summary_row.setVisible(folded)
         self._form_scroll.setVisible(not folded)
-        self.workspace_row.setVisible(self._ws_name is not None and not folded)
+        self.workspace_row.setVisible(self._step_has_workspace_row and not folded)
 
     def reset_options(self) -> None:
         """Every option back to its default; the folder fields keep what they hold."""
@@ -787,19 +821,26 @@ class ToolPage(QWidget):
         self._set_status("Options reset to the defaults.")
 
     def set_folder(self, path: str) -> bool:
-        """Put a folder into the first folder field (used by ``--folder`` and the shell menu).
-
-        On a page that uses the working folder this chooses other folders for this tool.
-        """
-        if self._ws_name is not None and not self._override:
-            self.other_folders_check.setChecked(True)  # shows the real field
-            self._override_session_only = True  # this launch only: not remembered
+        """Make a folder the working folder (used by ``--folder`` and the shell menu); every page
+        follows. A recipe step page with folders of its own, and a tool with no working-folder
+        option, get it in their first folder field instead."""
+        if self._ws_name is not None:
+            self.state.set_workspace([Path(path)])
+            if self._preset is None or not self._override:
+                self._form_changed()  # a live preview starts on the new folder
+                return True
         return self.form.set_first_folder(path)
 
     def set_folders(self, paths: list[str]) -> bool:
-        """Put several folders into the first folder field, like :meth:`set_folder` (a field
-        that holds one folder gets the first). Returns False if there is nothing to set."""
-        if not paths or not self.set_folder(paths[0]):
+        """Make several folders the working folder, like :meth:`set_folder` (a field that holds
+        one folder shows the first). Returns False if there is nothing to set."""
+        if not paths:
+            return False
+        if self._ws_name is not None and (self._preset is None or not self._override):
+            self.state.set_workspace([Path(p) for p in paths])
+            self._form_changed()
+            return True
+        if not self.set_folder(paths[0]):
             return False
         name = self.form.folder_fields()[0]
         if len(paths) > 1 and self.form.field_spec(name).kind == "list":
@@ -824,14 +865,7 @@ class ToolPage(QWidget):
             if name in values and values[name] != PERMANENT
         }
         if self._ws_name:
-            if not self._override:
-                remembered.pop(self._ws_name, None)  # the working folder is not a tool option
-            if self._override_session_only:  # set by --folder or the shell menu: keep what was
-                remembered[OTHER_FOLDERS_KEY] = (
-                    self.state.last_options(self.tool.id).get(OTHER_FOLDERS_KEY) is True
-                )
-            else:
-                remembered[OTHER_FOLDERS_KEY] = self._override
+            remembered.pop(self._ws_name, None)  # the working folder is not a tool option
         self.state.remember_options(self.tool.id, remembered)
 
     def save_as_recipe_step(self) -> bool:
@@ -866,6 +900,7 @@ class ToolPage(QWidget):
         """
         if self.busy or self._apply_pending or self._closing:
             return None
+        self._sync_single_workspace()
         if self._workspace_missing():
             self._set_status(CHOOSE_WORKSPACE_FIRST, True)
             return None
@@ -1114,7 +1149,6 @@ class ToolPage(QWidget):
 
     _pause_event: threading.Event | None = None
     _skip_wait_event: threading.Event | None = None
-    _override_session_only = False  # "Use other folders" was set by set_folder, not ticked
     _scan_workspace: list[Path] = []  # the working folder when the running scan started
     _apply_worker: Worker | None = None
     _pace: Pace | None = None

@@ -35,6 +35,7 @@ from various_tools.gui.state import AppState
 from various_tools.gui.tool_page import ToolPage
 from various_tools.gui.widgets import compare_view as compare_module
 from various_tools.gui.widgets import external_tools as external_module
+from various_tools.gui.widgets import path_picker as path_picker_module
 from various_tools.gui.workers import Worker
 
 # An address that refuses connections at once, so Ollama probes never wait.
@@ -131,6 +132,7 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         for name in names:
             monkeypatch.setattr(owner, name, boom)
+    monkeypatch.setattr(path_picker_module, "choose_folders", boom)
 
 
 @pytest.fixture(autouse=True)

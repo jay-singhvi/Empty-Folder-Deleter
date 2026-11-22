@@ -92,7 +92,7 @@ def test_find_duplicates_opens_the_duplicate_finder_on_the_library_folders(
     timeline.openTool.emit("duplicates", [one, two])
     page = window.tool_pages["duplicates"]
     assert window.stack.currentWidget() is page
-    assert page.other_folders_check.isChecked()
+    assert window.state.workspace() == [one, two]
     options = page.form.build()
     assert [Path(p) for p in options.roots] == [one, two]  # type: ignore[attr-defined]
 

@@ -24,7 +24,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
-    QFileDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -51,6 +50,7 @@ from various_tools.gui.settings_page import SettingsPage
 from various_tools.gui.state import AppState
 from various_tools.gui.timeline_page import TimelinePage
 from various_tools.gui.tool_page import ToolPage
+from various_tools.gui.widgets import path_picker
 from various_tools.gui.widgets.log_panel import LogBridge, LogPanel
 from various_tools.gui.widgets.workspace_bar import WorkspaceBar
 from various_tools.gui.workers import active_workers, cancel_all
@@ -109,9 +109,11 @@ def _default_inform(parent: QWidget) -> Callable[[str, str], None]:
     return inform
 
 
-def _default_choose_folder(parent: QWidget) -> Callable[[], str | None]:
-    def choose() -> str | None:
-        return QFileDialog.getExistingDirectory(parent, "Choose the working folder") or None
+def _default_choose_folders(parent: QWidget) -> Callable[[str], list[str]]:
+    """Ask for one or more folders (the argument is the dialog title)."""
+
+    def choose(title: str) -> list[str]:
+        return path_picker.choose_folders(parent, title)
 
     return choose
 
@@ -136,7 +138,7 @@ class MainWindow(QMainWindow):
         # Tests replace this so no message box opens.
         self.confirm: Callable[[str, str], bool] = _default_confirm(self)
         self.inform: Callable[[str, str], None] = _default_inform(self)
-        self.choose_folder: Callable[[], str | None] = _default_choose_folder(self)
+        self.choose_folders: Callable[[str], list[str]] = _default_choose_folders(self)
         self.open_folder: Callable[[Path], None] = _default_open_folder
         self.shortcuts_dialog: QDialog | None = None
         self.closing = False  # a close was confirmed; waiting for the workers to finish
@@ -304,19 +306,20 @@ class MainWindow(QMainWindow):
     # ----- the working folder -----------------------------------------------------------------
 
     def choose_workspace(self) -> bool:
-        """Ask for a folder and make it the working folder. False when nothing was chosen."""
-        chosen = self.choose_folder()
+        """Ask for one or more folders and make them the working folder. False when nothing was
+        chosen."""
+        chosen = self.choose_folders("Choose the working folder")
         if not chosen:
             return False
-        self.state.set_workspace([Path(chosen)])
+        self.state.set_workspace([Path(item) for item in chosen])
         return True
 
     def add_workspace_folder(self) -> bool:
-        """Ask for one more folder and add it to the working folder."""
-        chosen = self.choose_folder()
+        """Ask for one or more folders and add them to the working folder."""
+        chosen = self.choose_folders("Add folders to the working folder")
         if not chosen:
             return False
-        self.state.set_workspace([*self.state.workspace(), Path(chosen)])
+        self.state.set_workspace([*self.state.workspace(), *(Path(item) for item in chosen)])
         return True
 
     def _workspace_changed(self, paths: list[Path]) -> None:

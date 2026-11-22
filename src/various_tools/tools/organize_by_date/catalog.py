@@ -104,6 +104,7 @@ class Known:
     status: str
     size: int | None
     mtime: float | None
+    date_source: str | None = None  # the plan label of the date the last scan used
 
 
 def now_text() -> str:
@@ -120,8 +121,12 @@ class Catalog:
 
     def snapshot(self) -> dict[str, Known]:
         """Every known path, keyed by :func:`path_key`. Opens no media file."""
-        rows = self._conn.execute("SELECT key, status, size, mtime FROM files").fetchall()
-        return {key: Known(status, size, mtime) for key, status, size, mtime in rows}
+        rows = self._conn.execute(
+            "SELECT key, status, size, mtime, date_source FROM files"
+        ).fetchall()
+        return {
+            key: Known(status, size, mtime, source) for key, status, size, mtime, source in rows
+        }
 
     def write_scan(self, rows: Iterable[Mapping[str, object]]) -> None:
         """Insert or replace one row per file, in one transaction. The caller sets the keys."""

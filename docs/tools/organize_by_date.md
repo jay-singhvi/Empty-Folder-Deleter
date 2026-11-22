@@ -21,12 +21,31 @@ minimum year, and not in the far future):
 
 | Step | Used for | Label in the plan |
 |---|---|---|
+| The date in the file name (*Use the date in the file name first*, on by default since 0.9) | Camera and WhatsApp names, see below | Date in the file name |
 | EXIF capture time (Date Taken) | Photos (JPEG, HEIC, PNG, TIFF, and so on) | Date Taken (EXIF) |
 | Creation time in the video | Videos (MP4, MOV, and so on), read with ffprobe | Date Taken (video metadata) |
 | ExifTool capture time | RAW files (CR3) only | Date Taken (ExifTool) |
 | Modified time | Any file, as the last resort | Date Modified (fallback) |
 
 If none of them gives a plausible date, the file goes to the **Unknown Date** folder.
+
+### Dates in file names
+
+Editing, re-saving, converting or exporting a photo or video can change its embedded date (a
+video edited in 2025 may say "created March 2025"), and copying it changes its modified time. The
+name the camera or WhatsApp gave it keeps the day it was taken, so the name is tried first.
+Recognised names include `20220624_005115.mp4` (Samsung), `IMG_20220624_005115.jpg`,
+`VID_20220624_005115.mp4`, `PXL_20220624_005115123.jpg` (Pixel), `DJI_20220624005115_0001_D.JPG`
+(DJI), `Screenshot_20220624-005115.png`, `IMG-20220624-WA0001.jpg` and `VID-20220624-WA0001.mp4`
+(WhatsApp), `WhatsApp Image 2022-06-24 at 00.51.15.jpeg`, `photo_2022-06-24_00-51-15.jpg`
+(Telegram) and `2022-06-24 00.51.15.jpg`. The date must be a real calendar date between the
+earliest believable year and today. Names without a date, such as iPhone's `IMG_1234.HEIC` or
+older DJI's `DJI_0001.JPG`, use the metadata as before. Turn the option off to go by the metadata
+only.
+
+To put right files an earlier version filed by the wrong date, scan the destination folder with
+*Include subfolders* on: a file whose name gives another month is listed to move. *Skip already
+processed files* does not skip such a file.
 
 ## Rules that always hold
 
@@ -60,6 +79,7 @@ Nothing is a fixed constant: every value below has a default and a hint in the a
 | Folder template | `{year}/{year} - {month:02d}` | Only `{year}` and `{month}` may be used. The template must stay inside the destination. |
 | Unknown-date folder name | the Settings value (`Unknown Date`) | Holds files with no usable date. |
 | Name clash suffix (advanced) | `_dup` | Added, with a number, to a new file whose name is taken (`IMG_dup1.jpg`). Existing files are never replaced. |
+| Use the date in the file name first | on | Tries the camera or WhatsApp date in the name before the sources below. |
 | Date sources, in order (advanced) | EXIF, video, ExifTool, modified | The order to try. Remove "modified" and undated files go to the unknown folder. |
 | Earliest believable year (advanced) | the Settings value (1990) | Dates before this are treated as wrong (for example a camera clock reset to 1970). 1990 is a hand-tuned default: change it only if you know why. |
 | Worker threads (advanced) | the Settings value (CPU cores) | How many files are read at once while scanning. 1 to 256. |

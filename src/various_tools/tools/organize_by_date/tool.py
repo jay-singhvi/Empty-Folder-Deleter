@@ -6,8 +6,11 @@ media (the catalog is the one cache it writes). ``apply()`` runs the moves throu
 engine, so each move is journaled and can be undone.
 
 Rules that always hold (legacy docstring, rules 1-4, 🔒):
-1. the date is the capture date when one is available (EXIF for photos, the container's creation
-   time for videos). Only then does the file's modified time count, and only when it is plausible;
+1. the date is the capture date when one is available: the date the camera or WhatsApp wrote
+   into the file name (``name_date_first``, on by default since 0.9, because an edit or a
+   re-encode changes the embedded date but not the name), then EXIF for photos and the
+   container's creation time for videos. Only then does the file's modified time count, and only
+   when it is plausible;
 2. a file with no usable date and no plausible modified time goes to the unknown-date folder;
 3. a cloud-only OneDrive file is never read during the scan, so its date is unknown, and it is
    never moved as it is. By default (``cloud_only="skip"``) it is reported as skipped and listed
@@ -55,6 +58,7 @@ from various_tools.core.fs import (
     walk,
 )
 from various_tools.core.media.exif import ExifInfo
+from various_tools.core.media.name_dates import date_from_name
 from various_tools.core.onedrive import (
     CloudOnlyFileError,
     SyncStatus,
@@ -231,6 +235,18 @@ class OrganizeByDateOptions(ToolOptions):
         ),
         json_schema_extra={"group": "Output", "advanced": True},
     )
+    name_date_first: bool = Field(
+        default=True,
+        title="Use the date in the file name first",
+        description=(
+            "Camera and WhatsApp names such as 20220624_005115.mp4, IMG_20220624_005115.jpg or "
+            "IMG-20220624-WA0001.jpg hold the date the photo or video was taken. That date is "
+            "tried before the sources below, because editing, re-saving or converting a file "
+            "changes its embedded date but not its name. Names without a date (IMG_1234.HEIC) "
+            "use the sources below."
+        ),
+        json_schema_extra={"group": "Dates"},
+    )
     date_priority: list[DateSource] = Field(
         default_factory=lambda: list(DEFAULT_PRIORITY),
         min_length=1,
@@ -399,6 +415,7 @@ class OrganizeByDateOptions(ToolOptions):
 @dataclass(frozen=True)
 class _Config:
     priority: tuple[str, ...]
+    name_first: bool
     workers: int
     min_year: int
     now: datetime
@@ -437,6 +454,7 @@ def _config(opts: OrganizeByDateOptions, ctx: RunContext, unknown_folder: str) -
     """The settings one run reads files with. The scan and a download at apply share it."""
     return _Config(
         priority=tuple(opts.date_priority),
+        name_first=opts.name_date_first,
         workers=opts.workers if opts.workers is not None else ctx.settings.workers,
         min_year=(
             opts.min_plausible_year
@@ -615,6 +633,7 @@ def _inspect(info: FileInfo, cfg: _Config) -> _Inspection:
             video_exts=cfg.video_exts,
             ffprobe_timeout=cfg.ffprobe_timeout,
             exiftool_timeout=cfg.exiftool_timeout,
+            name_first=cfg.name_first,
         )
     except CloudOnlyFileError:
         return _Inspection(info, SyncStatus.CLOUD_ONLY.value, "cloud_only")
@@ -894,7 +913,7 @@ class OrganizeByDate:
         with Catalog(catalog_path) as catalog:
             known = catalog.snapshot()
             candidates = _candidates(roots, opts.recursive, cfg.processable, opts.skip_dot_files)
-            selected, skipped_processed = _select(candidates, known, opts)
+            selected, skipped_processed = _select(candidates, known, opts, cfg)
             if opts.errors_only and not selected:
                 plan.notes.append("No errored files to process. The catalog has none.")
                 return plan
@@ -1244,10 +1263,22 @@ OrganizeByDate.extras = (
 )
 
 
+def _redate_by_name(info: FileInfo, row: Known, cfg: _Config) -> bool:
+    """True when the name holds a date and the catalog's date for the file came from elsewhere."""
+    if not cfg.name_first or row.date_source == dates.LABELS[dates.NAME_SOURCE]:
+        return False
+    return date_from_name(info.path.name, min_year=cfg.min_year, now=cfg.now) is not None
+
+
 def _select(
-    files: list[FileInfo], known: dict[str, Known], opts: OrganizeByDateOptions
+    files: list[FileInfo], known: dict[str, Known], opts: OrganizeByDateOptions, cfg: _Config
 ) -> tuple[list[FileInfo], int]:
-    """Apply the resume and retry filters before any file is opened. Returns (selected, skipped)."""
+    """Apply the resume and retry filters before any file is opened. Returns (selected, skipped).
+
+    With ``name_date_first``, a file whose name holds a date is not skipped when the catalog says
+    an earlier run dated it some other way (an earlier version may have put it in the wrong
+    folder). Only the name is looked at for this.
+    """
     selected: list[FileInfo] = []
     skipped = 0
     for info in files:
@@ -1258,6 +1289,7 @@ def _select(
             and row.status in DONE_STATUSES
             and row.size == info.size
             and row.mtime == info.mtime
+            and not _redate_by_name(info, row, cfg)
         ):
             skipped += 1
             continue

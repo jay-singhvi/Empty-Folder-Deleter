@@ -95,9 +95,10 @@ def test_live_preview_and_compare_sets_are_what_the_plan_says() -> None:
     assert set(LIVE_PREVIEW_TOOLS | COMPARE_TOOLS) <= set(TOOL_IDS)
 
 
-def test_scan_with_invalid_options_does_not_start(open_tool: OpenTool) -> None:
+def test_scan_with_invalid_options_does_not_start(open_tool: OpenTool, tmp_path: Path) -> None:
     page = open_tool("project_export")  # the root folder is required
-    page.other_folders_check.setChecked(True)  # its own folder field, left empty
+    page.state.set_workspace([tmp_path])
+    page.form.set_field_value("root", "")  # the person emptied the folder box
     assert page.scan() is None
     assert page.worker is None
     assert "not valid" in page.status_label.text()
@@ -703,10 +704,9 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     tmp_path: Path,
 ) -> None:
     page = open_tool("empty_folders")
-    page.other_folders_check.setChecked(True)  # the person's own folders are remembered
-    page.form.set_first_folder(str(empty_tree))
-    scan(page)  # a scan remembers the folders and options
-    assert gui_state.last_options("empty_folders")["roots"] == [str(empty_tree)]
+    page.form.set_first_folder(str(empty_tree))  # the page's folder is the working folder
+    scan(page)  # a scan remembers the options
+    assert gui_state.workspace() == [empty_tree]
     assert (tmp_path / "data" / "gui_state.json").is_file()
 
     fresh_window = make_window()
@@ -715,7 +715,7 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     assert [str(r) for r in fresh_page.form.raw_values()["roots"]] == [str(empty_tree)]
 
     reloaded = AppState.load(gui_state.settings_path)
-    assert reloaded.last_options("empty_folders")["roots"] == [str(empty_tree)]
+    assert reloaded.workspace() == [empty_tree]
     third = make_window(reloaded)
     third_page = third.open_tool("empty_folders")
     assert third_page is not None
@@ -723,7 +723,8 @@ def test_remembered_folders_survive_a_new_page_and_a_new_state(
     # Other tools are not affected.
     other = third.open_tool("duplicates")
     assert other is not None
-    assert other.form.raw_values()["roots"] == []
+    assert [str(r) for r in other.form.raw_values()["roots"]] == [str(empty_tree)]  # the same
+    assert "roots" not in gui_state.last_options("duplicates")  # not remembered per tool
 
 
 def test_options_are_remembered_and_reset_keeps_the_folders(
@@ -733,7 +734,6 @@ def test_options_are_remembered_and_reset_keeps_the_folders(
     scan: PageStep,
 ) -> None:
     page = open_tool("empty_folders")
-    page.other_folders_check.setChecked(True)
     page.form.set_first_folder(str(empty_tree))
     page.form.update_values({"min_age_days": 7})
     scan(page)
@@ -796,7 +796,8 @@ def test_remembering_can_be_switched_off(
     assert page is not None
     scan(page)
     assert state.last_options("empty_folders") == {}
-    assert not (tmp_path / "data" / "gui_state.json").exists()
+    saved = (tmp_path / "data" / "gui_state.json").read_text(encoding="utf-8")
+    assert "last_options" not in saved  # only the working folder is kept
 
 
 # ----- missing programs -----------------------------------------------------------------------

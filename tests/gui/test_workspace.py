@@ -76,31 +76,128 @@ def test_a_tool_page_follows_the_working_folder(
     gui_state.set_workspace([first])
     page = window.tool_page("empty_folders")
     assert [str(p) for p in page.form.raw_values()["roots"]] == [str(first)]
-    assert str(first) in page.workspace_label.text()
-    assert not page.form.editor("roots").isVisibleTo(page)
+    assert page.workspace_row.isHidden()  # no "Looks in" line, no check box on a tool page
+    page.show()
+    assert page.form.editor("roots").isVisibleTo(page)
     second = _tree(tmp_path, "second")
     gui_state.set_workspace([second])
     assert [str(p) for p in page.form.raw_values()["roots"]] == [str(second)]
-    assert str(second) in page.workspace_label.text()
 
 
-def test_other_folders_box_reveals_the_field_and_is_remembered(
-    window: MainWindow, gui_state: AppState, tmp_path: Path, scan: Callable[[ToolPage], None]
+def test_editing_the_folder_list_changes_the_working_folder_and_other_pages_follow(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
     work = _tree(tmp_path, "work")
-    other = _tree(tmp_path, "other")
+    extra = _tree(tmp_path, "extra")
     gui_state.set_workspace([work])
     page = window.tool_page("empty_folders")
-    page.other_folders_check.setChecked(True)
-    assert page.form.editor("roots").isVisibleTo(page)
-    page.form.set_values({"roots": [str(other)]})
-    scan(page)
-    gui_state.set_workspace([tmp_path])  # the page does not follow while the box is ticked
-    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(other)]
-    fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
-    assert fresh.other_folders_check.isChecked()
-    assert [str(p) for p in fresh.form.raw_values()["roots"]] == [str(other)]
-    fresh.deleteLater()
+    other = window.tool_page("duplicates")
+    seen: list[list[Path]] = []
+    gui_state.on_workspace_changed(seen.append)
+    editor = page.form.editor("roots")
+    editor.add_paths([str(extra)])  # type: ignore[attr-defined]
+    assert gui_state.workspace() == [work, extra]
+    assert seen == [[work, extra]]  # told once: no loop
+    assert [str(p) for p in other.form.raw_values()["roots"]] == [str(work), str(extra)]
+    assert window.workspace_bar.path_label.text().count("extra") == 1
+    editor.list_widget.setCurrentRow(0)  # type: ignore[attr-defined]
+    editor.list_widget.item(0).setSelected(True)  # type: ignore[attr-defined]
+    editor.remove_selected()  # type: ignore[attr-defined]
+    assert gui_state.workspace() == [extra]
+    assert [str(p) for p in other.form.raw_values()["roots"]] == [str(extra)]
+
+
+def test_a_drop_on_the_folder_list_changes_the_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    from PySide6.QtCore import QMimeData, QUrl
+
+    work = _tree(tmp_path, "work")
+    dropped = _tree(tmp_path, "dropped")
+    gui_state.set_workspace([work])
+    page = window.tool_page("empty_folders")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(dropped))])
+    assert page.form.editor("roots").accept_mime(mime)  # type: ignore[attr-defined]
+    assert gui_state.workspace() == [work, dropped]
+
+
+def test_a_one_folder_tool_replaces_the_first_working_folder_when_the_scan_starts(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    first, second, typed = (_tree(tmp_path, n) for n in ("first", "second", "typed"))
+    gui_state.set_workspace([first, second])
+    page = window.tool_page("project_export")
+    assert page.form.raw_values()["root"] == str(first)
+    recents = gui_state.recent_workspaces()
+    page.form.set_field_value("root", str(typed))  # typing: nothing yet
+    assert gui_state.workspace() == [first, second]
+    page._sync_single_workspace()  # pyright: ignore[reportPrivateUsage]
+    assert gui_state.workspace() == [typed, second]
+    assert gui_state.recent_workspaces()[0] == [typed, second]
+    assert gui_state.recent_workspaces() != recents
+
+
+def test_scanning_a_one_folder_tool_syncs_the_working_folder(
+    window: MainWindow,
+    gui_state: AppState,
+    tmp_path: Path,
+    wait_idle: Callable[[ToolPage], None],
+) -> None:
+    first = _tree(tmp_path, "first")
+    typed = _tree(tmp_path, "typed")
+    gui_state.set_workspace([first])
+    page = window.tool_page("project_export")
+    page.form.set_field_value("root", str(typed))
+    worker = page.scan()
+    assert worker is not None
+    assert gui_state.workspace() == [typed]
+    wait_idle(page)
+
+
+def test_the_old_use_other_folders_flag_is_ignored(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    work = _tree(tmp_path, "work")
+    old = _tree(tmp_path, "old")
+    gui_state.set_workspace([work])
+    gui_state.remember_options("empty_folders", {"roots": [str(old)], "_use_other_folders": True})
+    page = ToolPage(gui_state, gui_state.tools["empty_folders"])
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(work)]
+    assert not hasattr(page, "other_folders_check") or page.workspace_row.isHidden()
+    page.deleteLater()
+
+
+def test_a_step_page_with_its_own_folders_does_not_touch_the_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    work = _tree(tmp_path, "work")
+    own = _tree(tmp_path, "own")
+    extra = _tree(tmp_path, "extra")
+    gui_state.set_workspace([work])
+    tool = gui_state.tools["empty_folders"]
+    page = ToolPage(gui_state, tool, preset=({"roots": [str(own)]}, True))
+    assert page.other_folders_check.isChecked()
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(own)]
+    page.form.editor("roots").add_paths([str(extra)])  # type: ignore[attr-defined]
+    assert gui_state.workspace() == [work]
+    gui_state.set_workspace([extra])  # and it does not follow either
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(own), str(extra)]
+    page.deleteLater()
+
+
+def test_a_step_page_without_own_folders_still_follows_the_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    work = _tree(tmp_path, "work")
+    gui_state.set_workspace([work])
+    page = ToolPage(gui_state, gui_state.tools["empty_folders"], preset=({}, False))
+    assert str(work) in page.workspace_label.text()
+    assert not page.workspace_row.isHidden() or not page.isVisible()
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(work)]
+    gui_state.set_workspace([_tree(tmp_path, "next")])
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(tmp_path / "next")]
+    page.deleteLater()
 
 
 def test_remembered_folders_do_not_override_the_working_folder(
@@ -113,7 +210,6 @@ def test_remembered_folders_do_not_override_the_working_folder(
     scan(page)
     gui_state.set_workspace([new])
     fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
-    assert not fresh.other_folders_check.isChecked()
     assert [str(p) for p in fresh.form.raw_values()["roots"]] == [str(new)]
     fresh.deleteLater()
 
@@ -161,14 +257,14 @@ def test_temp_cleaner_opts_out_of_the_working_folder(window: MainWindow) -> None
     assert not page.uses_workspace
 
 
-def test_open_tool_with_a_folder_sets_the_override_for_that_page(
+def test_open_tool_with_a_folder_sets_the_working_folder(
     window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
     gui_state.set_workspace([_tree(tmp_path, "work")])
     target = _tree(tmp_path, "target")
     page = window.open_tool("empty_folders", str(target))
     assert page is not None
-    assert page.other_folders_check.isChecked()
+    assert gui_state.workspace() == [target]  # the working folder, so every page follows
     assert [str(p) for p in page.form.raw_values()["roots"]] == [str(target)]
 
 
@@ -275,12 +371,12 @@ def test_menu_actions_exist_with_their_shortcuts(window: MainWindow) -> None:
 def test_choose_working_folder_sets_it(
     window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
-    window.choose_folder = lambda: str(tmp_path)
+    window.choose_folders = lambda _title: [str(tmp_path)]
     window.choose_folder_action.trigger()
     assert gui_state.workspace() == [tmp_path]
     assert str(tmp_path) in window.workspace_bar.path_label.text()
     assert window.home_page.workspace_label.text() == str(tmp_path)
-    window.choose_folder = lambda: None  # cancelled: nothing changes
+    window.choose_folders = lambda _title: []  # cancelled: nothing changes
     window.choose_folder_action.trigger()
     assert gui_state.workspace() == [tmp_path]
 
@@ -289,7 +385,26 @@ def test_add_a_folder_to_the_working_folder(
     window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
     gui_state.set_workspace([tmp_path / "a"])
-    window.choose_folder = lambda: str(tmp_path / "b")
+    window.choose_folders = lambda _title: [str(tmp_path / "b")]
+    window.add_folder_action.trigger()
+    assert gui_state.workspace() == [tmp_path / "a", tmp_path / "b"]
+
+
+def test_choose_working_folder_takes_several_folders(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    window.choose_folders = lambda _title: [str(tmp_path / "x"), str(tmp_path / "y")]
+    window.choose_folder_action.trigger()
+    assert gui_state.workspace() == [tmp_path / "x", tmp_path / "y"]
+    assert "x" in window.workspace_bar.path_label.text()
+    assert "y" in window.workspace_bar.path_label.text()
+
+
+def test_add_several_folders_to_the_working_folder_without_repeats(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    gui_state.set_workspace([tmp_path / "a"])
+    window.choose_folders = lambda _title: [str(tmp_path / "b"), str(tmp_path / "a")]
     window.add_folder_action.trigger()
     assert gui_state.workspace() == [tmp_path / "a", tmp_path / "b"]
 
@@ -402,7 +517,7 @@ def test_home_page_prompts_for_a_folder_and_shows_it_once_chosen(
     home = window.home_page
     assert not home.prompt_label.isHidden()
     asked: list[bool] = []
-    window.choose_folder = lambda: asked.append(True) or None
+    window.choose_folders = lambda _title: asked.append(True) or []
     home.choose_button.click()
     assert asked == [True]
     gui_state.set_workspace([tmp_path])
@@ -444,42 +559,37 @@ def test_a_scan_running_when_the_working_folder_changes_gets_the_banner(
     qtbot.waitUntil(lambda: page.worker is None, timeout=30000)
 
 
-def test_a_folder_set_by_the_shell_menu_is_not_remembered_as_other_folders(
-    window: MainWindow, gui_state: AppState, tmp_path: Path, scan: Callable[[ToolPage], None]
+def test_set_folder_and_set_folders_set_the_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
     work = _tree(tmp_path, "work")
     other = _tree(tmp_path, "other")
+    more = _tree(tmp_path, "more")
     gui_state.set_workspace([work])
     page = window.tool_page("empty_folders")
     assert page.set_folder(str(other))
-    assert page.other_folders_check.isChecked()
-    scan(page)
-    fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
-    assert not fresh.other_folders_check.isChecked()
-    fresh.deleteLater()
+    assert gui_state.workspace() == [other]
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(other)]
+    assert page.set_folders([str(other), str(more)])
+    assert gui_state.workspace() == [other, more]
+    assert not page.set_folders([])
+    assert [str(p) for p in window.tool_page("duplicates").form.raw_values()["roots"]] == [
+        str(other),
+        str(more),
+    ]
 
 
-def test_a_tick_of_use_other_folders_by_the_person_is_remembered(
-    window: MainWindow, gui_state: AppState, tmp_path: Path, scan: Callable[[ToolPage], None]
-) -> None:
-    gui_state.set_workspace([_tree(tmp_path, "work")])
-    page = window.tool_page("empty_folders")
-    page.other_folders_check.setChecked(True)
-    page.form.set_first_folder(str(_tree(tmp_path, "mine")))
-    scan(page)
-    fresh = ToolPage(gui_state, gui_state.tools["empty_folders"])
-    assert fresh.other_folders_check.isChecked()
-    fresh.deleteLater()
-
-
-def test_a_one_folder_tool_says_it_uses_the_first_working_folder(
+def test_a_one_folder_tool_shows_the_first_working_folder(
     window: MainWindow, gui_state: AppState, tmp_path: Path
 ) -> None:
     first, second = _tree(tmp_path, "first"), _tree(tmp_path, "second")
     gui_state.set_workspace([first, second])
     page = window.tool_page("project_export")
-    text = page.workspace_label.text()
-    assert str(first) in text and "first" in text and str(second) not in text
+    assert page.form.raw_values()["root"] == str(first)
+    assert "Looking in" not in page.options_summary_text() or str(first) in (
+        page.options_summary_text()
+    )
+    assert str(second) not in page.options_summary_text()
 
 
 def test_home_cards_wrap_and_never_scroll_sideways(qtbot: QtBot, window: MainWindow) -> None:

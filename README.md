@@ -8,7 +8,7 @@ This repository started as the **Empty Folder Deleter** Tkinter app; that app is
 
 ![The Home page with the tool cards](docs/images/home.png)
 
-Home: every tool, and the working folder they share.
+Home: every tool, and the working folder they share. "Choose working folder" (and Add in a tool's folder list) can pick several folders at once; the folder list on a tool page is the working folder, so a change there shows on every page.
 
 ![A tool page: Sort by type with its plan](docs/images/tool-page-sort-by-type.png)
 

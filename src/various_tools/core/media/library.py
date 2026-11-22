@@ -35,8 +35,9 @@ from various_tools.core.context import Cancelled, RunContext
 from various_tools.core.fs import FileInfo, walk
 from various_tools.core.media import exif, ffmpeg, places
 from various_tools.core.media.imaging import IMAGE_EXTS, RAW_EXTS
+from various_tools.core.media.name_dates import date_from_name
 from various_tools.core.media.places import PlaceName
-from various_tools.core.settings import Settings
+from various_tools.core.settings import DEFAULT_MIN_PLAUSIBLE_YEAR, Settings
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ FROM_CAMERA = "camera"
 FROM_VIDEO = "video"
 FROM_MODIFIED = "modified"
 FROM_MODIFIED_CLOUD = "modified (in OneDrive only)"
+FROM_NAME = "file name"
 
 
 @dataclass(frozen=True)
@@ -366,7 +368,7 @@ class MediaLibrary:
         for row in rows:
             if prefixes is not None and not any(str(row[0]).startswith(p) for p in prefixes):
                 continue
-            found.append(_item_from_row(row))
+            found.append(_name_dated(_item_from_row(row)))
         return sort_items(found)
 
     def with_location(self, roots: Sequence[Path] | None = None) -> list[MediaItem]:
@@ -619,8 +621,21 @@ def read_media_item(path: Path, ctx: RunContext) -> MediaItem | None:
     if not cloud and exiftool is not None and _is_raw(path):
         raw = exif.exiftool_raw_info(exiftool, [path], ctx.settings.exiftool_read_timeout_s)
         year = ctx.settings.min_plausible_year
-        return _apply_raw(_base_item(info, cloud=False), raw.get(path), year)
-    return _read_file(info, cloud, ctx, need_note=False)[0]
+        return _name_dated(_apply_raw(_base_item(info, cloud=False), raw.get(path), year))
+    return _name_dated(_read_file(info, cloud, ctx, need_note=False)[0])
+
+
+def _name_dated(item: MediaItem) -> MediaItem:
+    """``item`` dated by the camera's or WhatsApp's file name when the name holds a date.
+
+    An edit or a re-encode changes the embedded date but not the name (organize_by_date does
+    the same). Applied when items are handed out, so rows stored by older versions follow too.
+    Only the name is looked at, so a cloud-only file is not read.
+    """
+    named = date_from_name(item.path.name, min_year=DEFAULT_MIN_PLAUSIBLE_YEAR, now=datetime.now())
+    if named is None:
+        return item
+    return replace(item, taken=named.when, date_source=FROM_NAME)
 
 
 def _is_raw(path: Path) -> bool:

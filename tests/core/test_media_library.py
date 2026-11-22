@@ -732,3 +732,21 @@ def test_a_half_migrated_v1_file_opens_and_keeps_its_rows(tmp_path: Path) -> Non
     columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
     conn.close()
     assert {"place_city", "place_region", "place_country", "place_done"} <= columns
+
+
+def test_a_date_in_the_file_name_beats_the_embedded_date(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext, cloud: set[str]
+) -> None:
+    """An edit changes the embedded date, not the camera's or WhatsApp's name (0.9)."""
+    root = tmp_path / "pics"
+    make_jpeg(root / "IMG_20220624_005115.jpg")  # the camera date says 2024
+    make_jpeg(root / "IMG-20190801-WA0003.jpg", taken=None)
+    make_jpeg(root / "IMG_20210101_120000.jpg")
+    cloud.add("IMG_20210101_120000.jpg")
+    lib.sync([root], ctx)
+    items = {item.path.name: item for item in lib.items()}
+    assert items["IMG_20220624_005115.jpg"].taken == datetime(2022, 6, 24, 0, 51, 15)
+    assert items["IMG_20220624_005115.jpg"].date_source == "file name"
+    assert items["IMG-20190801-WA0003.jpg"].taken == datetime(2019, 8, 1)
+    assert items["IMG_20210101_120000.jpg"].taken == datetime(2021, 1, 1, 12, 0, 0)
+    assert [i.path.name for i in lib.items()][0] == "IMG-20190801-WA0003.jpg"

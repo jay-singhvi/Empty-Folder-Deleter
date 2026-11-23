@@ -446,7 +446,7 @@ In priority order. Each one gets a plan preview, journal entries and undo like t
 
 ---
 
-## 7. After the plan: releases 0.4 to 0.8, and what comes next
+## 7. After the plan: releases 0.4 to 0.9, and what comes next
 
 Phases 0 to 8 are done. Everything since then came from the owner's requests and is recorded in
 `CHANGELOG.md` and the design notes in `docs/superpowers/specs/`. The handoff for the next
@@ -459,11 +459,19 @@ session is `docs/HANDOFF.md`.
 | 0.6.0 | One working folder, menu bar, Home page, results-list picking, apply in batches, photo browser, Change date tool | `2026-11-20-workspace-and-photos-design.md` |
 | 0.7.0 | Wait for OneDrive to upload each batch; every 0.5/0.6 leftover (nested library folders, RAW/video places, map wrap, sidecars, …) | `2026-11-21-left-for-later-design.md` |
 | 0.8.0 | Saved recipes, duplicates in the photo library, offline place names (GeoNames) | `2026-11-21-wave-2-design.md` |
+| 0.9.0 | Dates from file names first, several folders at once, the tool page's folder list is the working folder, Continue after Stop, Change pace while applying | `2026-11-22-name-dates-folders-continue-design.md` |
 
 Additions to the architecture since the plan was written:
 
 - **Working folder** (GUI state, `gui/state.py`): a tool's workspace field is its first folder
-  field, or its `workspace_field` attribute (`None` opts out: Temp Cleaner, Change date).
+  field, or its `workspace_field` attribute (`None` opts out: Temp Cleaner, Change date). Since
+  0.9 the field is always shown and *is* the working folder (list edits sync at once, a
+  one-folder field at scan start); only a recipe step page can hold folders of its own.
+  `gui/widgets/path_picker.choose_folders` is the multi-select folder window (non-native Qt).
+- **Dates from file names** (`core/media/name_dates.py`, pure): organize_by_date's
+  `name_date_first` (default on) and the library's `items()` try the name before EXIF, video
+  metadata and the modified time. `PXL_` (Pixel) names are UTC: an embedded date within 14 h
+  wins. `library.read_media_item` (Change date) keeps the embedded date on purpose.
 - **Pacing** (`core/context.py` `Pace`, `core/plan.py` `apply_plan`): batches, pauses, Pause /
   Skip the wait, a journal heartbeat while waiting, and the OneDrive upload wait
   (`core/onedrive.upload_pending`, Cloud Files API, never recalls a file). Still one journal
@@ -472,8 +480,10 @@ Additions to the architecture since the plan was written:
 - **Continue after Stop** (`gui/continue_run.py`, `ToolPage._prepare_continue`): after a
   cancelled run, or one with failures, the page keeps its list without the done rows (matched by
   kind and source) and Apply reads "Continue (N left)"; Continue applies the rest as a new
-  journaled run. A new scan or changed options drop it. Fix File Extensions and Organize by Date
-  fall back to "scan again" because their rows depend on each other while applying.
+  journaled run (rows without a source are matched by their place, the outcome's `seq`). A new
+  scan or changed options drop it. Fix File Extensions, and Organize by Date when its list has
+  resize or download (`convert`) rows, fall back to "scan again" because their rows depend on
+  each other while applying.
 - **Hooks in `apply_plan`**: `before_action` (a tool can retarget or skip an action from what
   was journaled before it, used by Fix File Extensions sidecars) and `PlannedAction.extra`
   (facts to re-check at apply time, used by Change date).
@@ -492,5 +502,7 @@ Additions to the architecture since the plan was written:
    without one object per row would bring it near 0.1 s.
 3. **Face grouping** and **trips** (automatic events from date and place gaps) on the
    Timeline. Faces need a model choice (local only, privacy) and an owner decision.
-4. **Release assets**: let `release.yml` attach the installer (it already rebuilds, tests and
-   uploads on a `v*` tag) and stop uploading local builds by hand; see `docs/HANDOFF.md`.
+4. **Continue after the app was closed**: store the kept plan (the `Plan` JSON) so Continue
+   survives a restart.
+5. **Name dates elsewhere**: Rename and Change date could offer "take the date from the name"
+   with the same `name_dates` rules (Rename has its own older pattern option).

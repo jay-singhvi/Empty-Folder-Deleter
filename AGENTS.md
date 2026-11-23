@@ -17,8 +17,8 @@ This repository started as the **Empty Folder Deleter** Tkinter app, which is no
 
 ## Current state
 
-All plan phases (0 to 8) are implemented on `main`, and releases 0.4.0 to 0.8.0 followed
-(latest: v0.8.0). `CHANGELOG.md` records what each release did, the decisions taken and what
+All plan phases (0 to 8) are implemented on `main`, and releases 0.4.0 to 0.9.0 followed
+(latest: v0.9.0). `CHANGELOG.md` records what each release did, the decisions taken and what
 is left. **Start with `docs/HANDOFF.md`**: the current state, the release process that
 worked, known pitfalls, and the next candidates (`docs/MODERNIZATION_PLAN.md` §7).
 

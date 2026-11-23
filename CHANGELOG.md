@@ -37,6 +37,16 @@ Owner's report: a video `Camera Roll22 - 0620624_005115.mp4` was moved to
 - **Change the pace while applying:** *Change pace…* next to Pause sets a new batch size and wait;
   it takes effect from the next batch.
 - Version 0.9.0.
+- **Review fixes:**
+  - Change date reads and rewrites the embedded date, never the one from the name (the
+    Timeline shows the name's date; Change date's preview does not).
+  - Pixel (`PXL_`) names hold UTC time: an embedded date that agrees within 14 hours wins, so a
+    photo taken late on 30 June in the US is not filed under July.
+  - Continue drops exactly the done rows of tools that write files (checksum manifests), not the
+    first ones in the list.
+  - Emptying the folder list empties it on every page; opening a recipe step that has its own
+    folders on a folder does not change the working folder; a pace set during an all-at-once
+    apply counts from then on instead of waiting at once.
 
 ### Version 0.8.0: saved recipes, duplicates in the photo library, place names (2026-11-21)
 

@@ -49,6 +49,10 @@ class NameDate:
 
     when: datetime
     has_time: bool
+    # The camera wrote the time in UTC, not local time (Google Pixel's ``PXL_`` names), so the
+    # day can be one off near midnight: an embedded local date that agrees within a time zone
+    # should win.
+    utc: bool = False
 
 
 def _time_of_day(match: re.Match[str]) -> tuple[int, int, int] | None:
@@ -84,8 +88,10 @@ def date_from_name(name: str, *, min_year: int, now: datetime) -> NameDate | Non
             continue
         if day.year < min_year or day > latest:
             continue
+        utc = base.upper().startswith("PXL_")
         clock = _time_of_day(match)
         if clock is None:
-            return NameDate(day, False)
-        return NameDate(day.replace(hour=clock[0], minute=clock[1], second=clock[2]), True)
+            return NameDate(day, False, utc)
+        when = day.replace(hour=clock[0], minute=clock[1], second=clock[2])
+        return NameDate(when, True, utc)
     return None

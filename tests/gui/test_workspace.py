@@ -612,3 +612,33 @@ def test_home_cards_wrap_and_never_scroll_sideways(qtbot: QtBot, window: MainWin
     qtbot.keyClick(card, Qt.Key.Key_Return)
     qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
     assert opened == ["empty_folders", "empty_folders"]
+
+
+def test_emptying_the_folder_list_empties_it_on_every_page(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    """Review fix: an emptied list must not come back from another page's scan."""
+    work = _tree(tmp_path, "work")
+    gui_state.set_workspace([work])
+    page = window.tool_page("empty_folders")
+    other = window.tool_page("duplicates")
+    editor = page.form.editor("roots")
+    editor.list_widget.item(0).setSelected(True)  # type: ignore[attr-defined]
+    editor.remove_selected()  # type: ignore[attr-defined]
+    assert gui_state.workspace() == []
+    assert not other.form.raw_values().get("roots")
+
+
+def test_set_folder_on_a_step_page_with_its_own_folders_keeps_the_working_folder(
+    window: MainWindow, gui_state: AppState, tmp_path: Path
+) -> None:
+    work = _tree(tmp_path, "work")
+    own = _tree(tmp_path, "own")
+    other = _tree(tmp_path, "other")
+    gui_state.set_workspace([work])
+    tool = gui_state.tools["empty_folders"]
+    page = ToolPage(gui_state, tool, preset=({"roots": [str(own)]}, True))
+    assert page.set_folder(str(other))
+    assert gui_state.workspace() == [work]
+    assert [str(p) for p in page.form.raw_values()["roots"]] == [str(other)]
+    page.deleteLater()

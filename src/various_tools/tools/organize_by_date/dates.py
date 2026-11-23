@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -40,6 +40,7 @@ DateSource = Literal["exif", "video_tag", "exiftool", "modified"]
 DATE_SOURCES: tuple[str, ...] = get_args(DateSource)
 DEFAULT_PRIORITY: tuple[DateSource, ...] = ("exif", "video_tag", "exiftool", "modified")
 
+UTC_SPREAD = timedelta(hours=14)  # the widest time zone offset from UTC
 NAME_SOURCE = "name"  # not a ``date_priority`` entry: the ``name_date_first`` option
 LABELS: dict[str, str] = {
     NAME_SOURCE: "Date in the file name",
@@ -121,34 +122,50 @@ def read_capture_date(
     def plausible(value: datetime | None) -> bool:
         return is_plausible_date(value, min_year=min_year, now=now)
 
+    def by_metadata() -> Reading:
+        for step in priority:
+            if step == "exif":
+                if exif is not None and plausible(exif.capture_time):
+                    return Reading(exif.capture_time, LABELS[step], exif)
+            elif step == "video_tag":
+                if suffix in video_exts and ffprobe is not None:
+                    probe: Path = ffprobe
+                    taken = _safe_date(
+                        "Video metadata",
+                        path,
+                        lambda probe=probe: creation_time(probe, path, timeout=ffprobe_timeout),
+                    )
+                    if plausible(taken):
+                        return Reading(taken, LABELS[step], exif)
+            elif step == "exiftool":
+                if suffix in raw_exts and exiftool is not None:
+                    reader: Path = exiftool
+                    taken = _safe_date(
+                        "ExifTool",
+                        path,
+                        lambda reader=reader: exiftool_capture_time(reader, path, exiftool_timeout),
+                    )
+                    if plausible(taken):
+                        return Reading(taken, LABELS[step], exif)
+            elif step == "modified" and plausible(modified):
+                return Reading(modified, LABELS[step], exif)
+        label = UNKNOWN_LABEL if "modified" in priority else NO_DATE_LABEL
+        return Reading(None, label, exif)
+
     if name_first:
         named = date_from_name(path.name, min_year=min_year, now=now)
         if named is not None:
-            return Reading(named.when, LABELS[NAME_SOURCE], exif)
-
-    for step in priority:
-        if step == "exif":
-            if exif is not None and plausible(exif.capture_time):
-                return Reading(exif.capture_time, LABELS[step], exif)
-        elif step == "video_tag":
-            if suffix in video_exts and ffprobe is not None:
-                taken = _safe_date(
-                    "Video metadata",
-                    path,
-                    lambda: creation_time(ffprobe, path, timeout=ffprobe_timeout),
-                )
-                if plausible(taken):
-                    return Reading(taken, LABELS[step], exif)
-        elif step == "exiftool":
-            if suffix in raw_exts and exiftool is not None:
-                taken = _safe_date(
-                    "ExifTool",
-                    path,
-                    lambda: exiftool_capture_time(exiftool, path, exiftool_timeout),
-                )
-                if plausible(taken):
-                    return Reading(taken, LABELS[step], exif)
-        elif step == "modified" and plausible(modified):
-            return Reading(modified, LABELS[step], exif)
-    label = UNKNOWN_LABEL if "modified" in priority else NO_DATE_LABEL
-    return Reading(None, label, exif)
+            by_name = Reading(named.when, LABELS[NAME_SOURCE], exif)
+            if not named.utc:
+                return by_name
+            # A UTC time in the name (Pixel): an embedded local date that agrees with it within
+            # a time zone is the right one; near midnight the name's day can be the next one.
+            embedded = by_metadata()
+            if (
+                embedded.date is not None
+                and embedded.label != LABELS["modified"]
+                and abs(embedded.date - named.when) <= UTC_SPREAD
+            ):
+                return embedded
+            return by_name
+    return by_metadata()

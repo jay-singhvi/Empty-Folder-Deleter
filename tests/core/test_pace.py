@@ -317,8 +317,9 @@ def test_none_then_a_pace_starts_waiting(
     ctx = _ctx(tmp_path, journal, None)
     _swap_when_starting(ctx, 2, Pace(2, 0.25))
     apply_plan(_plan(tmp_path, 6), ctx)
-    # no waits for 2 actions, then the 3rd sees 2 since the start: one wait, then 2 more, wait
-    assert sleeps == [0.25, 0.25]
+    # the pace counts from when it is set (during action 3): actions 4 and 5 are its first
+    # batch, so one wait before action 6 (review fix: no wait at once for what ran before)
+    assert sleeps == [0.25]
 
 
 def test_a_pace_then_none_stops_waiting(

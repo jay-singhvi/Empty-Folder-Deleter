@@ -693,6 +693,7 @@ def apply_plan(
     total = len(actions)
     refused_roots = _refused_roots(plan, ctx)
     waited_at = 0  # ``executed`` at the last wait: a batch is what ran since then
+    last_pace = ctx.pace
     batch_no = 0
     batch_outputs: list[Path] = []  # what this batch wrote, for the upload wait
     executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
@@ -706,6 +707,12 @@ def apply_plan(
             # The pace is read before each action: the GUI may swap ``ctx.pace`` (a frozen
             # object, never edited) while the run goes on, and it counts from the next batch.
             pace = ctx.pace
+            if pace is not last_pace:
+                # A new pace counts from the next batch: what ran before it is not a batch.
+                if last_pace is None:
+                    waited_at = executed
+                    batch_outputs = []
+                last_pace = pace
             if pace is not None and executed - waited_at >= pace.batch_size:
                 waited_at = executed
                 batch_no += 1

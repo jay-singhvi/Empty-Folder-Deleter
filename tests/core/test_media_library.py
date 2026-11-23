@@ -750,3 +750,26 @@ def test_a_date_in_the_file_name_beats_the_embedded_date(
     assert items["IMG-20190801-WA0003.jpg"].taken == datetime(2019, 8, 1)
     assert items["IMG_20210101_120000.jpg"].taken == datetime(2021, 1, 1, 12, 0, 0)
     assert [i.path.name for i in lib.items()][0] == "IMG-20190801-WA0003.jpg"
+
+
+def test_read_media_item_keeps_the_embedded_date_for_change_date(
+    tmp_path: Path, ctx: RunContext
+) -> None:
+    """Change date reads and rewrites the embedded date, never the name's (review fix)."""
+    photo = make_jpeg(tmp_path / "IMG_20220624_005115.jpg")
+    item = library_module.read_media_item(photo, ctx)
+    assert item is not None
+    assert item.taken == datetime(2024, 5, 6, 7, 8, 9)
+    assert item.date_source == "camera"
+
+
+def test_a_pixel_utc_name_loses_to_an_embedded_date_that_agrees(
+    tmp_path: Path, lib: MediaLibrary, ctx: RunContext
+) -> None:
+    root = tmp_path / "pics"
+    make_jpeg(root / "PXL_20220701_013000123.jpg", taken="2022:06:30 18:30:00")  # UTC-7
+    make_jpeg(root / "PXL_20220701_013000999.jpg", taken="2025:03:01 10:00:00")  # edited later
+    lib.sync([root], ctx)
+    items = {item.path.name: item for item in lib.items()}
+    assert items["PXL_20220701_013000123.jpg"].taken == datetime(2022, 6, 30, 18, 30)
+    assert items["PXL_20220701_013000999.jpg"].taken == datetime(2022, 7, 1, 1, 30)

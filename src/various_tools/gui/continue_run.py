@@ -52,11 +52,25 @@ def drop_done(
     A row is removed once per done outcome, so two identical rows are not both removed by one.
     Skipped and failed outcomes keep their rows.
     """
-    done = Counter(_key(o.kind, o.src) for o in outcomes if o.status == "done")
+    done = Counter(_key(o.kind, o.src) for o in outcomes if o.status == "done" and o.src)
+    # A row without a source is found by its place: ``seq`` counts the checked rows from 1.
+    checked = [i for i, a in enumerate(plan.actions) if a.selected]
+    done_places: set[int] = set()
+    for o in outcomes:
+        if o.status == "done" and o.src is None and 1 <= o.seq <= len(checked):
+            index = checked[o.seq - 1]
+            if str(plan.actions[index].kind) == o.kind and plan.actions[index].src is None:
+                done_places.add(index)
     kept_actions: list[PlannedAction] = []
     kept_sizes: list[int | None] = []
     for index, action in enumerate(plan.actions):
-        key = _key(str(action.kind), str(action.src) if action.src is not None else None)
+        if action.src is None:
+            if index in done_places:
+                continue
+            kept_actions.append(action)
+            kept_sizes.append(sizes[index] if index < len(sizes) else None)
+            continue
+        key = _key(str(action.kind), str(action.src))
         if action.selected and done[key] > 0:
             done[key] -= 1
             continue

@@ -25,7 +25,7 @@ import os
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, Self
@@ -621,19 +621,29 @@ def read_media_item(path: Path, ctx: RunContext) -> MediaItem | None:
     if not cloud and exiftool is not None and _is_raw(path):
         raw = exif.exiftool_raw_info(exiftool, [path], ctx.settings.exiftool_read_timeout_s)
         year = ctx.settings.min_plausible_year
-        return _name_dated(_apply_raw(_base_item(info, cloud=False), raw.get(path), year))
-    return _name_dated(_read_file(info, cloud, ctx, need_note=False)[0])
+        return _apply_raw(_base_item(info, cloud=False), raw.get(path), year)
+    return _read_file(info, cloud, ctx, need_note=False)[0]
 
 
 def _name_dated(item: MediaItem) -> MediaItem:
     """``item`` dated by the camera's or WhatsApp's file name when the name holds a date.
 
     An edit or a re-encode changes the embedded date but not the name (organize_by_date does
-    the same). Applied when items are handed out, so rows stored by older versions follow too.
-    Only the name is looked at, so a cloud-only file is not read.
+    the same). Applied only when :meth:`MediaLibrary.items` hands items to the Timeline and the
+    Map, so rows stored by older versions follow too; :func:`read_media_item` keeps the embedded
+    date, because Change date reads and rewrites that one. Only the name is looked at, so a
+    cloud-only file is not read. A UTC name (Pixel) loses to an embedded date that agrees with it
+    within a time zone.
     """
     named = date_from_name(item.path.name, min_year=DEFAULT_MIN_PLAUSIBLE_YEAR, now=datetime.now())
     if named is None:
+        return item
+    if (
+        named.utc
+        and item.taken is not None
+        and item.date_source in (FROM_CAMERA, FROM_VIDEO)
+        and abs(item.taken - named.when) <= timedelta(hours=14)
+    ):
         return item
     return replace(item, taken=named.when, date_source=FROM_NAME)
 

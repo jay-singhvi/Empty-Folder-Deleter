@@ -248,6 +248,21 @@ def test_the_date_in_the_name_beats_a_later_exif_date(
     assert action.reason.startswith("Date in the file name")
 
 
+def test_a_pixel_name_in_utc_gives_way_to_an_exif_date_that_agrees(
+    tmp_path: Path, src: Path, dest: Path
+) -> None:
+    """Pixel names hold UTC: 01:30 on 1 July UTC is 30 June in the evening in the US."""
+    _jpeg(src / "PXL_20220701_013000123.jpg", original="2022:06:30 18:30:00")
+    _jpeg(src / "PXL_20220701_013000999.jpg", original="2025:03:01 10:00:00")
+    plan = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path))
+    by_name = {Path(a.src).name: a for a in plan.selected_actions() if a.src}
+    agrees = by_name["PXL_20220701_013000123.jpg"]
+    assert agrees.dst == dest / "2022" / "2022 - 06" / "PXL_20220701_013000123.jpg"
+    assert agrees.reason.startswith("Date Taken (EXIF)")
+    edited = by_name["PXL_20220701_013000999.jpg"]
+    assert edited.dst == dest / "2022" / "2022 - 07" / "PXL_20220701_013000999.jpg"
+
+
 def test_whatsapp_names_are_dated_by_their_name(tmp_path: Path, src: Path, dest: Path) -> None:
     _jpeg(src / "IMG-20190801-WA0003.jpg", modified=_when("2024-01-01 12:00:00"))
     (action,) = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path)).selected_actions()

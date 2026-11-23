@@ -197,6 +197,19 @@ def test_a_write_row_is_matched_by_kind_when_the_file_got_another_name(tmp_path:
     assert [a.dst.name for a in plan.actions if a.dst] == ["m2.txt"]
 
 
+def test_the_write_row_that_was_done_is_dropped_not_the_first_one(tmp_path: Path) -> None:
+    """Manifest 1 failed, manifest 2 was done, then Stop: 1 and 3 are left (review fix)."""
+    writes = [PlannedAction(ActionKind.WRITE, None, tmp_path / f"m{n}.txt", "x") for n in (1, 2, 3)]
+    plan = Plan(tool="t", roots=[tmp_path], actions=writes)
+    outcomes = [
+        ActionOutcome(1, "write", "failed", None, str(tmp_path / "m1.txt"), "unreadable"),
+        ActionOutcome(2, "write", "done", None, str(tmp_path / "m2.txt")),
+    ]
+    sizes = drop_done(plan, outcomes, [1, 2, 3])
+    assert [a.dst.name for a in plan.actions if a.dst] == ["m1.txt", "m3.txt"]
+    assert sizes == [1, 3]
+
+
 def test_change_pace_swaps_the_pace_of_the_running_apply(
     qtbot: QtBot,
     open_tool: Any,

@@ -708,8 +708,8 @@ class ToolPage(QWidget):
             return
         paths = self.state.workspace()
         if self._preset is None:
-            if paths:
-                self._put_workspace_in_field(paths)
+            if paths or self.form.field_spec(name).kind == "list":
+                self._put_workspace_in_field(paths)  # an emptied list empties every page
             return
         self.workspace_label.setText(
             "Looks in: folders chosen for this step"
@@ -847,11 +847,10 @@ class ToolPage(QWidget):
         """Make a folder the working folder (used by ``--folder`` and the shell menu); every page
         follows. A recipe step page with folders of its own, and a tool with no working-folder
         option, get it in their first folder field instead."""
-        if self._ws_name is not None:
+        if self._ws_name is not None and (self._preset is None or not self._override):
             self.state.set_workspace([Path(path)])
-            if self._preset is None or not self._override:
-                self._form_changed()  # a live preview starts on the new folder
-                return True
+            self._form_changed()  # a live preview starts on the new folder
+            return True
         return self.form.set_first_folder(path)
 
     def set_folders(self, paths: list[str]) -> bool:

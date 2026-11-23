@@ -58,7 +58,9 @@ def found(name: str, min_year: int = 1990) -> NameDate | None:
     ],
 )
 def test_recognised_names(name: str, when: datetime, has_time: bool) -> None:
-    assert found(name) == NameDate(when, has_time)
+    result = found(name)
+    assert result is not None
+    assert (result.when, result.has_time) == (when, has_time)
 
 
 @pytest.mark.parametrize(
@@ -100,3 +102,10 @@ def test_the_first_date_in_the_name_wins() -> None:
 
 def test_a_folder_part_is_not_read() -> None:
     assert found(r"C:\2019\IMG_1234.jpg") is None
+
+
+def test_pixel_names_are_marked_as_utc() -> None:
+    pixel = found("PXL_20220624_005115123.jpg")
+    assert pixel is not None and pixel.utc
+    samsung = found("20220624_005115.jpg")
+    assert samsung is not None and not samsung.utc

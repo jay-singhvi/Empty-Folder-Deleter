@@ -86,8 +86,10 @@ from various_tools.gui.apply_dialog import (
     ApplyDialog,
     onedrive_suggestion,
     pace_to_preselect,
+    pace_to_values,
     plan_touches_onedrive,
 )
+from various_tools.gui.continue_run import can_continue, drop_done
 from various_tools.gui.recipe_store import RecipeStore
 from various_tools.gui.state import AppState
 from various_tools.gui.undo_rules import (
@@ -101,8 +103,11 @@ from various_tools.gui.widgets.schema_form import SchemaForm, folder_field_names
 from various_tools.gui.widgets.size_map import SizeMapView, actions_under
 from various_tools.gui.wording import (
     APPLY_TEXT,
+    CHANGE_PACE_TEXT,
     CHANGE_SETTINGS,
     CHOOSE_WORKSPACE_FIRST,
+    CONTINUE_FAILED,
+    CONTINUE_STOPPED,
     HIDE_DETAILS,
     HIDE_SETTINGS,
     PAUSE_TEXT,
@@ -118,6 +123,7 @@ from various_tools.gui.wording import (
     USE_OTHER_FOLDERS,
     WORKSPACE_CHANGED,
     apply_label,
+    continue_label,
     found_nouns,
     looks_in_text,
     plain_value,
@@ -135,8 +141,6 @@ PERMANENT = "permanent"
 LIVE_PREVIEW_TOOLS = frozenset({"rename"})
 COMPARE_TOOLS = frozenset({"duplicates"})
 LIVE_PREVIEW_DELAY_MS = 700
-# The remembered flag "this tool uses its own folders, not the working folder".
-OTHER_FOLDERS_KEY = "_use_other_folders"
 WORKSPACE_FIELD_NAMES = frozenset({"roots", "sources", "root"})
 MAX_SUMMARY_ITEMS = 8
 # A note kind ("skipped: <reason>: <path>") is shown as a count once it repeats this often.
@@ -360,6 +364,8 @@ class ToolPage(QWidget):
         self.choose_extra_path: ChooseExtraPath = _default_choose_extra_path(self)
         # The Apply window. Tests set ``choose_pace`` (or, as before, ``confirm``).
         self.choose_pace: ChoosePace = self._open_apply_dialog
+        # Change pace while an apply runs: the pace part of the same window.
+        self.choose_new_pace: ChoosePace = self._open_change_pace_dialog
         self.choose_recipe: ChooseRecipe = _default_choose_recipe(self)
         self._default_confirm_hook = self.confirm
 
@@ -377,17 +383,11 @@ class ToolPage(QWidget):
             self.step_labels.append(label)
 
         # ----- options form ------------------------------------------------------------
-        # The working folder: the tool's folder option is folded into one line unless the
-        # person chose other folders for this tool (remembered with the other options).
+        # The working folder: on a tool's own page the folder option is always shown and is the
+        # working folder. A recipe step page keeps its choice of own folders (``preset[1]``);
+        # without it the field is folded into a "Looks in" line.
         self._ws_name = workspace_field_name(tool)
-        self._override = bool(
-            self._ws_name
-            and (
-                preset[1]
-                if preset is not None
-                else self.state.last_options(tool.id).get(OTHER_FOLDERS_KEY) is True
-            )
-        )
+        self._override = bool(self._ws_name and preset is not None and preset[1])
         self.form = SchemaForm(
             tool.Options, self._initial_values(), load_choices=self._choices_worker
         )
@@ -402,7 +402,7 @@ class ToolPage(QWidget):
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         workspace_layout.addWidget(self.workspace_label, 1)
         workspace_layout.addWidget(self.other_folders_check)
-        self.workspace_row.setVisible(self._ws_name is not None)
+        self.workspace_row.setVisible(self._step_has_workspace_row)
         self.other_folders_check.setChecked(self._override)
         # Step 1 folds into one line after a scan.
         self.options_summary = QLabel()
@@ -467,7 +467,16 @@ class ToolPage(QWidget):
         self.resume_button = QPushButton(RESUME_TEXT)
         self.skip_wait_button = QPushButton(SKIP_WAIT_TEXT)
         self.skip_wait_button.setToolTip("Do not wait for the next batch: start it now.")
-        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+        self.change_pace_button = QPushButton(CHANGE_PACE_TEXT)
+        self.change_pace_button.setToolTip(
+            "Change how fast the rest goes. It counts from the next batch."
+        )
+        for button in (
+            self.pause_button,
+            self.resume_button,
+            self.skip_wait_button,
+            self.change_pace_button,
+        ):
             button.setVisible(False)  # shown only while an apply runs
         self.show_all_check = QCheckBox("Show all settings")
         self.show_all_check.setToolTip(
@@ -486,7 +495,12 @@ class ToolPage(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.scan_button)
         buttons.addWidget(self.cancel_button)
-        for button in (self.pause_button, self.resume_button, self.skip_wait_button):
+        for button in (
+            self.pause_button,
+            self.resume_button,
+            self.skip_wait_button,
+            self.change_pace_button,
+        ):
             buttons.addWidget(button)
         buttons.addStretch(1)
         buttons.addWidget(self.show_all_check)
@@ -618,6 +632,7 @@ class ToolPage(QWidget):
         self.pause_button.clicked.connect(lambda _c=False: self.pause_apply())
         self.resume_button.clicked.connect(lambda _c=False: self.resume_apply())
         self.skip_wait_button.clicked.connect(lambda _c=False: self.skip_wait())
+        self.change_pace_button.clicked.connect(lambda _c=False: self.change_pace())
         self.apply_button.clicked.connect(lambda _c=False: self.apply())
         self.export_button.triggered.connect(lambda _c=False: self.export())
         self.reset_options_action.triggered.connect(lambda _c=False: self.reset_options())
@@ -629,6 +644,7 @@ class ToolPage(QWidget):
         self.download_button.clicked.connect(lambda _c=False: self.download_cloud_only())
         self.show_all_check.toggled.connect(self._show_all_toggled)
         self.form.changed.connect(self._form_changed)
+        self.form.changed.connect(self._sync_list_workspace)
         self.other_folders_check.toggled.connect(self._other_folders_toggled)
         self.change_settings_button.clicked.connect(lambda _c=False: self.toggle_options())
         self.notes_toggle.toggled.connect(self._notes_toggled)
@@ -675,17 +691,28 @@ class ToolPage(QWidget):
 
     @property
     def uses_workspace(self) -> bool:
-        """The tool has a workspace field and the person has not chosen other folders."""
+        """The tool has a workspace field and the page has no folders of its own (a recipe step
+        can have them)."""
         return self._ws_name is not None and not self._override
 
+    @property
+    def _step_has_workspace_row(self) -> bool:
+        """Only a recipe step page shows the "Looks in" line and the own-folders check box."""
+        return self._ws_name is not None and self._preset is not None
+
     def _apply_workspace_ui(self) -> None:
-        """Show the one-line "Looks in" text or the real folder field, and fill the field."""
+        """Fill the folder field from the working folder. A recipe step page also shows the
+        one-line "Looks in" text, or its own field."""
         name = self._ws_name
         if name is None:
             return
         paths = self.state.workspace()
+        if self._preset is None:
+            if paths or self.form.field_spec(name).kind == "list":
+                self._put_workspace_in_field(paths)  # an emptied list empties every page
+            return
         self.workspace_label.setText(
-            "Looks in: folders chosen for this tool"
+            "Looks in: folders chosen for this step"
             if self._override
             else looks_in_text(paths, first_only=self._workspace_is_single())
         )
@@ -704,11 +731,41 @@ class ToolPage(QWidget):
             return
         is_list = self.form.field_spec(name).kind == "list"
         value: Any = [str(p) for p in paths] if is_list else (str(paths[0]) if paths else "")
+        current = self.form.raw_values().get(name)
+        if is_list and [str(p) for p in current or []] == value:
+            return  # already shown: keep the person's selection in the list
+        if not is_list and str(current or "") == value:
+            return
         self.form.set_field_value(name, value)
+
+    def _sync_list_workspace(self) -> None:
+        """The person added, removed or dropped a folder in the list: that is the new working
+        folder (every page and the toolbar follow). A one-folder field waits for the scan."""
+        name = self._ws_name
+        if name is None or self._preset is not None or self._closing:
+            return
+        if self.form.field_spec(name).kind != "list":
+            return
+        shown = [str(p) for p in self.form.raw_values().get(name) or []]
+        if shown != [str(p) for p in self.state.workspace()]:
+            self.state.set_workspace([Path(p) for p in shown])
+
+    def _sync_single_workspace(self) -> None:
+        """When a scan starts, a one-folder field replaces the first working folder (typing
+        does not touch the recent-folders list)."""
+        name = self._ws_name
+        if name is None or self._preset is not None:
+            return
+        if self.form.field_spec(name).kind == "list":
+            self._sync_list_workspace()
+            return
+        value = str(self.form.raw_values().get(name) or "").strip()
+        workspace = self.state.workspace()
+        if value and (not workspace or str(workspace[0]) != value):
+            self.state.set_workspace([Path(value), *workspace[1:]])
 
     def _other_folders_toggled(self, on: bool) -> None:
         self._override = on
-        self._override_session_only = False  # a tick by the person is remembered
         self._apply_workspace_ui()
         self.workspace_banner.setVisible(False)
 
@@ -777,7 +834,7 @@ class ToolPage(QWidget):
         self.options_collapsed = folded
         self.options_summary_row.setVisible(folded)
         self._form_scroll.setVisible(not folded)
-        self.workspace_row.setVisible(self._ws_name is not None and not folded)
+        self.workspace_row.setVisible(self._step_has_workspace_row and not folded)
 
     def reset_options(self) -> None:
         """Every option back to its default; the folder fields keep what they hold."""
@@ -787,19 +844,25 @@ class ToolPage(QWidget):
         self._set_status("Options reset to the defaults.")
 
     def set_folder(self, path: str) -> bool:
-        """Put a folder into the first folder field (used by ``--folder`` and the shell menu).
-
-        On a page that uses the working folder this chooses other folders for this tool.
-        """
-        if self._ws_name is not None and not self._override:
-            self.other_folders_check.setChecked(True)  # shows the real field
-            self._override_session_only = True  # this launch only: not remembered
+        """Make a folder the working folder (used by ``--folder`` and the shell menu); every page
+        follows. A recipe step page with folders of its own, and a tool with no working-folder
+        option, get it in their first folder field instead."""
+        if self._ws_name is not None and (self._preset is None or not self._override):
+            self.state.set_workspace([Path(path)])
+            self._form_changed()  # a live preview starts on the new folder
+            return True
         return self.form.set_first_folder(path)
 
     def set_folders(self, paths: list[str]) -> bool:
-        """Put several folders into the first folder field, like :meth:`set_folder` (a field
-        that holds one folder gets the first). Returns False if there is nothing to set."""
-        if not paths or not self.set_folder(paths[0]):
+        """Make several folders the working folder, like :meth:`set_folder` (a field that holds
+        one folder shows the first). Returns False if there is nothing to set."""
+        if not paths:
+            return False
+        if self._ws_name is not None and (self._preset is None or not self._override):
+            self.state.set_workspace([Path(p) for p in paths])
+            self._form_changed()
+            return True
+        if not self.set_folder(paths[0]):
             return False
         name = self.form.folder_fields()[0]
         if len(paths) > 1 and self.form.field_spec(name).kind == "list":
@@ -824,14 +887,7 @@ class ToolPage(QWidget):
             if name in values and values[name] != PERMANENT
         }
         if self._ws_name:
-            if not self._override:
-                remembered.pop(self._ws_name, None)  # the working folder is not a tool option
-            if self._override_session_only:  # set by --folder or the shell menu: keep what was
-                remembered[OTHER_FOLDERS_KEY] = (
-                    self.state.last_options(self.tool.id).get(OTHER_FOLDERS_KEY) is True
-                )
-            else:
-                remembered[OTHER_FOLDERS_KEY] = self._override
+            remembered.pop(self._ws_name, None)  # the working folder is not a tool option
         self.state.remember_options(self.tool.id, remembered)
 
     def save_as_recipe_step(self) -> bool:
@@ -866,6 +922,7 @@ class ToolPage(QWidget):
         """
         if self.busy or self._apply_pending or self._closing:
             return None
+        self._sync_single_workspace()
         if self._workspace_missing():
             self._set_status(CHOOSE_WORKSPACE_FIRST, True)
             return None
@@ -895,6 +952,7 @@ class ToolPage(QWidget):
         self.scanFinished.emit(plan)
         self.result = None
         self._applied = False
+        self._continuing = False
         self.table.set_plan(plan, self.tool.id, sizes)  # type: ignore[arg-type]
         self._show_notes(plan.notes)
         # A scan that started under another working folder shows that folder's list: say so.
@@ -963,6 +1021,7 @@ class ToolPage(QWidget):
         return self._apply_pending or (self.worker is not None and self.worker.writes)
 
     def _form_changed(self) -> None:
+        self._drop_continue("The settings changed, so the list may be out of date. Scan again.")
         if self.tool.id in LIVE_PREVIEW_TOOLS and not self._applying() and not self._closing:
             self._preview_timer.start()
 
@@ -1077,7 +1136,7 @@ class ToolPage(QWidget):
         self._paused = self._waiting = False
 
         def job(ctx: Any) -> RunResult:
-            ctx.pace = pace
+            ctx.pace = self._pace  # a change of pace may already have replaced it
             ctx.recipe_tag = recipe_tag
             ctx.pause_event = pause_event
             ctx.skip_wait_event = skip_event
@@ -1114,7 +1173,6 @@ class ToolPage(QWidget):
 
     _pause_event: threading.Event | None = None
     _skip_wait_event: threading.Event | None = None
-    _override_session_only = False  # "Use other folders" was set by set_folder, not ticked
     _scan_workspace: list[Path] = []  # the working folder when the running scan started
     _apply_worker: Worker | None = None
     _pace: Pace | None = None
@@ -1144,19 +1202,86 @@ class ToolPage(QWidget):
         if self._apply_running() and self._skip_wait_event is not None:
             self._skip_wait_event.set()
 
+    def change_pace(self) -> bool:
+        """Change the pace of the running apply. It takes effect from the next batch.
+
+        The run reads ``ctx.pace`` before each action, and a ``Pace`` is never edited, only
+        replaced, so swapping it from this (UI) thread is safe.
+        """
+        worker = self._apply_worker
+        if not self._apply_running() or worker is None:
+            return False
+        selected = len(self.applied_plan.selected_actions()) if self.applied_plan else 0
+        ask = ApplyAsk(f"Change the pace: {self.tool.name}", "", selected)
+        confirmed, pace = self.choose_new_pace(ask)
+        if not confirmed or not self._apply_running():  # the run may have ended meanwhile
+            return False
+        self._pace = pace
+        ctx = worker.ctx
+        if ctx is not None:
+            ctx.pace = pace
+        if self._paused:
+            self._set_status("Pace changed. Press Resume to go on.")
+        else:
+            self._set_status(
+                "Pace changed: the rest goes " + ("in batches." if pace else "all at once.")
+            )
+        self._update_buttons()
+        return True
+
+    def _open_change_pace_dialog(self, ask: ApplyAsk) -> tuple[bool, Pace | None]:
+        dialog = ApplyDialog(ask, pace_to_values(self._pace), self, pace_only=True)
+        if dialog.exec() != ApplyDialog.DialogCode.Accepted:
+            return False, None
+        self.state.set_apply_pace(dialog.values())
+        return True, dialog.pace()
+
+    # ----- continue a stopped apply -----------------------------------------------------------
+
+    _continuing = False  # the list holds what a stopped (or partly failed) apply left
+
+    def _prepare_continue(self, value: RunResult) -> int:
+        """Keep the list for Continue: drop the done rows. Returns how many rows are left to
+        do (0 means there is nothing to continue and the page falls back to scan again)."""
+        self._continuing = False
+        plan = self.plan
+        if plan is None or not can_continue(self.tool.id, value.status, plan):
+            return 0
+        sizes = drop_done(plan, value.outcomes, self.table.sizes())
+        if not plan.selected_actions():
+            return 0
+        self._continuing = True
+        self.table.refresh(sizes)
+        self._show_size_map(plan)
+        return len(plan.selected_actions())
+
+    def _drop_continue(self, status: str) -> None:
+        """A change that makes the kept list unreliable: back to scan again."""
+        if not self._continuing or self._applying():
+            return
+        self._continuing = False
+        self._applied = True
+        self._set_status(status)
+        self._update_buttons()
+
     def _apply_done(self, value: object) -> None:
         assert isinstance(value, RunResult)
         self.result = value
         self.last_run_id = value.run_id
         self.undo_info = undo_info_from_result(value)
-        self._applied = True
+        left = self._prepare_continue(value)
+        self._applied = not left
         text = result_summary(value)
         if value.notes:
             text += "\n\n" + "\n".join(value.notes)
         failures = [o for o in value.outcomes if o.status == "failed"][:10]
         if failures:
             text += "\n\nFailed:\n" + "\n".join(f"  {o.src}: {o.detail}" for o in failures)
-        self._set_status(text.splitlines()[0] + " Scan again to see what is left.")
+        if left:
+            hint = CONTINUE_STOPPED if value.status == "cancelled" else CONTINUE_FAILED
+            self._set_status(f"{text.splitlines()[0]} {hint}")
+        else:
+            self._set_status(text.splitlines()[0] + " Scan again to see what is left.")
         self.runApplied.emit(value.run_id)
         self._update_buttons()
         if self._closing:
@@ -1677,11 +1802,17 @@ class ToolPage(QWidget):
         self.cancel_button.setText(STOP_TEXT if applying_now else "Cancel")
         self.pause_button.setVisible(applying_now and not self._paused)
         self.resume_button.setVisible(applying_now and self._paused)
-        self.skip_wait_button.setVisible(applying_now and self._pace is not None)
+        self.skip_wait_button.setVisible(applying_now and (self._pace is not None or self._waiting))
+        self.change_pace_button.setVisible(applying_now)
         self.skip_wait_button.setEnabled(self._waiting)
         self.progress_bar.setVisible(running)
         self.apply_button.setEnabled(not busy and has_plan and selected and not self._applied)
-        self.apply_button.setText(APPLY_TEXT if self._applied else apply_label(self.plan))
+        if self._applied:
+            self.apply_button.setText(APPLY_TEXT)
+        elif self._continuing and self.plan is not None:
+            self.apply_button.setText(continue_label(len(self.plan.selected_actions())))
+        else:
+            self.apply_button.setText(apply_label(self.plan))
         self.more_button.setEnabled(not busy)
         self.reset_options_action.setEnabled(not busy)
         self.export_button.setEnabled(not busy and has_plan)

@@ -3,9 +3,12 @@
 The caller must have checked that the file is on this device (AGENTS.md rule 3). Nothing here
 hydrates a file or writes to disk.
 
-The default order is EXIF, then the video's embedded creation time, then ExifTool (RAW files only,
-as in the legacy script), then the modified time. A step is used only when its date is plausible.
-A file with no usable date goes to the unknown-date folder. It is never moved on a guess.
+With ``name_first`` (the tool's default since 0.9) the date the camera or WhatsApp wrote into the
+file name is tried first: an embedded date changes when a file is edited or re-encoded, the name
+does not. Then the default order is EXIF, then the video's embedded creation time, then ExifTool
+(RAW files only, as in the legacy script), then the modified time. A step is used only when its
+date is plausible. A file with no usable date goes to the unknown-date folder. It is never moved
+on a guess.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -24,6 +27,7 @@ from various_tools.core.media.exif import (
     read_exif,
 )
 from various_tools.core.media.ffmpeg import creation_time
+from various_tools.core.media.name_dates import date_from_name
 from various_tools.core.onedrive import CloudOnlyFileError
 from various_tools.core.settings import (
     DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
@@ -36,7 +40,10 @@ DateSource = Literal["exif", "video_tag", "exiftool", "modified"]
 DATE_SOURCES: tuple[str, ...] = get_args(DateSource)
 DEFAULT_PRIORITY: tuple[DateSource, ...] = ("exif", "video_tag", "exiftool", "modified")
 
+UTC_SPREAD = timedelta(hours=14)  # the widest time zone offset from UTC
+NAME_SOURCE = "name"  # not a ``date_priority`` entry: the ``name_date_first`` option
 LABELS: dict[str, str] = {
+    NAME_SOURCE: "Date in the file name",
     "exif": "Date Taken (EXIF)",
     "video_tag": "Date Taken (video metadata)",
     "exiftool": "Date Taken (ExifTool)",
@@ -93,6 +100,7 @@ def read_capture_date(
     video_exts: frozenset[str] = VIDEO_EXTS,
     ffprobe_timeout: float = DEFAULT_FFPROBE_TIMEOUT_S,
     exiftool_timeout: float = DEFAULT_EXIFTOOL_READ_TIMEOUT_S,
+    name_first: bool = False,
 ) -> Reading:
     """Work out the date of one file on this device, using the sources in ``priority`` order.
 
@@ -114,29 +122,50 @@ def read_capture_date(
     def plausible(value: datetime | None) -> bool:
         return is_plausible_date(value, min_year=min_year, now=now)
 
-    for step in priority:
-        if step == "exif":
-            if exif is not None and plausible(exif.capture_time):
-                return Reading(exif.capture_time, LABELS[step], exif)
-        elif step == "video_tag":
-            if suffix in video_exts and ffprobe is not None:
-                taken = _safe_date(
-                    "Video metadata",
-                    path,
-                    lambda: creation_time(ffprobe, path, timeout=ffprobe_timeout),
-                )
-                if plausible(taken):
-                    return Reading(taken, LABELS[step], exif)
-        elif step == "exiftool":
-            if suffix in raw_exts and exiftool is not None:
-                taken = _safe_date(
-                    "ExifTool",
-                    path,
-                    lambda: exiftool_capture_time(exiftool, path, exiftool_timeout),
-                )
-                if plausible(taken):
-                    return Reading(taken, LABELS[step], exif)
-        elif step == "modified" and plausible(modified):
-            return Reading(modified, LABELS[step], exif)
-    label = UNKNOWN_LABEL if "modified" in priority else NO_DATE_LABEL
-    return Reading(None, label, exif)
+    def by_metadata() -> Reading:
+        for step in priority:
+            if step == "exif":
+                if exif is not None and plausible(exif.capture_time):
+                    return Reading(exif.capture_time, LABELS[step], exif)
+            elif step == "video_tag":
+                if suffix in video_exts and ffprobe is not None:
+                    probe: Path = ffprobe
+                    taken = _safe_date(
+                        "Video metadata",
+                        path,
+                        lambda probe=probe: creation_time(probe, path, timeout=ffprobe_timeout),
+                    )
+                    if plausible(taken):
+                        return Reading(taken, LABELS[step], exif)
+            elif step == "exiftool":
+                if suffix in raw_exts and exiftool is not None:
+                    reader: Path = exiftool
+                    taken = _safe_date(
+                        "ExifTool",
+                        path,
+                        lambda reader=reader: exiftool_capture_time(reader, path, exiftool_timeout),
+                    )
+                    if plausible(taken):
+                        return Reading(taken, LABELS[step], exif)
+            elif step == "modified" and plausible(modified):
+                return Reading(modified, LABELS[step], exif)
+        label = UNKNOWN_LABEL if "modified" in priority else NO_DATE_LABEL
+        return Reading(None, label, exif)
+
+    if name_first:
+        named = date_from_name(path.name, min_year=min_year, now=now)
+        if named is not None:
+            by_name = Reading(named.when, LABELS[NAME_SOURCE], exif)
+            if not named.utc:
+                return by_name
+            # A UTC time in the name (Pixel): an embedded local date that agrees with it within
+            # a time zone is the right one; near midnight the name's day can be the next one.
+            embedded = by_metadata()
+            if (
+                embedded.date is not None
+                and embedded.label != LABELS["modified"]
+                and abs(embedded.date - named.when) <= UTC_SPREAD
+            ):
+                return embedded
+            return by_name
+    return by_metadata()

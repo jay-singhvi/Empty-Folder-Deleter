@@ -274,3 +274,58 @@ def test_a_pause_inside_the_wait_says_it_is_waiting(
     apply_plan(_plan(tmp_path, 2), ctx)
     assert plan_module.WAIT_PAUSED_MESSAGE in messages
     assert "Paused." not in messages
+
+
+def _swap_when_starting(ctx: RunContext, index: int, new: Pace | None) -> None:
+    """Replace ``ctx.pace`` just before action ``index`` (0-based) is reported, as the GUI does."""
+    count = 0
+
+    def progress(_done: int, _total: int, message: str) -> None:
+        nonlocal count
+        if message.startswith("move:"):
+            if count == index:
+                ctx.pace = new
+            count += 1
+
+    ctx.progress = progress
+
+
+def test_a_pace_swapped_mid_run_to_a_larger_batch_counts_from_the_last_wait(
+    tmp_path: Path, journal: Journal, sleeps: list[float]
+) -> None:
+    ctx = _ctx(tmp_path, journal, Pace(1, 0.25))
+    _swap_when_starting(ctx, 2, Pace(3, 0.5))  # waits after 1 and 2 (old pace), then after 5
+    result = apply_plan(_plan(tmp_path, 7), ctx)
+    assert result.status == "done" and result.count("done") == 7
+    # one step after action 1, one after action 2 (old pace), two steps (0.5 s) after action 5
+    assert sleeps == [0.25] * 4
+
+
+def test_a_pace_swapped_to_a_smaller_batch_waits_at_once_when_enough_ran(
+    tmp_path: Path, journal: Journal, sleeps: list[float]
+) -> None:
+    ctx = _ctx(tmp_path, journal, Pace(10, 0.25))
+    _swap_when_starting(ctx, 3, Pace(2, 0.25))  # 3 ran since the start, so wait before the 4th
+    apply_plan(_plan(tmp_path, 5), ctx)
+    # wait before action 4 (3 done >= 2), then 1 more ran: no second wait
+    assert sleeps == [0.25]
+
+
+def test_none_then_a_pace_starts_waiting(
+    tmp_path: Path, journal: Journal, sleeps: list[float]
+) -> None:
+    ctx = _ctx(tmp_path, journal, None)
+    _swap_when_starting(ctx, 2, Pace(2, 0.25))
+    apply_plan(_plan(tmp_path, 6), ctx)
+    # the pace counts from when it is set (during action 3): actions 4 and 5 are its first
+    # batch, so one wait before action 6 (review fix: no wait at once for what ran before)
+    assert sleeps == [0.25]
+
+
+def test_a_pace_then_none_stops_waiting(
+    tmp_path: Path, journal: Journal, sleeps: list[float]
+) -> None:
+    ctx = _ctx(tmp_path, journal, Pace(2, 0.25))
+    _swap_when_starting(ctx, 3, None)
+    apply_plan(_plan(tmp_path, 8), ctx)
+    assert sleeps == [0.25]  # only the wait after the first two

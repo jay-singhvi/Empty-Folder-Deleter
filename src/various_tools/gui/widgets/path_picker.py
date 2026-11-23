@@ -22,8 +22,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
+    QListView,
     QListWidget,
     QPushButton,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +49,50 @@ def drag_has_local_paths(mime: QMimeData) -> bool:
 def _path_key(path: str) -> str:
     """A comparison key: case-insensitive on Windows, slash-style and trailing-slash neutral."""
     return os.path.normcase(os.path.normpath(path))
+
+
+def normalise_folders(paths: Iterable[str]) -> list[str]:
+    """Chosen folders as clean paths, in order, without empty entries or repeats.
+
+    The Qt folder dialog can report the same folder twice (and, in some styles, the folder it is
+    showing next to the selected ones), so every pick goes through here.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        path = os.path.normpath(text)
+        if _path_key(path) in seen:
+            continue
+        seen.add(_path_key(path))
+        result.append(path)
+    return result
+
+
+def folder_dialog(parent: QWidget | None, title: str, start: str = "") -> QFileDialog:
+    """A Qt folder dialog (not the Windows one, which takes a single folder) that allows
+    selecting several folders at once with Ctrl or Shift."""
+    dialog = QFileDialog(parent, title, start)
+    dialog.setFileMode(QFileDialog.FileMode.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    views: list[QAbstractItemView] = [
+        *dialog.findChildren(QListView),
+        *dialog.findChildren(QTreeView),
+    ]
+    for view in views:
+        view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    return dialog
+
+
+def choose_folders(parent: QWidget | None, title: str, start: str = "") -> list[str]:
+    """Ask for one or more folders. Returns their paths, or an empty list when cancelled."""
+    dialog = folder_dialog(parent, title, start if os.path.isdir(start) else "")
+    if dialog.exec() != QFileDialog.DialogCode.Accepted:
+        return []
+    return normalise_folders(dialog.selectedFiles())
 
 
 class PathEdit(QWidget):
@@ -189,9 +235,10 @@ class PathListEdit(QWidget):
             self.changed.emit()
 
     def browse(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Add a folder")
+        """Ask for one or more folders and add them."""
+        chosen = choose_folders(self, "Add folders")
         if chosen:
-            self.add_paths([os.path.normpath(chosen)])
+            self.add_paths(chosen)
 
     def accept_mime(self, mime: QMimeData) -> bool:
         """Add every dropped folder. False if the drop held no folder."""

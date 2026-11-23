@@ -8,7 +8,7 @@ This repository started as the **Empty Folder Deleter** Tkinter app; that app is
 
 ![The Home page with the tool cards](docs/images/home.png)
 
-Home: every tool, and the working folder they share.
+Home: every tool, and the working folder they share. "Choose working folder" (and Add in a tool's folder list) can pick several folders at once; the folder list on a tool page is the working folder, so a change there shows on every page.
 
 ![A tool page: Sort by type with its plan](docs/images/tool-page-sort-by-type.png)
 
@@ -281,6 +281,16 @@ If you encounter any problems or have any suggestions, please [open an issue](ht
 ---
 
 Developed with ❤️ by Jay Singhvi
+
+## Stopping, continuing and changing the pace
+
+In the app, **Stop** ends an apply after the file it is on. The list stays, without the rows that
+were done, and the Apply button reads **Continue (N left)**: it opens the Apply window again (so
+the pace can be changed) and does only the rest, as a new run in History. The same goes for a run
+that ended with failures: the failed rows stay for another try. A new scan, or a changed setting,
+ends this. **Change pace...** (shown while an apply runs) changes the batch size and wait for the
+rest of the run. Fix File Extensions and Organize by Date ask for a new scan instead. A stopped
+`apply` on the command line can be run again with `--apply`; files already moved are skipped.
 
 ## Gentle on OneDrive
 

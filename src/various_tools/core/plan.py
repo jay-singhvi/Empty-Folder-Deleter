@@ -692,9 +692,9 @@ def apply_plan(
     actions = plan.selected_actions()
     total = len(actions)
     refused_roots = _refused_roots(plan, ctx)
-    pace = ctx.pace
-    batches = math.ceil(total / pace.batch_size) if pace is not None else 0
-    waited_at = 0
+    waited_at = 0  # ``executed`` at the last wait: a batch is what ran since then
+    last_pace = ctx.pace
+    batch_no = 0
     batch_outputs: list[Path] = []  # what this batch wrote, for the upload wait
     executed = 0  # actions really run (a guard-skipped one does not count towards a batch)
     finished: dict[str, ActionOutcome] = {}  # by source path text, for ``before_action``
@@ -704,14 +704,19 @@ def apply_plan(
         for seq, action in enumerate(actions, start=1):
             ctx.check_cancelled()
             _honour_pause(ctx, seq - 1, total, beat)
-            if (
-                pace is not None
-                and executed
-                and executed % pace.batch_size == 0
-                and waited_at != executed
-            ):
+            # The pace is read before each action: the GUI may swap ``ctx.pace`` (a frozen
+            # object, never edited) while the run goes on, and it counts from the next batch.
+            pace = ctx.pace
+            if pace is not last_pace:
+                # A new pace counts from the next batch: what ran before it is not a batch.
+                if last_pace is None:
+                    waited_at = executed
+                    batch_outputs = []
+                last_pace = pace
+            if pace is not None and executed - waited_at >= pace.batch_size:
                 waited_at = executed
-                batch_no = executed // pace.batch_size
+                batch_no += 1
+                batches = batch_no + math.ceil((total - (seq - 1)) / pace.batch_size)
                 skipped = False
                 if pace.wait_for_upload and batch_outputs and not upload_state.gave_up:
                     skipped = _wait_for_upload(

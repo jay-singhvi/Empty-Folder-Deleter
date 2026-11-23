@@ -141,6 +141,17 @@ PAUSE_TEXT = "Pause"
 RESUME_TEXT = "Resume"
 SKIP_WAIT_TEXT = "Skip the wait"
 STOP_TEXT = "Stop"
+CHANGE_PACE_TEXT = "Change pace…"
+CHANGE_PACE_TITLE = "Change the pace"
+CHANGE_PACE_OK = "Change pace"
+CONTINUE_STOPPED = "Stopped. Press Continue to do the rest, or scan again."
+CONTINUE_FAILED = "Press Continue to try the failed ones again, or scan again."
+
+
+def continue_label(left: int) -> str:
+    """The Apply button after a stopped (or partly failed) apply: what is still to do."""
+    return f"Continue ({left:,} left)"
+
 
 HOW_FAST = "How fast?"
 ALL_AT_ONCE = "All at once"

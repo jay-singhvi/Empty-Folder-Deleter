@@ -236,6 +236,95 @@ def test_video_creation_time_is_the_capture_date(
     assert action.reason.startswith("Date Taken (video metadata)")
 
 
+# ----- the date in the file name (0.9) ------------------------------------------------------
+
+
+def test_the_date_in_the_name_beats_a_later_exif_date(
+    tmp_path: Path, src: Path, dest: Path
+) -> None:
+    _jpeg(src / "IMG_20220624_005115.jpg", original="2025:03:14 10:00:00")
+    (action,) = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path)).selected_actions()
+    assert action.dst == dest / "2022" / "2022 - 06" / "IMG_20220624_005115.jpg"
+    assert action.reason.startswith("Date in the file name")
+
+
+def test_a_pixel_name_in_utc_gives_way_to_an_exif_date_that_agrees(
+    tmp_path: Path, src: Path, dest: Path
+) -> None:
+    """Pixel names hold UTC: 01:30 on 1 July UTC is 30 June in the evening in the US."""
+    _jpeg(src / "PXL_20220701_013000123.jpg", original="2022:06:30 18:30:00")
+    _jpeg(src / "PXL_20220701_013000999.jpg", original="2025:03:01 10:00:00")
+    plan = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path))
+    by_name = {Path(a.src).name: a for a in plan.selected_actions() if a.src}
+    agrees = by_name["PXL_20220701_013000123.jpg"]
+    assert agrees.dst == dest / "2022" / "2022 - 06" / "PXL_20220701_013000123.jpg"
+    assert agrees.reason.startswith("Date Taken (EXIF)")
+    edited = by_name["PXL_20220701_013000999.jpg"]
+    assert edited.dst == dest / "2022" / "2022 - 07" / "PXL_20220701_013000999.jpg"
+
+
+def test_whatsapp_names_are_dated_by_their_name(tmp_path: Path, src: Path, dest: Path) -> None:
+    _jpeg(src / "IMG-20190801-WA0003.jpg", modified=_when("2024-01-01 12:00:00"))
+    (action,) = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path)).selected_actions()
+    assert action.dst == dest / "2019" / "2019 - 08" / "IMG-20190801-WA0003.jpg"
+
+
+def test_a_name_without_a_date_uses_the_metadata(tmp_path: Path, src: Path, dest: Path) -> None:
+    _jpeg(src / "IMG_1234.jpg", original="2024:10:05 14:02:11")
+    (action,) = TOOL.scan(_opts(tmp_path, [src], dest), _ctx(tmp_path)).selected_actions()
+    assert action.dst == dest / "2024" / "2024 - 10" / "IMG_1234.jpg"
+    assert action.reason.startswith("Date Taken (EXIF)")
+
+
+def test_name_date_first_off_keeps_the_metadata_order(
+    tmp_path: Path, src: Path, dest: Path
+) -> None:
+    _jpeg(src / "IMG_20220624_005115.jpg", original="2025:03:14 10:00:00")
+    opts = _opts(tmp_path, [src], dest, name_date_first=False)
+    (action,) = TOOL.scan(opts, _ctx(tmp_path)).selected_actions()
+    assert action.dst == dest / "2025" / "2025 - 03" / "IMG_20220624_005115.jpg"
+
+
+def test_the_owners_video_stays_in_its_month(
+    tmp_path: Path, dest: Path, make_video: Callable[..., Path]
+) -> None:
+    """``2022\2022 - 06\20220624_005115.mp4`` whose creation time says March 2025 stays put."""
+    if ExternalTools(ollama_probe=lambda _u: None).path("ffprobe") is None:
+        pytest.skip("ffprobe is not installed")
+    make_video("clip.mp4", creation_time="2025-03-10T12:00:00Z")
+    home = dest / "2022" / "2022 - 06"
+    home.mkdir(parents=True)
+    shutil.move(str(tmp_path / "clip.mp4"), str(home / "20220624_005115.mp4"))
+    plan = TOOL.scan(_opts(tmp_path, [dest], dest, recursive=True), _ctx(tmp_path))
+    assert plan.selected_actions() == []
+    assert any("1 already in place" in note for note in plan.notes)
+    old_rules = _opts(tmp_path, [dest], dest, recursive=True, name_date_first=False)
+    (wrong,) = TOOL.scan(old_rules, _ctx(tmp_path)).selected_actions()
+    assert wrong.dst is not None and "2025" in wrong.dst.parts
+
+
+def test_skip_processed_redates_files_moved_by_an_older_rule(
+    tmp_path: Path, src: Path, dest: Path, journal: Journal
+) -> None:
+    _jpeg(src / "IMG_20220624_005115.jpg", original="2025:03:14 10:00:00")
+    _jpeg(src / "IMG_1234.jpg", original="2024:10:05 14:02:11")
+    ctx = _ctx(tmp_path, journal)
+    old = _opts(tmp_path, [src], dest, name_date_first=False)
+    TOOL.apply(TOOL.scan(old, ctx), ctx)
+    misplaced = dest / "2025" / "2025 - 03" / "IMG_20220624_005115.jpg"
+    assert misplaced.is_file()
+
+    again = _opts(tmp_path, [dest], dest, recursive=True, skip_processed=True)
+    plan = TOOL.scan(again, _ctx(tmp_path))
+    assert _moves(plan) == {
+        os.path.normcase(str(misplaced)): str(dest / "2022" / "2022 - 06" / misplaced.name)
+    }
+    assert any("skipped as already processed" in note for note in plan.notes)  # IMG_1234
+    TOOL.apply(plan, ctx)
+    redone = TOOL.scan(again, _ctx(tmp_path))
+    assert redone.selected_actions() == []
+
+
 # ----- cloud-only files (rule 3) and other safety rules --------------------------------------
 
 

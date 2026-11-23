@@ -325,7 +325,7 @@ def main() -> int:
         check("GUI starts with --tool empty_folders --folder", lambda: check_gui_with_tool(env))
         check("CLI --help exits 0", lambda: check_cli_help(env))
         check("CLI version", lambda: check_cli_version(env))
-        check("CLI list shows all 13 tools", lambda: check_cli_list(env))
+        check(f"CLI list shows all {len(EXPECTED_TOOLS)} tools", lambda: check_cli_list(env))
         check("CLI doctor runs", lambda: check_doctor(env))
         check("empty_folders: scan, apply, undo restores", lambda: check_empty_folders(env))
         check("rename: scan, apply, undo restores names", lambda: check_rename_undo(env))
